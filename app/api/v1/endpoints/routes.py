@@ -4,10 +4,22 @@ All HTTP endpoints for prediction, training, chat, and agent services.
 
 Changes in this revision
 ------------------------
+* ``predict`` endpoint no longer accepts ``model_name`` in the request body.
+  The system selects the best model automatically via ``ModelSelector``.
+
+* ``predict`` response now includes the full fused signal fields
+  (``fused_direction``, ``fused_confidence``, ``fused_probability``,
+  ``fusion_narrative``, ``fusion_applied``, ``news_sentiment``,
+  ``news_items``).
+
+* New ``GET /predict/leaderboard/{ticker}`` endpoint exposes the model
+  leaderboard for a ticker — useful for operator introspection and
+  debugging without hitting internal files directly.
+
+* ``batch_predict`` endpoint also drops ``model_name``.
+
 * ``ingest_documents`` handles both ``source_type="text"`` and
-  ``source_type="url"`` branches, delegating to the appropriate
-  ``RAGPipeline`` method.  URL fetch errors surface as 502 Bad Gateway
-  (external dependency failure) rather than 500 Internal Server Error.
+  ``source_type="url"`` (unchanged from previous revision).
 """
 
 from __future__ import annotations
@@ -19,7 +31,9 @@ from app.api.schemas import (
     BatchPredictionRequest,
     ChatRequest, ChatResponse as ChatResponseSchema,
     IngestRequest, IngestResponse,
+    LeaderboardEntry, LeaderboardResponse,
     MarketDataRequest, MarketDataSummary,
+    NewsItemSchema,
     PredictionRequest, PredictionResult, SHAPFeature,
     TrainRequest, TrainResponse,
 )
@@ -39,6 +53,7 @@ from app.ml.feature_engineering import FeatureEngineer
 from app.ml.training.trainer import ModelTrainer
 from app.rag.llm_chat import FinancialChatSystem
 from app.rag.rag_pipeline import RAGPipeline
+from app.services.model_selector import ModelSelector
 from app.services.prediction_service import PredictionService
 from configs.settings import settings
 
@@ -47,9 +62,10 @@ logger = get_logger("api.routes")
 # ── Shared service singletons ─────────────────────────────────────────────────
 
 _prediction_service: PredictionService | None = None
-_rag_pipeline: RAGPipeline | None = None
-_chat_system: FinancialChatSystem | None = None
-_trainer: ModelTrainer | None = None
+_rag_pipeline:       RAGPipeline | None       = None
+_chat_system:        FinancialChatSystem | None = None
+_trainer:            ModelTrainer | None       = None
+_selector:           ModelSelector | None      = None
 
 
 def _get_prediction_service() -> PredictionService:
@@ -80,6 +96,13 @@ def _get_trainer() -> ModelTrainer:
     return _trainer
 
 
+def _get_selector() -> ModelSelector:
+    global _selector
+    if _selector is None:
+        _selector = ModelSelector()
+    return _selector
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prediction Router
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,15 +114,49 @@ prediction_router = APIRouter(prefix="/predict", tags=["Predictions"])
 async def predict(request: PredictionRequest) -> PredictionResult:
     """
     Generate a next-day price direction prediction for a stock.
-    Trains a model on demand if no artifact exists for the ticker/model pair.
+
+    The system automatically selects the best-performing trained model for
+    the requested ticker (highest walk-forward ROC-AUC).  If no trained
+    model exists, the system trains one on demand.
+
+    The response includes both the raw ML signal (SHAP-driven) and a
+    fused signal that reconciles the ML prediction with current news
+    sentiment via LLM synthesis.
     """
     try:
         svc  = _get_prediction_service()
         resp = svc.predict(
             request.ticker,
-            model_name=request.model_name,
             use_cache=request.use_cache,
         )
+
+        # ── Map fused signal fields ───────────────────────────────────────
+        fused = resp.fused_signal
+        if fused:
+            fused_direction   = fused.final_direction
+            fused_confidence  = fused.final_confidence
+            fused_probability = fused.fusion_probability
+            fusion_narrative  = fused.synthesis_narrative
+            fusion_applied    = fused.fusion_applied
+            news_sentiment    = fused.news_sentiment
+            news_items        = [
+                NewsItemSchema(
+                    title=n.title,
+                    snippet=n.snippet,
+                    url=n.url,
+                )
+                for n in fused.news_items
+            ]
+        else:
+            # Fusion was not run (LLM not configured, etc.)
+            fused_direction   = "BULLISH" if resp.prediction == 1 else "BEARISH"
+            fused_confidence  = resp.confidence_label.upper()
+            fused_probability = resp.p_bullish
+            fusion_narrative  = resp.narrative
+            fusion_applied    = False
+            news_sentiment    = "neutral"
+            news_items        = []
+
         return PredictionResult(
             ticker=resp.ticker,
             model_name=resp.model_name,
@@ -115,7 +172,16 @@ async def predict(request: PredictionRequest) -> PredictionResult:
                 SHAPFeature(**f)
                 for f in resp.shap_explanation.get("top_features", [])
             ],
+            # Fused signal
+            fused_direction=fused_direction,
+            fused_confidence=fused_confidence,
+            fused_probability=fused_probability,
+            fusion_narrative=fusion_narrative,
+            fusion_applied=fusion_applied,
+            news_sentiment=news_sentiment,
+            news_items=news_items,
         )
+
     except ModelNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except (DataIngestionError, DataValidationError, InsufficientDataError) as e:
@@ -130,23 +196,50 @@ async def predict(request: PredictionRequest) -> PredictionResult:
 
 @prediction_router.post("/batch", response_model=dict)
 async def batch_predict(request: BatchPredictionRequest) -> dict:
-    """Generate predictions for multiple tickers at once."""
+    """
+    Generate predictions for multiple tickers at once.
+    The best model is selected independently per ticker.
+    """
     svc     = _get_prediction_service()
-    results = svc.batch_predict(request.tickers, model_name=request.model_name)
+    results = svc.batch_predict(request.tickers)
     return {
         ticker: (
             {
-                "prediction": "BULLISH" if r.prediction == 1 else "BEARISH",
-                "probability": r.probability,
-                "p_bullish":   r.p_bullish,
-                "p_bearish":   r.p_bearish,
-                "confidence":  r.confidence_label,
+                "prediction":       "BULLISH" if r.prediction == 1 else "BEARISH",
+                "probability":      r.probability,
+                "p_bullish":        r.p_bullish,
+                "p_bearish":        r.p_bearish,
+                "confidence":       r.confidence_label,
+                "model_selected":   r.model_name,
+                "fused_direction":  r.fused_signal.final_direction if r.fused_signal else "N/A",
+                "fusion_applied":   r.fused_signal.fusion_applied if r.fused_signal else False,
             }
             if not isinstance(r, str)
             else {"error": r}
         )
         for ticker, r in results.items()
     }
+
+
+@prediction_router.get("/leaderboard/{ticker}", response_model=LeaderboardResponse)
+async def model_leaderboard(ticker: str) -> LeaderboardResponse:
+    """
+    Return the model performance leaderboard for a given ticker.
+
+    Shows all trained models ranked by walk-forward ROC-AUC and indicates
+    which model the system would auto-select.  Useful for operator
+    introspection and debugging.
+    """
+    ticker   = ticker.upper().strip()
+    selector = _get_selector()
+    board    = selector.leaderboard(ticker)
+    selected = selector.select(ticker)
+
+    return LeaderboardResponse(
+        ticker=ticker,
+        entries=[LeaderboardEntry(**e) for e in board],
+        selected_model=selected,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,7 +253,10 @@ training_router = APIRouter(prefix="/train", tags=["Training"])
 async def train_model(request: TrainRequest) -> TrainResponse:
     """
     Train a new model for a given ticker and persist the artifact.
-    This may take several minutes for HPO runs.
+
+    ``model_name`` is an operator-level parameter retained here because
+    training is not a user-facing action.  The trained model is
+    automatically registered in the leaderboard via its metadata file.
     """
     try:
         raw_df     = ingest_market_data(request.ticker, period_years=request.period_years)
@@ -229,21 +325,15 @@ async def ingest_documents(request: IngestRequest) -> IngestResponse:
 
     * ``"text"`` — ingest one or more raw text strings directly.
     * ``"url"``  — fetch a web article by URL and ingest its content.
-
-    URL ingestion errors from the remote server (timeouts, HTTP 4xx/5xx)
-    are returned as **502 Bad Gateway** to distinguish them from internal
-    server errors (500).  Duplicate URL ingestion returns 200 with
-    ``duplicate: true`` in the response body.
     """
     rag = _get_rag()
 
-    # ── Text ingestion ────────────────────────────────────────────────────────
     if request.source_type == "text":
         try:
             rag.ingest_texts(request.texts, source=request.source)
             return IngestResponse(
                 ingested_count=len(request.texts),
-                chunks_added=0,          # chunk count not tracked per-call in text mode
+                chunks_added=0,
                 source_type="text",
                 message=(
                     f"Successfully ingested {len(request.texts)} "
@@ -255,15 +345,10 @@ async def ingest_documents(request: IngestRequest) -> IngestResponse:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
             )
 
-    # ── URL ingestion ─────────────────────────────────────────────────────────
-    # source_type == "url" is guaranteed by the schema validator at this point.
     url_str = str(request.url)
     try:
         result = rag.ingest_url(url_str)
     except RAGError as e:
-        # Distinguish external fetch failures (502) from internal errors (500).
-        # A RAGError whose message contains "HTTP" or "timed out" originates
-        # from the remote server, not from our pipeline.
         msg = str(e)
         is_external = any(kw in msg for kw in ("HTTP ", "timed out", "fetch"))
         raise HTTPException(

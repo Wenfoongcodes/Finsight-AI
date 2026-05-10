@@ -1,22 +1,31 @@
 """
 FinSight AI — Redesigned Professional Dashboard
-Institutional-grade dark terminal aesthetic with refined typography,
-animated data cards, and a clean read-only interface.
+Institutional-grade dark terminal aesthetic.
 
 Changes in this revision
 ------------------------
-* Knowledge base sidebar now has two tabs: "Paste Text" and "From URL".
-  URL tab accepts an article URL, calls POST /rag/ingest with source_type="url",
-  and shows article title, char count, and chunk count on success.
-* Prediction tab now shows p_bullish / p_bearish as a probability bar so raw
-  model confidence is always visible, not just the directional probability.
-* Market data tab adds a 52-week closing price sparkline chart.
-* Chat tab generates a UUID-based session_id on first load so each browser
-  session is isolated from other users.
-* Chat message container has a fixed max-height with overflow-y: auto so
-  long conversations don't push the input box offscreen.
-* Agent tab shows a spinner with per-step status during tool execution.
-* All API calls show a retry button when the backend is offline.
+* Model selector removed from sidebar.  The system now auto-selects the
+  best model per ticker via ModelSelector.  An informational badge
+  ("Auto-selected: XGBoost · AUC 0.583") is shown in the prediction tab
+  so the user knows which model was used — without being burdened by
+  the choice.
+
+* Prediction tab restructured around the FUSED SIGNAL as the primary
+  output.  The fused direction (BULLISH / BEARISH / NEUTRAL) and its
+  LLM synthesis narrative are shown at the top.  The raw ML signal is
+  presented below as "Quantitative Signal" for transparency.
+
+* News items used in fusion are shown in a collapsible section so the
+  user can audit the sources that influenced the verdict.
+
+* NEUTRAL is a new possible fused direction, displayed in amber.
+
+* fusion_applied=False shows a subtle degraded-mode banner so users know
+  when news fusion was unavailable (e.g. no LLM key set).
+
+* 52-week sparkline chart retained from previous revision.
+
+* Chat tab and Agent tab unchanged except for minor session_id wiring.
 """
 
 from __future__ import annotations
@@ -36,14 +45,6 @@ import streamlit as st
 API_BASE = "http://localhost:8000/api/v1"
 
 TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "JPM", "GS", "SPY"]
-MODELS  = ["xgboost", "lightgbm", "random_forest", "logistic_regression"]
-
-MODEL_LABELS = {
-    "xgboost":             "XGBoost",
-    "lightgbm":            "LightGBM",
-    "random_forest":       "Random Forest",
-    "logistic_regression": "Logistic Regression",
-}
 
 st.set_page_config(
     page_title="FinSight AI",
@@ -71,6 +72,7 @@ st.markdown("""
     --accent-green:   #00e676;
     --accent-red:     #ff3d57;
     --accent-amber:   #ffc107;
+    --accent-purple:  #b388ff;
     --text-primary:   #e8edf2;
     --text-secondary: #7a8fa8;
     --text-muted:     #3d5068;
@@ -217,155 +219,190 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .status-offline { background: var(--accent-red); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-.section-label {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--text-muted);
+/* ── Fused signal card ── */
+.fused-card {
+    border-radius: 10px;
+    padding: 1.8rem 2rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
     margin-bottom: 1rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border);
 }
-.signal-card { border-radius: 8px; padding: 1.5rem; text-align: center; position: relative; overflow: hidden; }
-.signal-bullish { background: linear-gradient(135deg, rgba(0,230,118,0.08) 0%, rgba(0,230,118,0.03) 100%); border: 1px solid rgba(0,230,118,0.3); }
-.signal-bearish { background: linear-gradient(135deg, rgba(255,61,87,0.08) 0%, rgba(255,61,87,0.03) 100%); border: 1px solid rgba(255,61,87,0.3); }
-.signal-label { font-family: var(--font-display); font-size: 2rem; font-weight: 700; letter-spacing: 0.05em; margin: 0; }
-.signal-bullish .signal-label { color: var(--accent-green); }
-.signal-bearish .signal-label { color: var(--accent-red); }
-.signal-sublabel { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-secondary); margin-top: 0.3rem; }
+.fused-bullish {
+    background: linear-gradient(135deg, rgba(0,230,118,0.10) 0%, rgba(0,230,118,0.03) 100%);
+    border: 1px solid rgba(0,230,118,0.40);
+}
+.fused-bearish {
+    background: linear-gradient(135deg, rgba(255,61,87,0.10) 0%, rgba(255,61,87,0.03) 100%);
+    border: 1px solid rgba(255,61,87,0.40);
+}
+.fused-neutral {
+    background: linear-gradient(135deg, rgba(255,193,7,0.10) 0%, rgba(255,193,7,0.03) 100%);
+    border: 1px solid rgba(255,193,7,0.40);
+}
+.fused-label {
+    font-family: var(--font-display);
+    font-size: 2.6rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    margin: 0;
+    line-height: 1;
+}
+.fused-bullish  .fused-label  { color: var(--accent-green); }
+.fused-bearish  .fused-label  { color: var(--accent-red);   }
+.fused-neutral  .fused-label  { color: var(--accent-amber); }
+.fused-sublabel {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-top: 0.4rem;
+}
+.fused-conf-badge {
+    display: inline-block;
+    margin-top: 0.7rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 500;
+}
+.conf-high     { background: rgba(0,230,118,0.15); color: var(--accent-green); border: 1px solid rgba(0,230,118,0.3); }
+.conf-moderate { background: rgba(255,193,7,0.15); color: var(--accent-amber); border: 1px solid rgba(255,193,7,0.3); }
+.conf-low      { background: rgba(255,61,87,0.12); color: var(--accent-red);   border: 1px solid rgba(255,61,87,0.25); }
 
-.narrative-block {
+/* ── Synthesis narrative ── */
+.synthesis-block {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--accent-cyan);
+    border-left: 3px solid var(--accent-purple);
     border-radius: 0 6px 6px 0;
     padding: 1.2rem 1.5rem;
     font-size: 0.9rem;
-    line-height: 1.7;
+    line-height: 1.75;
+    color: var(--text-primary);
+    margin-bottom: 1rem;
+}
+.synthesis-label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent-purple);
+    margin-bottom: 0.4rem;
+}
+
+/* ── ML sub-signal ── */
+.ml-signal-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+.ml-stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+}
+.ml-stat-label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.35rem;
+}
+.ml-stat-value {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    font-weight: 500;
     color: var(--text-primary);
 }
 
-/* Chat area: fixed height with scroll so input stays visible */
-.chat-scroll-area {
-    max-height: 420px;
-    overflow-y: auto;
-    padding-right: 0.5rem;
+/* ── Auto-model badge ── */
+.model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: rgba(0,212,255,0.07);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 4px;
+    padding: 0.2rem 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--accent-cyan);
     margin-bottom: 1rem;
 }
-.chat-bubble-user {
-    background: rgba(0,212,255,0.06);
-    border: 1px solid rgba(0,212,255,0.15);
-    border-radius: 0 10px 10px 10px;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 0;
-    font-size: 0.88rem;
-}
-.chat-bubble-ai {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px 10px 10px 0;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 0;
-    font-size: 0.88rem;
-    border-left: 2px solid var(--accent-cyan);
-}
-.chat-role {
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-bottom: 0.3rem;
-}
 
-.tool-chip {
-    display: inline-block;
-    background: rgba(0,212,255,0.08);
-    border: 1px solid rgba(0,212,255,0.25);
-    border-radius: 4px;
-    padding: 0.2rem 0.6rem;
+/* ── Degraded mode banner ── */
+.degraded-banner {
+    background: rgba(255,193,7,0.07);
+    border: 1px solid rgba(255,193,7,0.25);
+    border-radius: 6px;
+    padding: 0.6rem 1rem;
     font-family: var(--font-mono);
     font-size: 0.75rem;
-    color: var(--accent-cyan);
-    margin: 0.15rem;
+    color: var(--accent-amber);
+    margin-bottom: 1rem;
 }
 
+/* ── News items ── */
+.news-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+}
+.news-title {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 0.3rem;
+}
+.news-snippet {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+.news-url {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* ── Prob bar ── */
+.prob-bar-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
+.prob-bar-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
+.prob-bar-track { height: 8px; background: var(--bg-elevated); border-radius: 4px; position: relative; overflow: hidden; }
+.prob-bar-fill-bull { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent-green); border-radius: 4px 0 0 4px; }
+.prob-bar-fill-bear { position: absolute; right: 0; top: 0; height: 100%; background: var(--accent-red); border-radius: 0 4px 4px 0; }
+.prob-bar-labels { display: flex; justify-content: space-between; margin-top: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; }
+
+.section-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+
+.narrative-block { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-cyan); border-radius: 0 6px 6px 0; padding: 1.2rem 1.5rem; font-size: 0.9rem; line-height: 1.7; color: var(--text-primary); }
+
+.chat-scroll-area { max-height: 420px; overflow-y: auto; padding-right: 0.5rem; margin-bottom: 1rem; }
+.chat-bubble-user { background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.15); border-radius: 0 10px 10px 10px; padding: 0.8rem 1rem; margin: 0.5rem 0; font-size: 0.88rem; }
+.chat-bubble-ai { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px 10px 10px 0; padding: 0.8rem 1rem; margin: 0.5rem 0; font-size: 0.88rem; border-left: 2px solid var(--accent-cyan); }
+.chat-role { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.3rem; }
+.tool-chip { display: inline-block; background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.25); border-radius: 4px; padding: 0.2rem 0.6rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent-cyan); margin: 0.15rem; }
 .market-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 1.5rem 0; }
 .market-stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
 .market-stat-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.4rem; }
 .market-stat-value { font-family: var(--font-mono); font-size: 1.2rem; font-weight: 500; color: var(--text-primary); }
-
 .placeholder-state { text-align: center; padding: 4rem 2rem; border: 1px dashed var(--border-bright); border-radius: 10px; margin: 2rem 0; }
 .placeholder-icon { font-size: 2.5rem; margin-bottom: 1rem; opacity: 0.4; }
 .placeholder-text { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); letter-spacing: 0.05em; }
-
-.sidebar-section-title {
-    font-family: var(--font-mono) !important;
-    font-size: 0.68rem !important;
-    letter-spacing: 0.2em !important;
-    text-transform: uppercase !important;
-    color: var(--text-muted) !important;
-    margin: 1.2rem 0 0.6rem 0 !important;
-    padding-bottom: 0.4rem !important;
-    border-bottom: 1px solid var(--border) !important;
-}
-
-.ingest-result {
-    background: var(--bg-elevated);
-    border: 1px solid rgba(0,230,118,0.3);
-    border-left: 3px solid var(--accent-green);
-    border-radius: 0 6px 6px 0;
-    padding: 0.8rem 1rem;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-top: 0.5rem;
-    line-height: 1.6;
-}
+.sidebar-section-title { font-family: var(--font-mono) !important; font-size: 0.68rem !important; letter-spacing: 0.2em !important; text-transform: uppercase !important; color: var(--text-muted) !important; margin: 1.2rem 0 0.6rem 0 !important; padding-bottom: 0.4rem !important; border-bottom: 1px solid var(--border) !important; }
+.ingest-result { background: var(--bg-elevated); border: 1px solid rgba(0,230,118,0.3); border-left: 3px solid var(--accent-green); border-radius: 0 6px 6px 0; padding: 0.8rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; line-height: 1.6; }
 .ingest-result .ingest-title { color: var(--text-primary); font-weight: 500; margin-bottom: 0.2rem; }
-.prob-bar-wrap {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1rem 1.2rem;
-}
-.prob-bar-label {
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-bottom: 0.5rem;
-}
-.prob-bar-track {
-    height: 8px;
-    background: var(--bg-elevated);
-    border-radius: 4px;
-    position: relative;
-    overflow: hidden;
-}
-.prob-bar-fill-bull {
-    position: absolute;
-    left: 0; top: 0; height: 100%;
-    background: var(--accent-green);
-    border-radius: 4px 0 0 4px;
-    transition: width 0.4s ease;
-}
-.prob-bar-fill-bear {
-    position: absolute;
-    right: 0; top: 0; height: 100%;
-    background: var(--accent-red);
-    border-radius: 0 4px 4px 0;
-    transition: width 0.4s ease;
-}
-.prob-bar-labels {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 0.4rem;
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -376,14 +413,11 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 
 def api_post(endpoint: str, payload: dict) -> Optional[dict]:
     try:
-        resp = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=60)
+        resp = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=90)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
-        st.error(
-            "Cannot connect to the FinSight API. "
-            "Make sure the server is running on port 8000."
-        )
+        st.error("Cannot connect to the FinSight API. Make sure the server is running on port 8000.")
         return None
     except requests.exceptions.HTTPError as e:
         try:
@@ -415,9 +449,6 @@ for key, default in [
     ("chat_history",    []),
     ("last_prediction", None),
     ("market_summary",  None),
-    ("market_prices",   None),   # list of (date, close) for sparkline
-    # Stable UUID for this browser session — isolates conversation memory
-    # from other users on the same server instance.
     ("session_id",      str(uuid.uuid4())),
 ]:
     if key not in st.session_state:
@@ -461,14 +492,16 @@ with st.sidebar:
     if custom_ticker:
         selected_ticker = custom_ticker
 
-    # ── Model ────────────────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Model</div>', unsafe_allow_html=True)
-    selected_model = st.selectbox(
-        "Model",
-        MODELS,
-        format_func=lambda m: MODEL_LABELS.get(m, m),
-        index=0,
-        label_visibility="collapsed",
+    # ── Model selection is automatic — show info note ────────────────────────
+    st.markdown('<div class="sidebar-section-title">Model Selection</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-family:var(--font-mono);font-size:0.72rem;'
+        'color:var(--text-muted);line-height:1.6;padding:0.5rem 0;">'
+        '⚙ The system automatically selects the best-performing model '
+        'for each ticker based on walk-forward ROC-AUC. '
+        'The selected model is shown in the prediction results.'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
     # ── Knowledge Base ───────────────────────────────────────────────────────
@@ -554,7 +587,7 @@ with col_title:
                 margin-bottom:0.25rem;">
         {selected_ticker}
         <span style="color:var(--text-muted);font-weight:400;font-size:1.1rem;">
-            &nbsp;/&nbsp; {MODEL_LABELS.get(selected_model, selected_model)}
+            &nbsp;/&nbsp; AI-Driven Signal Fusion
         </span>
     </div>
     """, unsafe_allow_html=True)
@@ -570,62 +603,106 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 
 tab_predict, tab_market, tab_chat, tab_agent = st.tabs([
-    "Prediction", "Market Data", "AI Chat", "AI Agent"
+    "Signal", "Market Data", "AI Chat", "AI Agent"
 ])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 1 — PREDICTION
+# TAB 1 — SIGNAL (formerly Prediction)
 # ═════════════════════════════════════════════════════════════════════════════
 
 with tab_predict:
     run_col, _ = st.columns([2, 6])
     with run_col:
         run_clicked = st.button(
-            "▶  Run Prediction", type="primary", use_container_width=True
+            "▶  Analyse Signal", type="primary", use_container_width=True
         )
 
     if run_clicked:
-        with st.spinner("Running inference pipeline…"):
+        with st.spinner("Running ML inference and news fusion…"):
             result = api_post(
                 "/predict/",
-                {"ticker": selected_ticker, "model_name": selected_model, "use_cache": True},
+                {"ticker": selected_ticker, "use_cache": True},
             )
             if result:
                 st.session_state.last_prediction = result
 
     pred = st.session_state.last_prediction
 
-    if pred:
-        label   = pred["prediction_label"]
-        prob    = pred["probability"]
-        conf    = pred["confidence_label"].upper()
-        close   = pred["latest_close"]
-        p_bull  = pred.get("p_bullish", 0.5)
-        p_bear  = pred.get("p_bearish", 0.5)
-        is_bull = label == "BULLISH"
+    if pred and pred.get("ticker") == selected_ticker:
+        # ── Auto-selected model badge ────────────────────────────────────────
+        model_used = pred.get("model_name", "unknown")
+        st.markdown(
+            f'<div class="model-badge">'
+            f'⚙ Auto-selected: <strong>{model_used.replace("_", " ").title()}</strong>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
-        # ── Signal + probability bar + metrics ──────────────────────────────
-        c_sig, c_probs, c_conf, c_close = st.columns([2, 2, 1, 1])
-
-        with c_sig:
-            card_cls = "signal-bullish" if is_bull else "signal-bearish"
-            arrow    = "↑" if is_bull else "↓"
+        # ── Fusion status banner ─────────────────────────────────────────────
+        fusion_applied = pred.get("fusion_applied", False)
+        if not fusion_applied:
             st.markdown(
-                f'<div class="signal-card {card_cls}">'
-                f'<div class="signal-label">{arrow} {label}</div>'
-                f'<div class="signal-sublabel">Next-day direction signal</div>'
+                '<div class="degraded-banner">'
+                '⚠ News fusion unavailable — showing ML-only signal. '
+                'Set OPENAI_API_KEY to enable full signal fusion.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ════════════════════════════════════════════════════════════════════
+        # PRIMARY: FUSED SIGNAL
+        # ════════════════════════════════════════════════════════════════════
+        st.markdown('<div class="section-label">Fused Signal — ML + News Synthesis</div>',
+                    unsafe_allow_html=True)
+
+        fused_dir  = pred.get("fused_direction", "UNKNOWN")
+        fused_conf = pred.get("fused_confidence", "LOW").upper()
+        fused_prob = pred.get("fused_probability", 0.5)
+        fusion_nar = pred.get("fusion_narrative", "")
+        news_sent  = pred.get("news_sentiment", "neutral")
+
+        card_cls_map = {
+            "BULLISH": "fused-bullish",
+            "BEARISH": "fused-bearish",
+            "NEUTRAL": "fused-neutral",
+        }
+        arrow_map = {"BULLISH": "↑", "BEARISH": "↓", "NEUTRAL": "↔"}
+        conf_css  = {
+            "HIGH":     "conf-high",
+            "MODERATE": "conf-moderate",
+            "LOW":      "conf-low",
+        }.get(fused_conf, "conf-low")
+
+        card_css = card_cls_map.get(fused_dir, "fused-neutral")
+        arrow    = arrow_map.get(fused_dir, "↔")
+
+        c_fused, c_fused_prob = st.columns([3, 2])
+
+        with c_fused:
+            st.markdown(
+                f'<div class="fused-card {card_css}">'
+                f'<div class="fused-label">{arrow} {fused_dir}</div>'
+                f'<div class="fused-sublabel">Fused direction · Next-day outlook</div>'
+                f'<div class="fused-conf-badge {conf_css}">{fused_conf} CONFIDENCE</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-        with c_probs:
-            # Visual probability bar showing P(bull) vs P(bear) side-by-side
-            bull_pct = round(p_bull * 100, 1)
-            bear_pct = round(p_bear * 100, 1)
+        with c_fused_prob:
+            # Bull/bear probability bar (fused)
+            bull_pct = round(fused_prob * 100, 1)
+            bear_pct = round((1 - fused_prob) * 100, 1)
+            # News sentiment badge
+            sent_color = {
+                "positive": "var(--accent-green)",
+                "negative": "var(--accent-red)",
+                "neutral":  "var(--text-secondary)",
+            }.get(news_sent, "var(--text-secondary)")
+
             st.markdown(
-                f'<div class="prob-bar-wrap">'
-                f'<div class="prob-bar-label">Bull / Bear Probability</div>'
+                f'<div class="prob-bar-wrap" style="margin-bottom:0.75rem;">'
+                f'<div class="prob-bar-label">Fused Bull / Bear Probability</div>'
                 f'<div class="prob-bar-track">'
                 f'  <div class="prob-bar-fill-bull" style="width:{bull_pct}%;"></div>'
                 f'  <div class="prob-bar-fill-bear" style="width:{bear_pct}%;"></div>'
@@ -634,53 +711,92 @@ with tab_predict:
                 f'  <span style="color:var(--accent-green);">▲ {bull_pct}%</span>'
                 f'  <span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
                 f'</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        conf_color = {
-            "HIGH":     "var(--accent-green)",
-            "MODERATE": "var(--accent-amber)",
-        }.get(conf, "var(--text-secondary)")
-
-        with c_conf:
-            st.markdown(
+                f'</div>'
                 f'<div style="background:var(--bg-card);border:1px solid var(--border);'
-                f'border-radius:8px;padding:1.2rem 1rem;text-align:center;">'
-                f'<div style="font-family:var(--font-mono);font-size:0.68rem;'
+                f'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
+                f'<div style="font-family:var(--font-mono);font-size:0.65rem;'
                 f'letter-spacing:0.15em;text-transform:uppercase;'
-                f'color:var(--text-muted);margin-bottom:0.4rem;">Confidence</div>'
-                f'<div style="font-family:var(--font-mono);font-size:1.4rem;'
-                f'font-weight:500;color:{conf_color};">{conf}</div>'
+                f'color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
+                f'<div style="font-family:var(--font-mono);font-size:1.1rem;'
+                f'font-weight:500;color:{sent_color};">{news_sent.upper()}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-        with c_close:
-            st.markdown(
-                f'<div style="background:var(--bg-card);border:1px solid var(--border);'
-                f'border-radius:8px;padding:1.2rem 1rem;text-align:center;">'
-                f'<div style="font-family:var(--font-mono);font-size:0.68rem;'
-                f'letter-spacing:0.15em;text-transform:uppercase;'
-                f'color:var(--text-muted);margin-bottom:0.4rem;">Last Close</div>'
-                f'<div style="font-family:var(--font-mono);font-size:1.4rem;'
-                f'font-weight:500;color:var(--text-primary);">${close:,.2f}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
-
-        # ── Narrative ──────────────────────────────────────────────────────
-        st.markdown('<div class="section-label">Model Reasoning</div>', unsafe_allow_html=True)
+        # ── LLM Synthesis Narrative ──────────────────────────────────────────
+        st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="narrative-block">{pred["narrative"]}</div>',
+            f'<div class="synthesis-label">AI Synthesis Reasoning</div>'
+            f'<div class="synthesis-block">{fusion_nar}</div>',
             unsafe_allow_html=True,
         )
+
+        # ── News Sources ─────────────────────────────────────────────────────
+        news_items = pred.get("news_items", [])
+        if news_items:
+            with st.expander(f"📰 News sources used in fusion ({len(news_items)} articles)"):
+                for item in news_items:
+                    st.markdown(
+                        f'<div class="news-item">'
+                        f'<div class="news-title">{item.get("title","")}</div>'
+                        f'<div class="news-snippet">{item.get("snippet","")}</div>'
+                        f'<div class="news-url">{item.get("url","")}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        # ════════════════════════════════════════════════════════════════════
+        # SECONDARY: RAW ML SIGNAL
+        # ════════════════════════════════════════════════════════════════════
+        st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Quantitative Signal — ML Model Only</div>',
+                    unsafe_allow_html=True)
+
+        ml_dir    = pred.get("prediction_label", "—")
+        ml_prob   = pred.get("probability", 0.0)
+        ml_conf   = pred.get("confidence_label", "—").upper()
+        p_bull    = pred.get("p_bullish", 0.5)
+        p_bear    = pred.get("p_bearish", 0.5)
+        close     = pred.get("latest_close", 0.0)
+
+        ml_dir_color = {
+            "BULLISH": "var(--accent-green)",
+            "BEARISH": "var(--accent-red)",
+        }.get(ml_dir, "var(--text-secondary)")
+
+        st.markdown(
+            f'<div class="ml-signal-row">'
+            f'<div class="ml-stat">'
+            f'  <div class="ml-stat-label">ML Direction</div>'
+            f'  <div class="ml-stat-value" style="color:{ml_dir_color};">{ml_dir}</div>'
+            f'</div>'
+            f'<div class="ml-stat">'
+            f'  <div class="ml-stat-label">P(Bull) / P(Bear)</div>'
+            f'  <div class="ml-stat-value">{p_bull:.1%} / {p_bear:.1%}</div>'
+            f'</div>'
+            f'<div class="ml-stat">'
+            f'  <div class="ml-stat-label">ML Confidence</div>'
+            f'  <div class="ml-stat-value">{ml_conf}</div>'
+            f'</div>'
+            f'<div class="ml-stat">'
+            f'  <div class="ml-stat-label">Last Close</div>'
+            f'  <div class="ml-stat-value">${close:,.2f}</div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ML narrative (SHAP)
+        st.markdown(
+            f'<div class="narrative-block">{pred.get("narrative","")}</div>',
+            unsafe_allow_html=True,
+        )
+
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
 
-        # ── SHAP Chart ─────────────────────────────────────────────────────
-        st.markdown('<div class="section-label">SHAP Feature Attribution</div>', unsafe_allow_html=True)
+        # ── SHAP Chart ───────────────────────────────────────────────────────
+        st.markdown('<div class="section-label">SHAP Feature Attribution</div>',
+                    unsafe_allow_html=True)
         features = pred.get("top_features", [])
         if features:
             df_shap = pd.DataFrame(features)
@@ -700,7 +816,7 @@ with tab_predict:
             ))
             fig.update_layout(
                 margin=dict(l=10, r=60, t=10, b=10),
-                height=380,
+                height=340,
                 plot_bgcolor="rgba(0,0,0,0)",
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(family="DM Mono, monospace", color="#7a8fa8", size=11),
@@ -720,11 +836,19 @@ with tab_predict:
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+    elif pred and pred.get("ticker") != selected_ticker:
+        # Stale result from a different ticker
+        st.markdown("""
+        <div class="placeholder-state">
+            <div class="placeholder-icon">◈</div>
+            <div class="placeholder-text">Ticker changed — click Analyse Signal to refresh</div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         st.markdown("""
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
-            <div class="placeholder-text">Select a ticker and model, then click Run Prediction</div>
+            <div class="placeholder-text">Select a ticker and click Analyse Signal</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -750,7 +874,6 @@ with tab_market:
 
     if mkt and mkt.get("ticker") == selected_ticker:
         st.markdown('<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True)
-
         st.markdown(
             f'<div class="market-stat-row">'
             f'<div class="market-stat"><div class="market-stat-label">Trading Days</div>'
@@ -767,7 +890,6 @@ with tab_market:
             unsafe_allow_html=True,
         )
 
-        # 52W position bar
         pct = (mkt["close_mean"] - mkt["close_min"]) / max(
             mkt["close_max"] - mkt["close_min"], 0.01
         ) * 100
@@ -796,45 +918,31 @@ with tab_market:
             unsafe_allow_html=True,
         )
 
-        # ── Price sparkline ─────────────────────────────────────────────────
-        # Fetch raw OHLCV for sparkline using yfinance directly
         st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
         st.markdown('<div class="section-label">52-Week Closing Price</div>', unsafe_allow_html=True)
         try:
             import yfinance as yf
-            df_hist = yf.download(
-                selected_ticker, period="1y", auto_adjust=True, progress=False
-            )
+            df_hist = yf.download(selected_ticker, period="1y", auto_adjust=True, progress=False)
             if not df_hist.empty:
                 closes = df_hist["Close"].squeeze()
                 fig_spark = go.Figure(go.Scatter(
-                    x=closes.index,
-                    y=closes.values,
-                    mode="lines",
+                    x=closes.index, y=closes.values, mode="lines",
                     line=dict(color="#00d4ff", width=1.5),
-                    fill="tozeroy",
-                    fillcolor="rgba(0,212,255,0.05)",
+                    fill="tozeroy", fillcolor="rgba(0,212,255,0.05)",
                     hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>",
                 ))
                 fig_spark.update_layout(
-                    height=200,
-                    margin=dict(l=0, r=0, t=0, b=0),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
+                    height=200, margin=dict(l=0, r=0, t=0, b=0),
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                     xaxis=dict(showgrid=False, showticklabels=True,
-                               tickfont=dict(family="DM Mono, monospace",
-                                             size=10, color="#3d5068")),
+                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068")),
                     yaxis=dict(showgrid=True, gridcolor="rgba(30,45,61,0.6)",
-                               tickfont=dict(family="DM Mono, monospace",
-                                             size=10, color="#3d5068"),
+                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068"),
                                tickprefix="$"),
                     hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d",
                                     font=dict(family="DM Mono, monospace", size=11)),
                 )
-                st.plotly_chart(
-                    fig_spark, use_container_width=True,
-                    config={"displayModeBar": False},
-                )
+                st.plotly_chart(fig_spark, use_container_width=True, config={"displayModeBar": False})
         except Exception:
             st.caption("Price chart unavailable.")
 
@@ -868,7 +976,6 @@ with tab_chat:
     with rag_toggle_col:
         use_rag = st.toggle("RAG", value=True, help="Inject knowledge base context")
 
-    # ── Scrollable message history ──────────────────────────────────────────
     history_html = ""
     if not st.session_state.chat_history:
         history_html = (
@@ -891,10 +998,7 @@ with tab_chat:
                     f'<div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
                 )
 
-    st.markdown(
-        f'<div class="chat-scroll-area">{history_html}</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True)
 
     with st.form("chat_form", clear_on_submit=True):
         input_col, send_col = st.columns([7, 1])
@@ -908,9 +1012,7 @@ with tab_chat:
             submitted = st.form_submit_button("Send", use_container_width=True)
 
     if submitted and user_input.strip():
-        st.session_state.chat_history.append(
-            {"role": "user", "content": user_input}
-        )
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
         with st.spinner(""):
             result = api_post(
                 "/rag/chat",
@@ -976,9 +1078,7 @@ with tab_agent:
 
     run_agent_col, _ = st.columns([2, 6])
     with run_agent_col:
-        agent_clicked = st.button(
-            "▶  Run Agent", type="primary", use_container_width=True
-        )
+        agent_clicked = st.button("▶  Run Agent", type="primary", use_container_width=True)
 
     if agent_clicked:
         if agent_query.strip():
@@ -987,27 +1087,18 @@ with tab_agent:
 
             if result:
                 st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
-
-                # ── Tools used ─────────────────────────────────────────────
                 if result.get("tools_used"):
-                    st.markdown(
-                        '<div class="section-label">Tools Invoked</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown('<div class="section-label">Tools Invoked</div>',
+                                unsafe_allow_html=True)
                     chips = "".join(
                         f'<span class="tool-chip">{t}</span>'
                         for t in result["tools_used"]
                     )
-                    st.markdown(
-                        f'<div style="margin-bottom:1rem;">{chips}</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f'<div style="margin-bottom:1rem;">{chips}</div>',
+                                unsafe_allow_html=True)
 
-                # ── Agent response ──────────────────────────────────────────
-                st.markdown(
-                    '<div class="section-label">Agent Response</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div class="section-label">Agent Response</div>',
+                            unsafe_allow_html=True)
                 st.markdown(
                     f'<div class="narrative-block">{result["response"]}</div>',
                     unsafe_allow_html=True,

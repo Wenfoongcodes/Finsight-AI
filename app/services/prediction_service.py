@@ -1,26 +1,38 @@
 """
 FinSight AI — Prediction Service
-Orchestrates data ingestion → feature engineering → model inference → explanation.
+Orchestrates data ingestion → feature engineering → auto model selection
+→ model inference → SHAP explanation → signal fusion.
 
-Bug fixed in this revision
---------------------------
-``SHAPExplainer.generate_narrative()`` previously received only ``local_exp``
-(the SHAP-internal dict) and recomputed direction + probability from
-``base_value + shap_row.sum()``.  After Platt calibration this lives in a
-*different probability space* from ``model.predict_proba()``, so the narrative
-could say BEARISH (0%) while the signal card showed BULLISH (72%).
+Changes in this revision
+------------------------
+* **Automatic model selection** — ``ModelSelector`` reads persisted training
+  metadata and picks the highest-AUC model for the requested ticker.
+  The caller no longer passes a model name; the service owns that decision.
+  This removes a source of user confusion and makes the pipeline
+  deterministic and auditable.
 
-Fix: pass ``authoritative_prediction=pred`` and
-``authoritative_p_bullish=p_bullish`` explicitly into ``generate_narrative()``.
-These are the values already computed by ``model.predict()`` and
-``model.predict_proba()`` — the same values shown in the signal card — so the
-narrative is now guaranteed to be consistent with every other part of the UI.
+* **Signal fusion** — ``SignalFusionService`` combines the ML signal with
+  live web-searched news via an LLM synthesis step, producing a
+  ``FusedSignal`` that reconciles quantitative and qualitative evidence.
+  The fused verdict is attached to ``PredictionResponse`` alongside the
+  raw ML signal so downstream consumers (API, dashboard) can display both.
+
+* **Graceful degradation** — signal fusion is best-effort.  If the web
+  search or LLM call fails, ``PredictionResponse`` still carries the raw
+  ML prediction; ``fused_signal.fusion_applied`` is ``False``.
+
+Bug fixed in previous revision (retained)
+-----------------------------------------
+``SHAPExplainer.generate_narrative()`` now receives authoritative calibrated
+values (``authoritative_prediction``, ``authoritative_p_bullish``) from
+``model.predict()`` / ``model.predict_proba()``, preventing the narrative
+from contradicting the signal card when Platt scaling shifts probabilities.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 
@@ -30,34 +42,59 @@ from app.ml.data_ingestion import ingest_market_data
 from app.ml.explainability import SHAPExplainer
 from app.ml.feature_engineering import FeatureEngineer
 from app.ml.training.trainer import ModelTrainer
+from app.services.model_selector import FALLBACK_MODEL, ModelSelector
+from app.services.signal_fusion import FusedSignal, SignalFusionService
 from configs.settings import settings
 
 logger = get_logger("prediction_service")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Response dataclass
+# ─────────────────────────────────────────────────────────────────────────────
+
 @dataclass
 class PredictionResponse:
-    """Structured prediction response."""
+    """
+    Structured prediction response.
 
-    ticker: str
-    model_name: str
-    prediction: int           # 0 = bearish, 1 = bullish
-    probability: float        # Directional: P(predicted direction)
-    p_bullish: float          # Raw calibrated P(bullish) — always 0..1
-    p_bearish: float          # Raw calibrated P(bearish) = 1 - p_bullish
-    confidence_label: str     # 'high' | 'moderate' | 'low'
+    Attributes
+    ----------
+    ticker            : Stock ticker symbol.
+    model_name        : Name of the model that produced the ML signal
+                        (auto-selected by ``ModelSelector``).
+    prediction        : Raw ML prediction: 0 = bearish, 1 = bullish.
+    probability       : Directional probability of the *predicted* class.
+    p_bullish         : Calibrated P(bullish) in [0, 1].
+    p_bearish         : Calibrated P(bearish) = 1 − p_bullish.
+    confidence_label  : "high" | "moderate" | "low" (ML-only).
+    shap_explanation  : SHAP local explanation dict.
+    narrative         : ML-only plain-English reasoning (SHAP-based).
+    latest_close      : Most recent closing price.
+    feature_snapshot  : Top-20 feature values at inference time.
+    fused_signal      : Result of signal fusion (None if fusion was skipped
+                        entirely, e.g. LLM not configured).
+    """
+
+    ticker:           str
+    model_name:       str
+    prediction:       int           # 0 = bearish, 1 = bullish
+    probability:      float         # P(predicted direction)
+    p_bullish:        float
+    p_bearish:        float
+    confidence_label: str
     shap_explanation: dict
-    narrative: str
-    latest_close: float
-    feature_snapshot: dict    # last-row feature values (top 20)
+    narrative:        str
+    latest_close:     float
+    feature_snapshot: dict
+    fused_signal:     Optional[FusedSignal] = None
 
 
 def _confidence_label(p_bullish: float) -> str:
     """
     Derive a confidence label from P(bullish).
 
-    Confidence measures distance from the 50/50 baseline — symmetric and
-    independent of direction:
+    Symmetric around 0.5 — measures distance from the 50/50 baseline:
 
         |P(bullish) − 0.5| > 0.15  → 'high'
         |P(bullish) − 0.5| > 0.05  → 'moderate'
@@ -71,43 +108,58 @@ def _confidence_label(p_bullish: float) -> str:
     return "low"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Service
+# ─────────────────────────────────────────────────────────────────────────────
+
 class PredictionService:
     """
-    End-to-end prediction pipeline.
+    End-to-end prediction pipeline with automatic model selection
+    and news-fused signal synthesis.
 
-    Attributes:
-        trainer:  ``ModelTrainer`` instance for loading / saving artifacts.
-        engineer: ``FeatureEngineer`` instance.
+    Attributes
+    ----------
+    trainer:        ``ModelTrainer`` for loading / saving artifacts.
+    engineer:       ``FeatureEngineer`` instance.
+    selector:       ``ModelSelector`` leaderboard.
+    fusion_service: ``SignalFusionService`` for ML + news synthesis.
     """
 
     def __init__(self) -> None:
-        self.trainer  = ModelTrainer()
-        self.engineer = FeatureEngineer()
+        self.trainer        = ModelTrainer()
+        self.engineer       = FeatureEngineer()
+        self.selector       = ModelSelector()
+        self.fusion_service = SignalFusionService()
 
     def predict(
         self,
         ticker: str,
-        model_name: str = "xgboost",
         use_cache: bool = True,
+        run_fusion: bool = True,
     ) -> PredictionResponse:
         """
         Run the full prediction pipeline for a given ticker.
 
+        The model is selected automatically by ``ModelSelector`` based on
+        walk-forward AUC from persisted metadata.  The caller never passes
+        a model name.
+
         Args:
             ticker:     Stock ticker symbol.
-            model_name: Name of the trained model to use.
             use_cache:  Whether to use cached market data.
+            run_fusion: Whether to run signal fusion (web search + LLM).
+                        Set to ``False`` in test environments or when LLM
+                        is not configured.
 
         Returns:
-            ``PredictionResponse`` with prediction, probability, and explanation.
+            ``PredictionResponse`` with ML signal, SHAP explanation,
+            and (when enabled) the fused signal.
 
         Raises:
-            PredictionError: On any pipeline failure.
+            PredictionError: On any unrecoverable pipeline failure.
         """
         try:
-            logger.info(
-                "Prediction pipeline started: ticker=%s model=%s", ticker, model_name
-            )
+            logger.info("Prediction pipeline started: ticker=%s", ticker)
 
             # 1. Ingest
             raw_df = ingest_market_data(ticker, use_cache=use_cache)
@@ -116,12 +168,16 @@ class PredictionService:
             feature_df = self.engineer.build_features(raw_df)
             X, y       = self.engineer.split_X_y(feature_df)
 
-            # 3. Load model — train on demand if no artifact exists yet
+            # 3. Auto-select best model
+            model_name = self.selector.select(ticker)
+            logger.info("[%s] Auto-selected model: %s", ticker, model_name)
+
+            # 4. Load model — train on demand if no artifact exists yet
             try:
                 model, feature_columns = self.trainer.load_model(ticker, model_name)
             except Exception:
                 logger.info(
-                    "No artifact found for %s/%s — training on demand…",
+                    "[%s] No artifact for %s — training on demand…",
                     ticker, model_name,
                 )
                 _, train_result = self.trainer.train(
@@ -131,12 +187,12 @@ class PredictionService:
                     ticker=ticker,
                 )
                 logger.info(
-                    "On-demand training complete: AUC=%.3f",
-                    train_result.mean_roc_auc,
+                    "[%s] On-demand training complete: AUC=%.3f",
+                    ticker, train_result.mean_roc_auc,
                 )
                 model, feature_columns = self.trainer.load_model(ticker, model_name)
 
-            # Align features
+            # 5. Align features
             missing = set(feature_columns) - set(X.columns)
             if missing:
                 raise PredictionError(
@@ -145,33 +201,21 @@ class PredictionService:
                 )
             X_aligned = X[feature_columns]
 
-            # 4. Inference on latest row
-            X_latest = X_aligned.iloc[[-1]]
+            # 6. Inference on latest row
+            X_latest  = X_aligned.iloc[[-1]]
             pred      = int(model.predict(X_latest)[0])
 
             p_bullish = round(float(model.predict_proba(X_latest)[0, 1]), 4)
             p_bearish = round(1.0 - p_bullish, 4)
 
             # Directional probability: confidence of the *predicted* direction.
-            #   BULLISH at p_bullish=0.72 → shows 72.0%
-            #   BEARISH at p_bullish=0.10 → shows 90.0% (1 − 0.10)
             prob = p_bullish if pred == 1 else p_bearish
 
-            # 5. SHAP explanation
+            # 7. SHAP explanation
             explainer = SHAPExplainer(model, feature_columns)
             shap_exp  = explainer.local_explanation(X_latest)
 
-            # 6. Generate narrative using AUTHORITATIVE calibrated values.
-            #
-            #    This is the critical fix: we pass pred and p_bullish from
-            #    model.predict() / model.predict_proba() so the narrative
-            #    always agrees with the signal card and probability display.
-            #
-            #    Without these overrides, generate_narrative() would use
-            #    shap_exp['predicted_class'] and shap_exp['prediction_probability'],
-            #    which come from base_value + shap_row.sum() in the raw
-            #    (uncalibrated) probability space — potentially producing a
-            #    direction that contradicts the calibrated model output.
+            # 8. Generate narrative with authoritative calibrated values
             narrative = explainer.generate_narrative(
                 shap_exp,
                 ticker=ticker,
@@ -179,7 +223,7 @@ class PredictionService:
                 authoritative_p_bullish=p_bullish,
             )
 
-            # 7. Feature snapshot (top 20 features for display)
+            # 9. Feature snapshot (top 20 features for display)
             snapshot = {
                 col: round(float(X_latest.iloc[0][col]), 4)
                 for col in feature_columns[:20]
@@ -199,17 +243,41 @@ class PredictionService:
                 narrative=narrative,
                 latest_close=round(latest_close, 4),
                 feature_snapshot=snapshot,
+                fused_signal=None,
             )
+
+            # 10. Signal fusion (best-effort — never blocks the ML result)
+            if run_fusion and settings.OPENAI_API_KEY:
+                try:
+                    fused = self.fusion_service.fuse(ticker, response)
+                    response.fused_signal = fused
+                    logger.info(
+                        "[%s] Fusion complete: %s → %s (fusion_applied=%s)",
+                        ticker,
+                        "BULLISH" if pred else "BEARISH",
+                        fused.final_direction,
+                        fused.fusion_applied,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Signal fusion skipped (non-critical): %s", ticker, exc
+                    )
+            else:
+                logger.info(
+                    "[%s] Signal fusion skipped (run_fusion=%s, api_key_set=%s)",
+                    ticker, run_fusion, bool(settings.OPENAI_API_KEY),
+                )
 
             logger.info(
                 "Prediction complete: %s → %s "
-                "(p_bull=%.3f, p_bear=%.3f, directional=%.3f, conf=%s)",
+                "(p_bull=%.3f, p_bear=%.3f, directional=%.3f, conf=%s, model=%s)",
                 ticker,
                 "BULLISH" if pred else "BEARISH",
                 p_bullish,
                 p_bearish,
                 prob,
                 response.confidence_label,
+                model_name,
             )
             return response
 
@@ -223,14 +291,14 @@ class PredictionService:
     def batch_predict(
         self,
         tickers: list[str],
-        model_name: str = "xgboost",
+        run_fusion: bool = True,
     ) -> dict[str, PredictionResponse | str]:
         """
         Run predictions for multiple tickers.
 
         Args:
             tickers:    List of ticker symbols.
-            model_name: Model to use for all tickers.
+            run_fusion: Whether to run signal fusion for each ticker.
 
         Returns:
             Dict mapping ticker → ``PredictionResponse`` or error string.
@@ -238,7 +306,7 @@ class PredictionService:
         results: dict[str, PredictionResponse | str] = {}
         for ticker in tickers:
             try:
-                results[ticker] = self.predict(ticker, model_name)
+                results[ticker] = self.predict(ticker, run_fusion=run_fusion)
             except Exception as exc:
                 logger.warning("Prediction failed for %s: %s", ticker, exc)
                 results[ticker] = str(exc)
