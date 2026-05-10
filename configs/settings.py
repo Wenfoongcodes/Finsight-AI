@@ -1,13 +1,23 @@
 """
 FinSight AI — Global Configuration Settings
 Centralizes all environment-driven configuration using Pydantic BaseSettings.
+
+Design notes
+------------
+* All path constants that must exist at runtime are auto-created by the
+  ``_ensure_dirs`` model validator so the application never crashes on a
+  missing directory regardless of how the container or venv is set up.
+* ``LLM_BASE_URL`` is an optional override for the OpenAI client base URL.
+  Leave it unset to use the default OpenAI endpoint.  Set it to the Groq,
+  Azure, or Ollama endpoint when using an alternative provider — no code
+  changes required.
 """
 
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -59,6 +69,11 @@ class Settings(BaseSettings):
     LLM_MODEL: str = Field(default="gpt-4o-mini", env="LLM_MODEL")
     LLM_TEMPERATURE: float = 0.1
     LLM_MAX_TOKENS: int = 1024
+
+    # Optional base URL override for OpenAI-compatible providers (Groq, Azure,
+    # Ollama, etc.).  Leave unset to use the official OpenAI API endpoint.
+    LLM_BASE_URL: Optional[str] = Field(default=None, env="LLM_BASE_URL")
+
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     # ── RAG Configuration ────────────────────────────────────────────────────
@@ -71,13 +86,39 @@ class Settings(BaseSettings):
     API_PORT: int = Field(default=8000, env="API_PORT")
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8501"]
 
-    @field_validator("MODELS_DIR", "LOGS_DIR", mode="before")
-    @classmethod
-    def create_dirs(cls, v: Path) -> Path:
-        Path(v).mkdir(parents=True, exist_ok=True)
-        return v
+    # ── Data cache ────────────────────────────────────────────────────────────
+    # Number of days before a cached parquet file is considered stale and
+    # re-fetched from the data source.  Default: 1 day.
+    CACHE_MAX_AGE_DAYS: int = Field(default=1, env="CACHE_MAX_AGE_DAYS")
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    @model_validator(mode="after")
+    def _ensure_dirs(self) -> "Settings":
+        """
+        Create all runtime directories eagerly on first load.
+
+        Using a single ``model_validator`` instead of per-field validators
+        guarantees that every required directory exists regardless of whether
+        Pydantic resolves the fields in a particular order, and avoids the
+        silent omission bug where only ``MODELS_DIR`` and ``LOGS_DIR`` were
+        previously auto-created.
+        """
+        dirs_to_create = [
+            self.DATA_DIR,
+            self.RAW_DATA_DIR,
+            self.PROCESSED_DATA_DIR,
+            self.EMBEDDINGS_DIR,
+            self.MODELS_DIR,
+            self.LOGS_DIR,
+        ]
+        for d in dirs_to_create:
+            Path(d).mkdir(parents=True, exist_ok=True)
+        return self
+
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
 
 @lru_cache

@@ -2,12 +2,29 @@
 FinSight AI — Phase 2: Data Ingestion Pipeline
 Fetches OHLCV market data from yfinance (free) with optional Alpha Vantage fallback.
 Validates, cleans, and persists raw data to the data/raw directory.
+
+Cache strategy
+--------------
+The previous implementation keyed the parquet cache on ``(ticker, start, end)``
+where ``end`` defaulted to ``date.today()``.  This meant the cache *never* hit
+across a midnight boundary — a fresh parquet was written every calendar day even
+for the same underlying data window, accumulating stale files and wasting disk.
+
+The fix: the cache file name still encodes the fetch parameters (for
+reproducibility), but ``_load_from_cache`` now checks the file's *mtime* against
+``settings.CACHE_MAX_AGE_DAYS``.  A file that is younger than the configured
+max-age is returned directly; an older file is deleted and the data is
+re-fetched.  This gives:
+
+* Intra-day cache hits (no redundant downloads within a trading day).
+* Automatic daily refresh (stale files are replaced, not accumulated).
+* Configurable staleness via ``CACHE_MAX_AGE_DAYS`` env var (default: 1).
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -22,10 +39,8 @@ from configs.settings import settings
 logger = get_logger("ingestion")
 
 REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
-# US equity markets trade ~252 days/year but holiday calendars and partial
-# years can yield as few as 245. 245 safely covers any genuine 1-year fetch.
 MIN_ROWS = 245
-MIN_ROWS_SUMMARY = 20   # Minimum rows acceptable for market summary / display purposes
+MIN_ROWS_SUMMARY = 20
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,9 +54,7 @@ def validate_ohlcv(df: pd.DataFrame, ticker: str, min_rows: int = MIN_ROWS) -> N
     Args:
         df: Raw OHLCV DataFrame.
         ticker: Ticker symbol for error context.
-        min_rows: Minimum acceptable row count. Defaults to MIN_ROWS (245).
-                  Pass MIN_ROWS_SUMMARY (20) for display-only use cases such
-                  as the market summary endpoint.
+        min_rows: Minimum acceptable row count.
 
     Raises:
         DataValidationError: On schema or quality violations.
@@ -90,11 +103,39 @@ def _cache_path(ticker: str, start: str, end: str) -> Path:
     return settings.RAW_DATA_DIR / f"{ticker.upper()}_{key}.parquet"
 
 
-def _load_from_cache(path: Path) -> Optional[pd.DataFrame]:
-    if path.exists():
-        logger.debug("Cache hit: %s", path.name)
-        return pd.read_parquet(path)
-    return None
+def _load_from_cache(
+    path: Path,
+    max_age_days: int = settings.CACHE_MAX_AGE_DAYS,
+) -> Optional[pd.DataFrame]:
+    """
+    Return a cached DataFrame if the file exists *and* is younger than
+    ``max_age_days`` days.  Stale files are removed so they don't accumulate.
+
+    Args:
+        path: Path to the parquet cache file.
+        max_age_days: Maximum acceptable file age in calendar days.
+
+    Returns:
+        Cached DataFrame, or ``None`` if absent or stale.
+    """
+    if not path.exists():
+        return None
+
+    file_age_seconds = time.time() - path.stat().st_mtime
+    max_age_seconds  = max_age_days * 86_400
+
+    if file_age_seconds > max_age_seconds:
+        logger.debug(
+            "Cache stale (%.1fh > %dd): %s — removing.",
+            file_age_seconds / 3600,
+            max_age_days,
+            path.name,
+        )
+        path.unlink(missing_ok=True)
+        return None
+
+    logger.debug("Cache hit: %s (age %.1fh)", path.name, file_age_seconds / 3600)
+    return pd.read_parquet(path)
 
 
 def _save_to_cache(df: pd.DataFrame, path: Path) -> None:
@@ -138,6 +179,8 @@ def fetch_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
         df.sort_index(inplace=True)
         logger.info("yfinance returned %d rows for %s", len(df), ticker)
         return df
+    except DataIngestionError:
+        raise
     except Exception as exc:
         raise DataIngestionError(
             f"Failed to fetch {ticker} from yfinance: {exc}"
@@ -160,14 +203,18 @@ def ingest_market_data(
     Primary entry-point for market data ingestion.
 
     Fetches OHLCV data for *ticker* over the specified period, validates it,
-    optionally reads from / writes to a local parquet cache.
+    and optionally reads from / writes to a local parquet cache.
+
+    Cache freshness is governed by ``settings.CACHE_MAX_AGE_DAYS`` (default 1).
+    Files older than the configured threshold are evicted automatically.
 
     Args:
         ticker: Stock ticker symbol.
-        period_years: Number of years of history to fetch (ignored if start_date provided).
+        period_years: Number of years of history to fetch.
         start_date: Explicit start date (YYYY-MM-DD).
         end_date: Explicit end date (YYYY-MM-DD); defaults to today.
         use_cache: Whether to use local parquet cache.
+        min_rows: Minimum acceptable row count.
 
     Returns:
         Validated OHLCV DataFrame with DatetimeIndex.
@@ -177,7 +224,7 @@ def ingest_market_data(
         DataValidationError: On schema violations.
         InsufficientDataError: On insufficient row count.
     """
-    end = end_date or date.today().isoformat()
+    end   = end_date or date.today().isoformat()
     start = start_date or (
         datetime.strptime(end, "%Y-%m-%d") - timedelta(days=period_years * 365)
     ).strftime("%Y-%m-%d")
@@ -218,7 +265,9 @@ def ingest_multiple_tickers(
     results: dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         try:
-            results[ticker] = ingest_market_data(ticker, period_years, use_cache=use_cache)
+            results[ticker] = ingest_market_data(
+                ticker, period_years, use_cache=use_cache
+            )
         except (DataIngestionError, DataValidationError, InsufficientDataError) as exc:
             logger.warning("Skipping %s: %s", ticker, exc.message)
     return results
@@ -236,13 +285,13 @@ def get_data_summary(df: pd.DataFrame, ticker: str) -> dict:
         Dict with date range, row count, and basic price statistics.
     """
     return {
-        "ticker": ticker,
+        "ticker":     ticker,
         "start_date": str(df.index.min().date()),
-        "end_date": str(df.index.max().date()),
-        "rows": len(df),
-        "columns": list(df.columns),
-        "close_min": round(float(df["Close"].min()), 4),
-        "close_max": round(float(df["Close"].max()), 4),
+        "end_date":   str(df.index.max().date()),
+        "rows":       len(df),
+        "columns":    list(df.columns),
+        "close_min":  round(float(df["Close"].min()), 4),
+        "close_max":  round(float(df["Close"].max()), 4),
         "close_mean": round(float(df["Close"].mean()), 4),
         "null_count": int(df.isnull().sum().sum()),
     }

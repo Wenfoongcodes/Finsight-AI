@@ -24,4 +24,4 @@ streamlit==1.36.0
 plotly==5.22.0
 
 # ── Deep Learning (optional) ─────────────────────────────────────────────────
-# tensorflow==2.16.1   # Uncomment to enable LSTM model
+tensorflow==2.16.1   # Uncomment to enable LSTM model

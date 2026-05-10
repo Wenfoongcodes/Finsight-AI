@@ -1,7 +1,20 @@
 """
 FinSight AI — Prediction Service
 Orchestrates data ingestion → feature engineering → model inference → explanation.
-This is the core service layer consumed by the FastAPI backend and agent tools.
+
+Bug fixed in this revision
+--------------------------
+``SHAPExplainer.generate_narrative()`` previously received only ``local_exp``
+(the SHAP-internal dict) and recomputed direction + probability from
+``base_value + shap_row.sum()``.  After Platt calibration this lives in a
+*different probability space* from ``model.predict_proba()``, so the narrative
+could say BEARISH (0%) while the signal card showed BULLISH (72%).
+
+Fix: pass ``authoritative_prediction=pred`` and
+``authoritative_p_bullish=p_bullish`` explicitly into ``generate_narrative()``.
+These are the values already computed by ``model.predict()`` and
+``model.predict_proba()`` — the same values shown in the signal card — so the
+narrative is now guaranteed to be consistent with every other part of the UI.
 """
 
 from __future__ import annotations
@@ -25,30 +38,30 @@ logger = get_logger("prediction_service")
 @dataclass
 class PredictionResponse:
     """Structured prediction response."""
+
     ticker: str
     model_name: str
-    prediction: int           # 0=bearish, 1=bullish
-    probability: float        # Directional: P(bullish) if bullish, P(bearish) if bearish
-    p_bullish: float          # Raw P(bullish) from model — always 0..1
-    p_bearish: float          # Raw P(bearish) = 1 - p_bullish
+    prediction: int           # 0 = bearish, 1 = bullish
+    probability: float        # Directional: P(predicted direction)
+    p_bullish: float          # Raw calibrated P(bullish) — always 0..1
+    p_bearish: float          # Raw calibrated P(bearish) = 1 - p_bullish
     confidence_label: str     # 'high' | 'moderate' | 'low'
     shap_explanation: dict
     narrative: str
     latest_close: float
-    feature_snapshot: dict    # last row feature values
+    feature_snapshot: dict    # last-row feature values (top 20)
 
 
 def _confidence_label(p_bullish: float) -> str:
     """
     Derive a confidence label from P(bullish).
 
-    Confidence measures how far the probability is from the 50/50 baseline —
-    it is symmetric and independent of direction. After Platt calibration,
-    probabilities are centred around 0.5 so thresholds are meaningful:
+    Confidence measures distance from the 50/50 baseline — symmetric and
+    independent of direction:
 
-        |P(bullish) - 0.5| > 0.15  -> high      (e.g. >=0.65 or <=0.35)
-        |P(bullish) - 0.5| > 0.05  -> moderate  (e.g. >=0.55 or <=0.45)
-        otherwise                  -> low        (near coin-flip)
+        |P(bullish) − 0.5| > 0.15  → 'high'
+        |P(bullish) − 0.5| > 0.05  → 'moderate'
+        otherwise                  → 'low'
     """
     delta = abs(p_bullish - 0.5)
     if delta > 0.15:
@@ -63,12 +76,12 @@ class PredictionService:
     End-to-end prediction pipeline.
 
     Attributes:
-        trainer: ModelTrainer instance for loading/saving artifacts.
-        engineer: FeatureEngineer instance.
+        trainer:  ``ModelTrainer`` instance for loading / saving artifacts.
+        engineer: ``FeatureEngineer`` instance.
     """
 
     def __init__(self) -> None:
-        self.trainer = ModelTrainer()
+        self.trainer  = ModelTrainer()
         self.engineer = FeatureEngineer()
 
     def predict(
@@ -78,37 +91,37 @@ class PredictionService:
         use_cache: bool = True,
     ) -> PredictionResponse:
         """
-        Run full prediction pipeline for a given ticker.
+        Run the full prediction pipeline for a given ticker.
 
         Args:
-            ticker: Stock ticker symbol.
+            ticker:     Stock ticker symbol.
             model_name: Name of the trained model to use.
-            use_cache: Whether to cache fetched market data.
+            use_cache:  Whether to use cached market data.
 
         Returns:
-            PredictionResponse with prediction, probability, and explanation.
+            ``PredictionResponse`` with prediction, probability, and explanation.
 
         Raises:
             PredictionError: On any pipeline failure.
         """
         try:
-            logger.info("Prediction pipeline started: ticker=%s model=%s", ticker, model_name)
+            logger.info(
+                "Prediction pipeline started: ticker=%s model=%s", ticker, model_name
+            )
 
             # 1. Ingest
             raw_df = ingest_market_data(ticker, use_cache=use_cache)
 
             # 2. Feature engineering
-            # y is retained (not discarded) so it is available for
-            # train-on-demand below if no saved artifact exists yet.
             feature_df = self.engineer.build_features(raw_df)
-            X, y = self.engineer.split_X_y(feature_df)
+            X, y       = self.engineer.split_X_y(feature_df)
 
             # 3. Load model — train on demand if no artifact exists yet
             try:
                 model, feature_columns = self.trainer.load_model(ticker, model_name)
             except Exception:
                 logger.info(
-                    "No artifact found for %s/%s — training on demand...",
+                    "No artifact found for %s/%s — training on demand…",
                     ticker, model_name,
                 )
                 _, train_result = self.trainer.train(
@@ -134,23 +147,39 @@ class PredictionService:
 
             # 4. Inference on latest row
             X_latest = X_aligned.iloc[[-1]]
-            pred = int(model.predict(X_latest)[0])
+            pred      = int(model.predict(X_latest)[0])
 
             p_bullish = round(float(model.predict_proba(X_latest)[0, 1]), 4)
             p_bearish = round(1.0 - p_bullish, 4)
 
-            # Directional probability: always show the confidence of the predicted
-            # direction so the displayed figure reads intuitively.
-            # e.g. BEARISH at P(bullish)=0.097 -> displays 90.3% (bearish confidence)
-            #      BULLISH  at P(bullish)=0.720 -> displays 72.0% (bullish confidence)
+            # Directional probability: confidence of the *predicted* direction.
+            #   BULLISH at p_bullish=0.72 → shows 72.0%
+            #   BEARISH at p_bullish=0.10 → shows 90.0% (1 − 0.10)
             prob = p_bullish if pred == 1 else p_bearish
 
             # 5. SHAP explanation
             explainer = SHAPExplainer(model, feature_columns)
-            shap_exp = explainer.local_explanation(X_latest)
-            narrative = explainer.generate_narrative(shap_exp, ticker=ticker)
+            shap_exp  = explainer.local_explanation(X_latest)
 
-            # 6. Feature snapshot (top 20 features for display)
+            # 6. Generate narrative using AUTHORITATIVE calibrated values.
+            #
+            #    This is the critical fix: we pass pred and p_bullish from
+            #    model.predict() / model.predict_proba() so the narrative
+            #    always agrees with the signal card and probability display.
+            #
+            #    Without these overrides, generate_narrative() would use
+            #    shap_exp['predicted_class'] and shap_exp['prediction_probability'],
+            #    which come from base_value + shap_row.sum() in the raw
+            #    (uncalibrated) probability space — potentially producing a
+            #    direction that contradicts the calibrated model output.
+            narrative = explainer.generate_narrative(
+                shap_exp,
+                ticker=ticker,
+                authoritative_prediction=pred,
+                authoritative_p_bullish=p_bullish,
+            )
+
+            # 7. Feature snapshot (top 20 features for display)
             snapshot = {
                 col: round(float(X_latest.iloc[0][col]), 4)
                 for col in feature_columns[:20]
@@ -173,7 +202,8 @@ class PredictionService:
             )
 
             logger.info(
-                "Prediction complete: %s -> %s (P_bull=%.3f, P_bear=%.3f, directional=%.3f, conf=%s)",
+                "Prediction complete: %s → %s "
+                "(p_bull=%.3f, p_bear=%.3f, directional=%.3f, conf=%s)",
                 ticker,
                 "BULLISH" if pred else "BEARISH",
                 p_bullish,
@@ -186,7 +216,9 @@ class PredictionService:
         except PredictionError:
             raise
         except Exception as exc:
-            raise PredictionError(f"Prediction pipeline failed for {ticker}: {exc}") from exc
+            raise PredictionError(
+                f"Prediction pipeline failed for {ticker}: {exc}"
+            ) from exc
 
     def batch_predict(
         self,
@@ -197,11 +229,11 @@ class PredictionService:
         Run predictions for multiple tickers.
 
         Args:
-            tickers: List of ticker symbols.
+            tickers:    List of ticker symbols.
             model_name: Model to use for all tickers.
 
         Returns:
-            Dict mapping ticker -> PredictionResponse or error string.
+            Dict mapping ticker → ``PredictionResponse`` or error string.
         """
         results: dict[str, PredictionResponse | str] = {}
         for ticker in tickers:
