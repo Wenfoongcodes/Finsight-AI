@@ -3,23 +3,23 @@ FinSight AI — Phase 9: LLM Chat System
 Provides a conversational financial assistant powered by OpenAI GPT
 with RAG context injection and multi-turn memory management.
 
-Bug fixed in this revision
---------------------------
-``OpenAIClient`` previously hardcoded ``base_url="https://api.groq.com/openai/v1"``
-regardless of ``settings.LLM_BASE_URL``.  This meant:
+Bug fixed in previous revision
+-------------------------------
+``OpenAIClient`` previously hardcoded ``base_url="https://api.groq.com/openai/v1"``.
+That was fixed: ``LLM_BASE_URL`` is now respected, and an empty string is
+normalised to ``None`` so the SDK uses the official OpenAI endpoint by default.
 
-* Users running the official OpenAI endpoint (no ``LLM_BASE_URL`` set)
-  were silently routed to Groq, causing authentication failures or
-  unexpected behaviour.
-* The ``LLM_BASE_URL`` setting in ``configs/settings.py`` was documented
-  as an override mechanism but had no effect.
+Improvement in this revision
+-----------------------------
+``OpenAIClient.chat()`` now logs the *actual* model name used in each call
+at DEBUG level.  This makes model-mismatch problems (e.g. "gpt-4o-mini" sent
+to Groq) immediately visible in the log file without having to add ad-hoc
+print statements.
 
-Fix: ``OpenAIClient`` now passes ``base_url=settings.LLM_BASE_URL`` only
-when the setting is non-None.  When it is None, the OpenAI SDK uses its
-own default (``https://api.openai.com/v1``), which is the correct behaviour.
-
-Additionally, a ``LLM_BASE_URL`` value of the empty string is normalised
-to ``None`` to handle accidental ``.env`` entries like ``LLM_BASE_URL=``.
+Additionally, ``OpenAIClient.chat()`` extracts the error message from the
+OpenAI SDK exception and re-raises it as a ``LLMError`` with full detail so
+callers receive a meaningful message instead of a bare ``str(exc)`` that
+often omits the HTTP status code and provider error body.
 """
 
 from __future__ import annotations
@@ -104,19 +104,21 @@ class OpenAIClient:
     Thin wrapper around the OpenAI Python SDK.
 
     Respects ``settings.LLM_BASE_URL`` for alternative providers (Groq,
-    Azure OpenAI, Ollama, etc.).  When ``LLM_BASE_URL`` is not set, the
-    official OpenAI endpoint is used.
+    Azure OpenAI, Ollama, etc.).  When ``LLM_BASE_URL`` is not set (or is
+    an empty string), the official OpenAI endpoint is used.
 
     Provider examples::
 
         # Official OpenAI (default — leave LLM_BASE_URL unset)
         LLM_BASE_URL=
 
-        # Groq
+        # Groq  (remember to set LLM_MODEL to a Groq-supported model)
         LLM_BASE_URL=https://api.groq.com/openai/v1
+        LLM_MODEL=llama3-70b-8192
 
         # Ollama (local)
         LLM_BASE_URL=http://localhost:11434/v1
+        LLM_MODEL=llama3
     """
 
     def __init__(self) -> None:
@@ -128,12 +130,12 @@ class OpenAIClient:
         if not settings.OPENAI_API_KEY:
             raise LLMError("OPENAI_API_KEY is not set.")
 
-        # Normalise empty string → None so SDK uses its own default endpoint.
+        # Normalise empty string → None so the SDK uses its own default endpoint.
         base_url = settings.LLM_BASE_URL or None
         if isinstance(base_url, str) and not base_url.strip():
             base_url = None
 
-        client_kwargs = {"api_key": settings.OPENAI_API_KEY}
+        client_kwargs: dict = {"api_key": settings.OPENAI_API_KEY}
         if base_url:
             client_kwargs["base_url"] = base_url
             logger.info("LLM base URL override: %s", base_url)
@@ -141,14 +143,43 @@ class OpenAIClient:
             logger.info("LLM using default OpenAI endpoint")
 
         self._client = OpenAI(**client_kwargs)
+        self._base_url = base_url  # stored for logging / diagnostics
 
     def chat(
         self,
         messages,
-        model=settings.LLM_MODEL,
-        temperature=settings.LLM_TEMPERATURE,
-        max_tokens=settings.LLM_MAX_TOKENS,
-    ):
+        model: str = settings.LLM_MODEL,
+        temperature: float = settings.LLM_TEMPERATURE,
+        max_tokens: int = settings.LLM_MAX_TOKENS,
+    ) -> tuple[str, int]:
+        """
+        Send a chat completion request.
+
+        Args:
+            messages:    List of message dicts (role + content).
+            model:       Model name.  When using a non-OpenAI provider via
+                         ``LLM_BASE_URL``, make sure this matches a model
+                         that provider actually supports.
+            temperature: Sampling temperature.
+            max_tokens:  Maximum completion tokens.
+
+        Returns:
+            ``(content_str, total_tokens)``
+
+        Raises:
+            LLMError: On any API error, including invalid model names,
+                      auth failures, and rate limits.
+        """
+        # Always log the model being used — essential for diagnosing
+        # provider/model-name mismatches like "gpt-4o-mini" sent to Groq.
+        logger.debug(
+            "LLM chat request | model=%s | endpoint=%s | temperature=%.2f | max_tokens=%d",
+            model,
+            self._base_url or "https://api.openai.com/v1",
+            temperature,
+            max_tokens,
+        )
+
         try:
             response = self._client.chat.completions.create(
                 model=model,
@@ -158,9 +189,27 @@ class OpenAIClient:
             )
             content = response.choices[0].message.content or ""
             tokens  = response.usage.total_tokens if response.usage else 0
+
+            logger.debug(
+                "LLM chat response | model=%s | tokens=%d | chars=%d",
+                model, tokens, len(content),
+            )
             return content, tokens
+
         except Exception as exc:
-            raise LLMError(f"LLM API call failed: {exc}") from exc
+            # Extract the most informative error message available.
+            # The OpenAI SDK wraps errors in ``openai.APIError`` subclasses
+            # which carry a ``message`` attribute with the provider's body.
+            detail = getattr(exc, "message", None) or str(exc)
+            status = getattr(exc, "status_code", None)
+            if status:
+                detail = f"HTTP {status}: {detail}"
+
+            raise LLMError(
+                f"LLM API call failed (model={model}, endpoint={self._base_url or 'openai'}): "
+                f"{detail}",
+                detail=str(exc),
+            ) from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
