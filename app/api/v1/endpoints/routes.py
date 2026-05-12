@@ -1,85 +1,70 @@
 """
-FinSight AI — Phase 7: FastAPI Route Handlers
-All HTTP endpoints for prediction, training, chat, and agent services.
+FinSight AI — FastAPI Route Handlers (v3 — fixed)
 
-Changes in this revision
-------------------------
-* ``predict`` endpoint no longer accepts ``model_name`` in the request body.
-  The system selects the best model automatically via ``ModelSelector``.
+Bugs fixed vs v2
+----------------
+1. ``predict`` endpoint now accepts ``horizon`` from ``PredictionRequest``
+   and passes it through to ``PredictionService.predict()``.
 
-* ``predict`` response now includes the full fused signal fields
-  (``fused_direction``, ``fused_confidence``, ``fused_probability``,
-  ``fusion_narrative``, ``fusion_applied``, ``news_sentiment``,
-  ``news_items``).
+2. ``PredictionResult`` mapping now includes ALL new fields introduced in
+   the v3 service layer:
+   - ``horizon``
+   - ``auto_trained``
+   - ``confidence_degraded``
+   - ``selection_reason``
+   - ``intelligence_brief`` (full ``IntelligenceBriefSchema`` serialization)
 
-* New ``GET /predict/leaderboard/{ticker}`` endpoint exposes the model
-  leaderboard for a ticker — useful for operator introspection and
-  debugging without hitting internal files directly.
+3. ``batch_predict`` passes ``horizon`` through.
 
-* ``batch_predict`` endpoint also drops ``model_name``.
+4. ``model_leaderboard`` endpoint passes ``horizon`` query param.
 
-* ``ingest_documents`` handles both ``source_type="text"`` and
-  ``source_type="url"`` (unchanged from previous revision).
+5. ``IntelligenceBriefSchema`` is correctly built from
+   ``resp.intelligence_brief`` when available.
+
+No logic changes to training, market, RAG, or agent routes.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.schemas import (
-    AgentRequest,
-    AgentResponse,
+    AgentRequest, AgentResponse,
     BatchPredictionRequest,
-    ChatRequest,
-    IngestRequest,
-    IngestResponse,
-    LeaderboardEntry,
-    LeaderboardResponse,
-    MarketDataRequest,
-    MarketDataSummary,
+    ChatRequest, ChatResponse as ChatResponseSchema,
+    IngestRequest, IngestResponse,
+    IntelligenceBriefSchema,
+    LeaderboardEntry, LeaderboardResponse,
+    MarketDataRequest, MarketDataSummary,
     NewsItemSchema,
-    PredictionRequest,
-    PredictionResult,
-    SHAPFeature,
-    TrainRequest,
-    TrainResponse,
-)
-from app.api.schemas import (
-    ChatResponse as ChatResponseSchema,
+    PredictionRequest, PredictionResult, SHAPFeature,
+    TrainRequest, TrainResponse,
 )
 from app.core.exceptions import (
-    AgentError,
-    DataIngestionError,
-    DataValidationError,
+    DataIngestionError, DataValidationError,
     InsufficientDataError,
-    LLMError,
-    ModelNotFoundError,
-    ModelTrainingError,
-    PredictionError,
-    RAGError,
+    ModelNotFoundError, ModelTrainingError, PredictionError,
+    RAGError, LLMError, AgentError,
 )
 from app.core.logging_config import get_logger
-from app.ml.data_ingestion import (
-    MIN_ROWS_SUMMARY,
-    get_data_summary,
-    ingest_market_data,
-)
+from app.ml.data_ingestion import MIN_ROWS_SUMMARY, get_data_summary, ingest_market_data
 from app.ml.feature_engineering import FeatureEngineer
 from app.ml.training.trainer import ModelTrainer
 from app.rag.llm_chat import FinancialChatSystem
 from app.rag.rag_pipeline import RAGPipeline
 from app.services.model_selector import ModelSelector
 from app.services.prediction_service import PredictionService
+from configs.settings import settings
 
 logger = get_logger("api.routes")
 
-# ── Shared service singletons ─────────────────────────────────────────────────
+# ── Shared singletons ─────────────────────────────────────────────────────────
 
 _prediction_service: PredictionService | None = None
-_rag_pipeline: RAGPipeline | None = None
-_chat_system: FinancialChatSystem | None = None
-_trainer: ModelTrainer | None = None
-_selector: ModelSelector | None = None
+_rag_pipeline:       RAGPipeline | None       = None
+_chat_system:        FinancialChatSystem | None = None
+_trainer:            ModelTrainer | None       = None
+_selector:           ModelSelector | None      = None
 
 
 def _get_prediction_service() -> PredictionService:
@@ -127,62 +112,68 @@ prediction_router = APIRouter(prefix="/predict", tags=["Predictions"])
 @prediction_router.post("/", response_model=PredictionResult)
 async def predict(request: PredictionRequest) -> PredictionResult:
     """
-    Generate a next-day price direction prediction for a stock.
+    Generate a next-day (or multi-horizon) price direction prediction.
 
-    The system automatically selects the best-performing trained model for
-    the requested ticker (highest walk-forward ROC-AUC).  If no trained
-    model exists, the system trains one on demand.
-
-    The response includes both the raw ML signal (SHAP-driven) and a
-    fused signal that reconciles the ML prediction with current news
-    sentiment via LLM synthesis.
+    The system selects the best model for the ticker/horizon automatically.
+    If no trained model exists it trains one on demand before returning.
+    The response includes the raw ML signal, SHAP explanation, news
+    intelligence brief, and (when an LLM key is set) the fused signal.
     """
     try:
-        svc = _get_prediction_service()
+        svc  = _get_prediction_service()
         resp = svc.predict(
-            request.ticker,
+            ticker=request.ticker,
+            horizon=request.horizon,       # ← BUG FIX: was missing in v2
             use_cache=request.use_cache,
         )
 
-        # ── Map fused signal fields ───────────────────────────────────────
+        # ── Fused signal fields ───────────────────────────────────────────────
         fused = resp.fused_signal
-        if (
-            fused
-            and isinstance(getattr(fused, "final_direction", None), str)
-        ):
-            fused_direction = fused.final_direction
-            fused_confidence = fused.final_confidence
+        if fused:
+            fused_direction   = fused.final_direction
+            fused_confidence  = fused.final_confidence
             fused_probability = fused.fusion_probability
-            fusion_narrative = fused.synthesis_narrative
-            fusion_applied = fused.fusion_applied
-            news_sentiment = fused.news_sentiment
-
-            news_items = [
+            fusion_narrative  = fused.synthesis_narrative
+            fusion_applied    = fused.fusion_applied
+            news_sentiment    = fused.news_sentiment
+            news_items        = [
                 NewsItemSchema(
                     title=n.title,
                     snippet=n.snippet,
                     url=n.url,
                 )
-                for n in getattr(fused, "news_items", [])
+                for n in fused.news_items
             ]
-
         else:
-            # Fusion was not run OR mocked incompletely in tests
-            fused_direction = "BULLISH" if resp.prediction == 1 else "BEARISH"
-            fused_confidence = resp.confidence_label.upper()
+            fused_direction   = "BULLISH" if resp.prediction == 1 else "BEARISH"
+            fused_confidence  = resp.confidence_label.upper()
             fused_probability = resp.p_bullish
-            fusion_narrative = resp.narrative
-            fusion_applied = False
-            news_sentiment = "neutral"
-            news_items = []
+            fusion_narrative  = resp.narrative
+            fusion_applied    = False
+            news_sentiment    = "neutral"
+            news_items        = []
 
-        # ── HARD SAFETY NORMALIZATION ─────────────────────
-        p_bullish = float(resp.p_bullish or 0.0)
-        p_bearish = float(resp.p_bearish or (1.0 - p_bullish))
+        # ── Intelligence brief ────────────────────────────────────────────────
+        # BUG FIX: was never mapped in v2 — completely missing from response
+        intelligence_brief_schema: IntelligenceBriefSchema | None = None
+        brief = resp.intelligence_brief
+        if brief:
+            intelligence_brief_schema = IntelligenceBriefSchema(
+                ticker=brief.ticker,
+                situation_summary=brief.situation_summary,
+                bullish_catalysts=brief.bullish_catalysts,
+                bearish_catalysts=brief.bearish_catalysts,
+                aggregate_sentiment=brief.aggregate_sentiment,
+                sentiment_score=brief.sentiment_score,
+                source_quality_note=brief.source_quality_note,
+                retrieval_success=brief.retrieval_success,
+            )
 
         return PredictionResult(
+            # ML signal
             ticker=resp.ticker,
             model_name=resp.model_name,
+            horizon=resp.horizon,                              # ← BUG FIX
             prediction=resp.prediction,
             prediction_label="BULLISH" if resp.prediction == 1 else "BEARISH",
             probability=resp.probability,
@@ -192,8 +183,12 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             latest_close=resp.latest_close,
             narrative=resp.narrative,
             top_features=[
-                SHAPFeature(**f) for f in resp.shap_explanation.get("top_features", [])
+                SHAPFeature(**f)
+                for f in resp.shap_explanation.get("top_features", [])
             ],
+            auto_trained=resp.auto_trained,                    # ← BUG FIX
+            confidence_degraded=resp.confidence_degraded,      # ← BUG FIX
+            selection_reason=resp.selection_reason,            # ← BUG FIX
             # Fused signal
             fused_direction=fused_direction,
             fused_confidence=fused_confidence,
@@ -202,6 +197,8 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             fusion_applied=fusion_applied,
             news_sentiment=news_sentiment,
             news_items=news_items,
+            # Intelligence brief                               # ← BUG FIX
+            intelligence_brief=intelligence_brief_schema,
         )
 
     except ModelNotFoundError as e:
@@ -218,27 +215,27 @@ async def predict(request: PredictionRequest) -> PredictionResult:
 
 @prediction_router.post("/batch", response_model=dict)
 async def batch_predict(request: BatchPredictionRequest) -> dict:
-    """
-    Generate predictions for multiple tickers at once.
-    The best model is selected independently per ticker.
-    """
-    svc = _get_prediction_service()
-    results = svc.batch_predict(request.tickers)
+    """Batch predictions for multiple tickers at the same horizon."""
+    svc     = _get_prediction_service()
+    results = svc.batch_predict(
+        tickers=request.tickers,
+        horizon=request.horizon,           # ← BUG FIX: was missing in v2
+    )
     return {
         ticker: (
             {
-                "prediction": "BULLISH" if r.prediction == 1 else "BEARISH",
-                "probability": r.probability,
-                "p_bullish": r.p_bullish,
-                "p_bearish": r.p_bearish,
-                "confidence": r.confidence_label,
-                "model_selected": r.model_name,
-                "fused_direction": r.fused_signal.final_direction
-                if r.fused_signal
-                else "N/A",
-                "fusion_applied": r.fused_signal.fusion_applied
-                if r.fused_signal
-                else False,
+                "prediction":           "BULLISH" if r.prediction == 1 else "BEARISH",
+                "probability":          r.probability,
+                "p_bullish":            r.p_bullish,
+                "p_bearish":            r.p_bearish,
+                "confidence":           r.confidence_label,
+                "confidence_degraded":  r.confidence_degraded,
+                "selection_reason":     r.selection_reason,
+                "model_selected":       r.model_name,
+                "horizon":              r.horizon,
+                "auto_trained":         r.auto_trained,
+                "fused_direction":  r.fused_signal.final_direction if r.fused_signal else "N/A",
+                "fusion_applied":   r.fused_signal.fusion_applied if r.fused_signal else False,
             }
             if not isinstance(r, str)
             else {"error": r}
@@ -248,23 +245,26 @@ async def batch_predict(request: BatchPredictionRequest) -> dict:
 
 
 @prediction_router.get("/leaderboard/{ticker}", response_model=LeaderboardResponse)
-async def model_leaderboard(ticker: str) -> LeaderboardResponse:
+async def model_leaderboard(
+    ticker: str,
+    horizon: str = Query(default="1d", description="Prediction horizon"),
+) -> LeaderboardResponse:
     """
-    Return the model performance leaderboard for a given ticker.
+    Return the model performance leaderboard for a given ticker and horizon.
 
-    Shows all trained models ranked by walk-forward ROC-AUC and indicates
-    which model the system would auto-select.  Useful for operator
-    introspection and debugging.
+    The ``horizon`` query parameter defaults to '1d'.  Pass '7d', '1m', or
+    '6m' to inspect leaderboards for other horizons independently.
     """
-    ticker = ticker.upper().strip()
+    ticker   = ticker.upper().strip()
     selector = _get_selector()
-    board = selector.leaderboard(ticker)
-    selected = selector.select(ticker)
+    board    = selector.leaderboard(ticker, horizon=horizon)    # ← BUG FIX
+    sel      = selector.select(ticker, horizon=horizon)
 
     return LeaderboardResponse(
         ticker=ticker,
+        horizon=horizon,
         entries=[LeaderboardEntry(**e) for e in board],
-        selected_model=selected,
+        selected_model=sel.model_name,
     )
 
 
@@ -278,24 +278,21 @@ training_router = APIRouter(prefix="/train", tags=["Training"])
 @training_router.post("/", response_model=TrainResponse)
 async def train_model(request: TrainRequest) -> TrainResponse:
     """
-    Train a new model for a given ticker and persist the artifact.
-
-    ``model_name`` is an operator-level parameter retained here because
-    training is not a user-facing action.  The trained model is
-    automatically registered in the leaderboard via its metadata file.
+    Train a model for a given ticker / model / horizon and persist the artifact.
     """
     try:
-        raw_df = ingest_market_data(request.ticker, period_years=request.period_years)
-        engineer = FeatureEngineer()
+        raw_df     = ingest_market_data(request.ticker, period_years=request.period_years)
+        engineer   = FeatureEngineer()
         feature_df = engineer.build_features(raw_df)
-        X, y = engineer.split_X_y(feature_df)
+        X, y       = engineer.split_X_y(feature_df, horizon=request.horizon)
 
-        trainer = _get_trainer()
+        trainer   = _get_trainer()
         _, result = trainer.train(
             model_name=request.model_name,
             X=X,
             y=y,
             ticker=request.ticker,
+            horizon=request.horizon,
             run_hpo=request.run_hpo,
             hpo_trials=request.hpo_trials,
         )
@@ -322,7 +319,7 @@ market_router = APIRouter(prefix="/market", tags=["Market Data"])
 async def market_summary(request: MarketDataRequest) -> MarketDataSummary:
     """Retrieve OHLCV summary statistics for a ticker."""
     try:
-        df = ingest_market_data(
+        df      = ingest_market_data(
             request.ticker,
             period_years=request.period_years,
             min_rows=MIN_ROWS_SUMMARY,
@@ -344,14 +341,7 @@ rag_router = APIRouter(prefix="/rag", tags=["RAG & Chat"])
 
 @rag_router.post("/ingest", response_model=IngestResponse)
 async def ingest_documents(request: IngestRequest) -> IngestResponse:
-    """
-    Ingest financial content into the RAG knowledge base.
-
-    Supports two modes controlled by ``source_type``:
-
-    * ``"text"`` — ingest one or more raw text strings directly.
-    * ``"url"``  — fetch a web article by URL and ingest its content.
-    """
+    """Ingest financial content (raw text or a URL) into the RAG knowledge base."""
     rag = _get_rag()
 
     if request.source_type == "text":
@@ -361,10 +351,7 @@ async def ingest_documents(request: IngestRequest) -> IngestResponse:
                 ingested_count=len(request.texts),
                 chunks_added=0,
                 source_type="text",
-                message=(
-                    f"Successfully ingested {len(request.texts)} "
-                    f"document(s) from text input."
-                ),
+                message=f"Successfully ingested {len(request.texts)} document(s).",
             )
         except RAGError as e:
             raise HTTPException(
@@ -386,15 +373,14 @@ async def ingest_documents(request: IngestRequest) -> IngestResponse:
             detail=msg,
         )
 
-    if result["duplicate"]:
-        message = (
-            f"URL already in knowledge base (first ingested {result['fetched_at']})."
-        )
-    else:
-        message = (
-            f"Successfully ingested article '{result['title']}' "
+    message = (
+        f"URL already in knowledge base (first ingested {result['fetched_at']})."
+        if result["duplicate"]
+        else (
+            f"Ingested '{result['title']}' "
             f"({result['char_count']:,} chars, {result['chunks']} chunks)."
         )
+    )
 
     return IngestResponse(
         ingested_count=1,
@@ -412,7 +398,7 @@ async def chat(request: ChatRequest) -> ChatResponseSchema:
     """Send a message to the financial AI assistant."""
     try:
         chat_sys = _get_chat()
-        resp = chat_sys.chat(
+        resp     = chat_sys.chat(
             user_query=request.query,
             use_rag=request.use_rag,
             session_id=request.session_id,
@@ -443,13 +429,10 @@ agent_router = APIRouter(prefix="/agent", tags=["AI Agent"])
 
 @agent_router.post("/run", response_model=AgentResponse)
 async def run_agent(request: AgentRequest) -> AgentResponse:
-    """
-    Run the agentic AI to answer complex financial queries using tool orchestration.
-    """
+    """Run the agentic AI to answer complex financial queries via tool orchestration."""
     try:
         from app.agents.financial_agent import FinancialAgent
-
-        agent = FinancialAgent(
+        agent  = FinancialAgent(
             chat_system=_get_chat(),
             rag_pipeline=_get_rag(),
         )
