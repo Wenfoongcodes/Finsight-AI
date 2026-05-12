@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from main import app
@@ -27,12 +26,16 @@ class TestHealthEndpoint:
 class TestPredictionEndpoint:
     def test_predict_returns_404_without_model(self):
         """Should return 404 when no trained model artifact exists."""
-        resp = client.post("/api/v1/predict/", json={"ticker": "AAPL", "model_name": "xgboost"})
+        resp = client.post(
+            "/api/v1/predict/", json={"ticker": "AAPL", "model_name": "xgboost"}
+        )
         # Either 404 (no model) or 422 (no data) — both are valid without setup
         assert resp.status_code in (404, 422, 500)
 
     def test_predict_validates_ticker_length(self):
-        resp = client.post("/api/v1/predict/", json={"ticker": "", "model_name": "xgboost"})
+        resp = client.post(
+            "/api/v1/predict/", json={"ticker": "", "model_name": "xgboost"}
+        )
         assert resp.status_code == 422
 
     def test_predict_uppercase_normalisation(self):
@@ -49,7 +52,9 @@ class TestPredictionEndpoint:
             mock_pred.shap_explanation = {"top_features": []}
             mock_svc.return_value.predict.return_value = mock_pred
 
-            resp = client.post("/api/v1/predict/", json={"ticker": "aapl", "model_name": "xgboost"})
+            resp = client.post(
+                "/api/v1/predict/", json={"ticker": "aapl", "model_name": "xgboost"}
+            )
             # The validator uppercases it — mock should be called with 'AAPL'
             if resp.status_code == 200:
                 assert resp.json()["ticker"] == "AAPL"
@@ -57,16 +62,22 @@ class TestPredictionEndpoint:
 
 class TestTrainingEndpoint:
     def test_train_validates_period(self):
-        resp = client.post("/api/v1/train/", json={
-            "ticker": "AAPL", "model_name": "xgboost", "period_years": 0
-        })
+        resp = client.post(
+            "/api/v1/train/",
+            json={"ticker": "AAPL", "model_name": "xgboost", "period_years": 0},
+        )
         assert resp.status_code == 422
 
     def test_train_validates_hpo_trials(self):
-        resp = client.post("/api/v1/train/", json={
-            "ticker": "AAPL", "model_name": "xgboost",
-            "run_hpo": True, "hpo_trials": 2
-        })
+        resp = client.post(
+            "/api/v1/train/",
+            json={
+                "ticker": "AAPL",
+                "model_name": "xgboost",
+                "run_hpo": True,
+                "hpo_trials": 2,
+            },
+        )
         assert resp.status_code == 422
 
 

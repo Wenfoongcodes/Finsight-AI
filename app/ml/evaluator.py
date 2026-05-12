@@ -31,6 +31,7 @@ logger = get_logger("evaluation")
 # Full Evaluation Report
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def evaluate_model(
     model: Any,
     X_test: pd.DataFrame,
@@ -75,7 +76,9 @@ def evaluate_model(
     )
 
     # ── Classification Report ────────────────────────────────────────────────
-    clf_report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+    clf_report = classification_report(
+        y_true, y_pred, output_dict=True, zero_division=0
+    )
 
     report = {
         "model_name": model_name,
@@ -87,8 +90,10 @@ def evaluate_model(
             "log_loss": round(ll, 4),
         },
         "confusion_matrix": {
-            "tn": int(tn), "fp": int(fp),
-            "fn": int(fn), "tp": int(tp),
+            "tn": int(tn),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tp": int(tp),
         },
         "roc_curve": {
             "fpr": fpr.tolist(),
@@ -107,7 +112,11 @@ def evaluate_model(
 
     logger.info(
         "[%s] Acc=%.3f | F1=%.3f | AUC=%.3f | LogLoss=%.3f",
-        model_name, acc, f1, auc, ll,
+        model_name,
+        acc,
+        f1,
+        auc,
+        ll,
     )
     return report
 
@@ -115,6 +124,7 @@ def evaluate_model(
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature Importance
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def extract_feature_importance(
     model: Any,
@@ -147,13 +157,22 @@ def extract_feature_importance(
         importances = np.abs(clf.coef_[0])
 
     if importances is None:
-        logger.warning("Model %s does not expose feature importances.", type(clf).__name__)
+        logger.warning(
+            "Model %s does not expose feature importances.", type(clf).__name__
+        )
         return pd.DataFrame(columns=["feature", "importance"])
 
-    df = pd.DataFrame({
-        "feature": feature_columns,
-        "importance": importances,
-    }).sort_values("importance", ascending=False).head(top_n).reset_index(drop=True)
+    df = (
+        pd.DataFrame(
+            {
+                "feature": feature_columns,
+                "importance": importances,
+            }
+        )
+        .sort_values("importance", ascending=False)
+        .head(top_n)
+        .reset_index(drop=True)
+    )
 
     return df
 
@@ -161,6 +180,7 @@ def extract_feature_importance(
 # ─────────────────────────────────────────────────────────────────────────────
 # Walk-Forward Report
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def summarize_walk_forward(fold_results: list) -> pd.DataFrame:
     """
@@ -174,22 +194,25 @@ def summarize_walk_forward(fold_results: list) -> pd.DataFrame:
     """
     rows = []
     for fr in fold_results:
-        rows.append({
-            "fold": fr.fold,
-            "train_size": fr.train_size,
-            "test_size": fr.test_size,
-            "accuracy": round(fr.accuracy, 4),
-            "f1": round(fr.f1, 4),
-            "roc_auc": round(fr.roc_auc, 4),
-            "mae": round(fr.mae, 4),
-            "rmse": round(fr.rmse, 4),
-        })
+        rows.append(
+            {
+                "fold": fr.fold,
+                "train_size": fr.train_size,
+                "test_size": fr.test_size,
+                "accuracy": round(fr.accuracy, 4),
+                "f1": round(fr.f1, 4),
+                "roc_auc": round(fr.roc_auc, 4),
+                "mae": round(fr.mae, 4),
+                "rmse": round(fr.rmse, 4),
+            }
+        )
     return pd.DataFrame(rows).set_index("fold")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model Comparison
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def compare_models(
     models: dict[str, Any],

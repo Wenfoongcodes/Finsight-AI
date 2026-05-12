@@ -21,8 +21,10 @@ from app.api.v1.endpoints.routes import (
     training_router,
 )
 from app.core.exceptions import (
-    DataIngestionError, DataValidationError, FinSightBaseError,
-    InsufficientDataError, LLMError, ModelNotFoundError,
+    DataIngestionError,
+    FinSightBaseError,
+    LLMError,
+    ModelNotFoundError,
 )
 from app.core.logging_config import get_logger, setup_logging
 from configs.settings import settings
@@ -34,11 +36,16 @@ logger = get_logger("app")
 # Lifespan
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
     setup_logging(level="DEBUG" if settings.DEBUG else "INFO", log_file="finsight.log")
-    logger.info("FinSight AI starting up | env=%s | debug=%s", settings.ENVIRONMENT, settings.DEBUG)
+    logger.info(
+        "FinSight AI starting up | env=%s | debug=%s",
+        settings.ENVIRONMENT,
+        settings.DEBUG,
+    )
     yield
     logger.info("FinSight AI shutting down.")
 
@@ -46,6 +53,7 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────────────────────────────────────
 # App Factory
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -84,28 +92,36 @@ def create_app() -> FastAPI:
     async def model_not_found_handler(request: Request, exc: ModelNotFoundError):
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content=ErrorResponse(error=exc.message, detail=exc.detail, status_code=404).model_dump(),
+            content=ErrorResponse(
+                error=exc.message, detail=exc.detail, status_code=404
+            ).model_dump(),
         )
 
     @app.exception_handler(DataIngestionError)
     async def data_ingestion_handler(request: Request, exc: DataIngestionError):
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=ErrorResponse(error=exc.message, detail=exc.detail, status_code=422).model_dump(),
+            content=ErrorResponse(
+                error=exc.message, detail=exc.detail, status_code=422
+            ).model_dump(),
         )
 
     @app.exception_handler(LLMError)
     async def llm_error_handler(request: Request, exc: LLMError):
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=ErrorResponse(error=exc.message, detail=exc.detail, status_code=503).model_dump(),
+            content=ErrorResponse(
+                error=exc.message, detail=exc.detail, status_code=503
+            ).model_dump(),
         )
 
     @app.exception_handler(FinSightBaseError)
     async def generic_finsight_handler(request: Request, exc: FinSightBaseError):
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(error=exc.message, detail=exc.detail, status_code=500).model_dump(),
+            content=ErrorResponse(
+                error=exc.message, detail=exc.detail, status_code=500
+            ).model_dump(),
         )
 
     # ── Health Check ──────────────────────────────────────────────────────────
@@ -133,6 +149,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "app.main:app",
         host=settings.API_HOST,

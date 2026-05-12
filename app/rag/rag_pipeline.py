@@ -53,15 +53,30 @@ _USER_AGENT = (
 
 # HTML tags that contain only navigation, ads, or boilerplate — always removed.
 _NOISE_TAGS = [
-    "script", "style", "nav", "footer", "header", "aside",
-    "form", "table", "sup", "figure", "figcaption", "iframe",
-    "noscript", "button", "input", "select", "textarea",
+    "script",
+    "style",
+    "nav",
+    "footer",
+    "header",
+    "aside",
+    "form",
+    "table",
+    "sup",
+    "figure",
+    "figcaption",
+    "iframe",
+    "noscript",
+    "button",
+    "input",
+    "select",
+    "textarea",
 ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Web Article Fetcher
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class WebArticleFetcher:
     """
@@ -207,11 +222,12 @@ class WebArticleFetcher:
 # Document Model
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class Document:
     """Lightweight document container with rich metadata support."""
 
     def __init__(self, content: str, metadata: Optional[dict] = None) -> None:
-        self.content  = content
+        self.content = content
         self.metadata = metadata or {}
 
     def __repr__(self) -> str:
@@ -221,6 +237,7 @@ class Document:
 # ─────────────────────────────────────────────────────────────────────────────
 # Text Chunker
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TextChunker:
     """
@@ -233,11 +250,9 @@ class TextChunker:
         overlap: int = settings.CHUNK_OVERLAP,
     ) -> None:
         self.chunk_size = chunk_size
-        self.overlap    = overlap
+        self.overlap = overlap
 
-    def chunk_text(
-        self, text: str, metadata: Optional[dict] = None
-    ) -> list[Document]:
+    def chunk_text(self, text: str, metadata: Optional[dict] = None) -> list[Document]:
         """
         Split text into overlapping word-level chunks.
 
@@ -248,9 +263,9 @@ class TextChunker:
         Returns:
             List of ``Document`` objects.
         """
-        words  = text.split()
+        words = text.split()
         chunks: list[Document] = []
-        step   = max(1, self.chunk_size - self.overlap)
+        step = max(1, self.chunk_size - self.overlap)
 
         for i in range(0, len(words), step):
             chunk_words = words[i : i + self.chunk_size]
@@ -259,13 +274,15 @@ class TextChunker:
             meta = {
                 **(metadata or {}),
                 "chunk_index": len(chunks),
-                "word_start":  i,
+                "word_start": i,
             }
             chunks.append(Document(content=" ".join(chunk_words), metadata=meta))
 
         logger.debug(
             "Chunked text into %d chunks (size=%d, overlap=%d)",
-            len(chunks), self.chunk_size, self.overlap,
+            len(chunks),
+            self.chunk_size,
+            self.overlap,
         )
         return chunks
 
@@ -281,6 +298,7 @@ class TextChunker:
 # Embedding Generator
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class EmbeddingGenerator:
     """
     Generates dense vector embeddings using sentence-transformers.
@@ -295,6 +313,7 @@ class EmbeddingGenerator:
             return
         try:
             from sentence_transformers import SentenceTransformer
+
             logger.info("Loading embedding model: %s", self.model_name)
             self._model = SentenceTransformer(self.model_name)
         except ImportError as exc:
@@ -337,6 +356,7 @@ class EmbeddingGenerator:
 # FAISS Vector Store
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class FAISSVectorStore:
     """
     FAISS-backed vector store for semantic similarity retrieval.
@@ -352,12 +372,11 @@ class FAISSVectorStore:
             return
         try:
             import faiss
+
             self._index = faiss.IndexFlatIP(self.embedding_dim)
             logger.info("FAISS index initialized (dim=%d)", self.embedding_dim)
         except ImportError as exc:
-            raise ImportError(
-                "faiss-cpu is required: pip install faiss-cpu"
-            ) from exc
+            raise ImportError("faiss-cpu is required: pip install faiss-cpu") from exc
 
     def add(self, documents: list[Document], embeddings: np.ndarray) -> None:
         try:
@@ -376,9 +395,7 @@ class FAISSVectorStore:
         top_k: int = settings.RAG_TOP_K,
     ) -> list[tuple[Document, float]]:
         if self._index is None or len(self._documents) == 0:
-            raise VectorStoreError(
-                "Vector store is empty. Ingest documents first."
-            )
+            raise VectorStoreError("Vector store is empty. Ingest documents first.")
         try:
             if query_embedding.ndim == 1:
                 query_embedding = query_embedding.reshape(1, -1)
@@ -396,6 +413,7 @@ class FAISSVectorStore:
     def save(self, path: Optional[str] = None) -> None:
         try:
             import faiss
+
             base = Path(path or settings.VECTOR_DB_PATH)
             base.parent.mkdir(parents=True, exist_ok=True)
             faiss.write_index(self._index, str(base) + ".faiss")
@@ -408,13 +426,12 @@ class FAISSVectorStore:
     def load(self, path: Optional[str] = None) -> None:
         try:
             import faiss
+
             base = Path(path or settings.VECTOR_DB_PATH)
             self._index = faiss.read_index(str(base) + ".faiss")
             with open(str(base) + "_docs.pkl", "rb") as f:
                 self._documents = pickle.load(f)
-            logger.info(
-                "Vector store loaded: %d documents", len(self._documents)
-            )
+            logger.info("Vector store loaded: %d documents", len(self._documents))
         except Exception as exc:
             raise VectorStoreError(f"Load failed: {exc}") from exc
 
@@ -427,6 +444,7 @@ class FAISSVectorStore:
 # RAG Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class RAGPipeline:
     """
     End-to-end Retrieval-Augmented Generation pipeline.
@@ -436,10 +454,10 @@ class RAGPipeline:
     """
 
     def __init__(self) -> None:
-        self.chunker      = TextChunker()
-        self.embedder     = EmbeddingGenerator()
+        self.chunker = TextChunker()
+        self.embedder = EmbeddingGenerator()
         self.vector_store = FAISSVectorStore()
-        self._fetcher     = WebArticleFetcher()
+        self._fetcher = WebArticleFetcher()
 
         self._store_initialized = False
 
@@ -460,32 +478,26 @@ class RAGPipeline:
             RAGError: On any ingestion failure.
         """
         try:
-            chunks     = self.chunker.chunk_documents(documents)
-            texts      = [c.content for c in chunks]
+            chunks = self.chunker.chunk_documents(documents)
+            texts = [c.content for c in chunks]
             embeddings = self.embedder.embed(texts)
 
             if self.vector_store.embedding_dim != embeddings.shape[1]:
-                self.vector_store = FAISSVectorStore(
-                    embedding_dim=embeddings.shape[1]
-                )
+                self.vector_store = FAISSVectorStore(embedding_dim=embeddings.shape[1])
 
             self.vector_store.add(chunks, embeddings)
             self._store_initialized = True
             logger.info(
                 "Ingested %d source docs → %d chunks indexed",
-                len(documents), len(chunks),
+                len(documents),
+                len(chunks),
             )
         except Exception as exc:
             raise RAGError(f"Ingestion failed: {exc}") from exc
 
-    def ingest_texts(
-        self, texts: list[str], source: str = "manual"
-    ) -> None:
+    def ingest_texts(self, texts: list[str], source: str = "manual") -> None:
         """Convenience wrapper to ingest raw text strings."""
-        docs = [
-            Document(content=t, metadata={"source": source})
-            for t in texts
-        ]
+        docs = [Document(content=t, metadata={"source": source}) for t in texts]
         self.ingest(docs)
 
     def ingest_url(self, url: str) -> dict:
@@ -524,21 +536,21 @@ class RAGPipeline:
         if normalized in self._ingested_urls:
             logger.info("URL already ingested — skipping: %s", normalized)
             return {
-                "url":        normalized,
-                "title":      "",
+                "url": normalized,
+                "title": "",
                 "char_count": 0,
-                "chunks":     0,
+                "chunks": 0,
                 "fetched_at": self._ingested_urls[normalized],
-                "duplicate":  True,
+                "duplicate": True,
             }
 
         fetched_at = datetime.now(timezone.utc).isoformat()
         title, text = self._fetcher.fetch(normalized)
 
         metadata = {
-            "source":     "url",
-            "url":        normalized,
-            "title":      title,
+            "source": "url",
+            "url": normalized,
+            "title": title,
             "fetched_at": fetched_at,
         }
 
@@ -549,16 +561,19 @@ class RAGPipeline:
         self._ingested_urls[normalized] = fetched_at
 
         result = {
-            "url":        normalized,
-            "title":      title,
+            "url": normalized,
+            "title": title,
             "char_count": len(text),
-            "chunks":     chunks_added,
+            "chunks": chunks_added,
             "fetched_at": fetched_at,
-            "duplicate":  False,
+            "duplicate": False,
         }
         logger.info(
             "URL ingested: %s | title=%r | chars=%d | chunks=%d",
-            normalized, title[:60], len(text), chunks_added,
+            normalized,
+            title[:60],
+            len(text),
+            chunks_added,
         )
         return result
 
@@ -576,7 +591,9 @@ class RAGPipeline:
         if path.suffix == ".json":
             with open(path) as f:
                 data = json.load(f)
-            texts = [str(d) for d in data] if isinstance(data, list) else [json.dumps(data)]
+            texts = (
+                [str(d) for d in data] if isinstance(data, list) else [json.dumps(data)]
+            )
         else:
             texts = [path.read_text(encoding="utf-8")]
 
@@ -599,16 +616,14 @@ class RAGPipeline:
             RAGError: If the store is uninitialized or retrieval fails.
         """
         if not self._store_initialized:
-            raise RAGError(
-                "Knowledge base is empty. Ingest documents or a URL first."
-            )
+            raise RAGError("Knowledge base is empty. Ingest documents or a URL first.")
         try:
             query_emb = self.embedder.embed([query])
-            results   = self.vector_store.search(query_emb, top_k=top_k)
+            results = self.vector_store.search(query_emb, top_k=top_k)
             return [
                 {
-                    "content":  doc.content,
-                    "score":    round(score, 4),
+                    "content": doc.content,
+                    "score": round(score, 4),
                     "metadata": doc.metadata,
                 }
                 for doc, score in results
@@ -618,9 +633,7 @@ class RAGPipeline:
         except Exception as exc:
             raise RAGError(f"Retrieval failed: {exc}") from exc
 
-    def build_context(
-        self, query: str, top_k: int = settings.RAG_TOP_K
-    ) -> str:
+    def build_context(self, query: str, top_k: int = settings.RAG_TOP_K) -> str:
         """
         Build a formatted context string for LLM injection.
 
@@ -641,8 +654,8 @@ class RAGPipeline:
 
         parts = ["Relevant financial context:\n"]
         for i, r in enumerate(results, 1):
-            meta  = r["metadata"]
-            src   = meta.get("url") or meta.get("source", "unknown")
+            meta = r["metadata"]
+            src = meta.get("url") or meta.get("source", "unknown")
             title = meta.get("title", "")
             label = f"{title} ({src})" if title else src
             parts.append(

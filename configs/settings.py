@@ -32,7 +32,9 @@ class Settings(BaseSettings):
 
     # ── API Keys ──────────────────────────────────────────────────────────────
     OPENAI_API_KEY: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
-    ALPHA_VANTAGE_API_KEY: Optional[str] = Field(default=None, env="ALPHA_VANTAGE_API_KEY")
+    ALPHA_VANTAGE_API_KEY: Optional[str] = Field(
+        default=None, env="ALPHA_VANTAGE_API_KEY"
+    )
 
     # ── Paths ─────────────────────────────────────────────────────────────────
     DATA_DIR: Path = BASE_DIR / "data"
@@ -44,7 +46,9 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = Field(default="sqlite:///./finsight.db", env="DATABASE_URL")
-    VECTOR_DB_PATH: str = Field(default="data/embeddings/faiss_index", env="VECTOR_DB_PATH")
+    VECTOR_DB_PATH: str = Field(
+        default="data/embeddings/faiss_index", env="VECTOR_DB_PATH"
+    )
 
     # ── ML Configuration ──────────────────────────────────────────────────────
     DEFAULT_TICKER: str = "AAPL"

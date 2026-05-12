@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -29,15 +28,18 @@ MODEL_REGISTRY: dict[str, Any] = {}
 
 def register_model(name: str):
     """Decorator to register a model factory function."""
+
     def decorator(fn):
         MODEL_REGISTRY[name] = fn
         return fn
+
     return decorator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Baseline Models
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @register_model("logistic_regression")
 def build_logistic_regression(
@@ -62,17 +64,22 @@ def build_logistic_regression(
     Returns:
         sklearn Pipeline.
     """
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(
-            C=C,
-            max_iter=max_iter,
-            class_weight=class_weight,
-            random_state=settings.RANDOM_SEED,
-            solver="lbfgs",
-            **kwargs,
-        )),
-    ])
+    return Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "clf",
+                LogisticRegression(
+                    C=C,
+                    max_iter=max_iter,
+                    class_weight=class_weight,
+                    random_state=settings.RANDOM_SEED,
+                    solver="lbfgs",
+                    **kwargs,
+                ),
+            ),
+        ]
+    )
 
 
 @register_model("random_forest")
@@ -113,6 +120,7 @@ def build_random_forest(
 # ─────────────────────────────────────────────────────────────────────────────
 # Advanced Models
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @register_model("xgboost")
 def build_xgboost(
@@ -209,6 +217,7 @@ def build_lightgbm(
 # Optional Deep Learning — LSTM
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def build_lstm(
     input_shape: tuple[int, int],
     units: int = 128,
@@ -233,7 +242,11 @@ def build_lstm(
     try:
         import tensorflow as tf
         from tensorflow.keras.layers import (
-            LSTM, BatchNormalization, Dense, Dropout, Input
+            LSTM,
+            BatchNormalization,
+            Dense,
+            Dropout,
+            Input,
         )
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.optimizers import Adam
@@ -242,18 +255,20 @@ def build_lstm(
 
     tf.random.set_seed(settings.RANDOM_SEED)
 
-    model = Sequential([
-        Input(shape=input_shape),
-        LSTM(units, return_sequences=True),
-        BatchNormalization(),
-        Dropout(dropout),
-        LSTM(units // 2),
-        BatchNormalization(),
-        Dropout(dropout),
-        Dense(32, activation="relu"),
-        Dropout(dropout / 2),
-        Dense(1, activation="sigmoid"),
-    ])
+    model = Sequential(
+        [
+            Input(shape=input_shape),
+            LSTM(units, return_sequences=True),
+            BatchNormalization(),
+            Dropout(dropout),
+            LSTM(units // 2),
+            BatchNormalization(),
+            Dropout(dropout),
+            Dense(32, activation="relu"),
+            Dropout(dropout / 2),
+            Dense(1, activation="sigmoid"),
+        ]
+    )
 
     model.compile(
         optimizer=Adam(learning_rate=learning_rate),
@@ -261,13 +276,16 @@ def build_lstm(
         metrics=["accuracy", tf.keras.metrics.AUC(name="auc")],
     )
 
-    logger.info("LSTM model built: input_shape=%s, params=%d", input_shape, model.count_params())
+    logger.info(
+        "LSTM model built: input_shape=%s, params=%d", input_shape, model.count_params()
+    )
     return model
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model Factory
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def get_model(name: str, **hyperparams) -> Any:
     """

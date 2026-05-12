@@ -5,8 +5,7 @@ Provides reusable fixtures for unit and integration tests.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -17,6 +16,7 @@ from fastapi.testclient import TestClient
 # ─────────────────────────────────────────────────────────────────────────────
 # OHLCV Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def sample_ohlcv() -> pd.DataFrame:
@@ -57,10 +57,12 @@ def small_ohlcv(sample_ohlcv: pd.DataFrame) -> pd.DataFrame:
 # Feature Matrix Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def feature_df(sample_ohlcv: pd.DataFrame) -> pd.DataFrame:
     """Full feature matrix built from synthetic OHLCV data."""
     from app.ml.feature_engineering import FeatureEngineer
+
     return FeatureEngineer().build_features(sample_ohlcv)
 
 
@@ -68,6 +70,7 @@ def feature_df(sample_ohlcv: pd.DataFrame) -> pd.DataFrame:
 def X_y(feature_df: pd.DataFrame):
     """Split feature matrix into X and y."""
     from app.ml.feature_engineering import FeatureEngineer
+
     return FeatureEngineer().split_X_y(feature_df)
 
 
@@ -75,10 +78,12 @@ def X_y(feature_df: pd.DataFrame):
 # Trained Model Fixture
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def trained_rf(X_y):
     """A fitted RandomForest model for use in explainability / eval tests."""
     from app.ml.models.model_factory import get_model
+
     X, y = X_y
     model = get_model("random_forest", n_estimators=20)
     model.fit(X, y)
@@ -89,9 +94,11 @@ def trained_rf(X_y):
 # FastAPI TestClient
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def api_client():
     """FastAPI test client with mocked service layer."""
     from main import app
+
     with TestClient(app) as client:
         yield client

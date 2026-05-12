@@ -50,13 +50,14 @@ from app.core.logging_config import get_logger
 logger = get_logger("explainability")
 
 # ── Shared confidence thresholds (must match prediction_service._confidence_label) ──
-_CONFIDENCE_HIGH_DELTA     = 0.15
+_CONFIDENCE_HIGH_DELTA = 0.15
 _CONFIDENCE_MODERATE_DELTA = 0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHAP Explainer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SHAPExplainer:
     """
@@ -78,9 +79,9 @@ class SHAPExplainer:
         except ImportError as exc:
             raise ImportError("shap is required: pip install shap") from exc
 
-        self.model           = model
+        self.model = model
         self.feature_columns = feature_columns
-        self._shap           = shap
+        self._shap = shap
         self._explainer: Optional[Any] = None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -115,19 +116,21 @@ class SHAPExplainer:
         if self._explainer is not None:
             return
 
-        clf        = self._get_underlying_model()
+        clf = self._get_underlying_model()
         model_type = type(clf).__name__.lower()
 
         try:
-            if any(kw in model_type for kw in
-                   ["xgb", "lgbm", "randomforest", "gradientboosting"]):
+            if any(
+                kw in model_type
+                for kw in ["xgb", "lgbm", "randomforest", "gradientboosting"]
+            ):
                 self._explainer = self._shap.TreeExplainer(clf)
                 logger.info("Using TreeExplainer for %s", type(clf).__name__)
             else:
-                background  = self._shap.sample(
+                background = self._shap.sample(
                     X_background, min(100, len(X_background))
                 )
-                predict_fn  = (
+                predict_fn = (
                     (lambda x: self.model.predict_proba(x)[:, 1])
                     if hasattr(self.model, "predict_proba")
                     else self.model.predict
@@ -135,9 +138,7 @@ class SHAPExplainer:
                 self._explainer = self._shap.KernelExplainer(predict_fn, background)
                 logger.info("Using KernelExplainer for %s", type(clf).__name__)
         except Exception as exc:
-            raise ExplainabilityError(
-                f"Failed to build SHAP explainer: {exc}"
-            ) from exc
+            raise ExplainabilityError(f"Failed to build SHAP explainer: {exc}") from exc
 
     def compute_shap_values(
         self,
@@ -161,7 +162,7 @@ class SHAPExplainer:
         """
         try:
             self._build_explainer(X)
-            X_subset    = X.iloc[:max_samples] if len(X) > max_samples else X
+            X_subset = X.iloc[:max_samples] if len(X) > max_samples else X
             shap_values = self._explainer.shap_values(X_subset)
 
             if isinstance(shap_values, list):
@@ -182,9 +183,7 @@ class SHAPExplainer:
         except ExplainabilityError:
             raise
         except Exception as exc:
-            raise ExplainabilityError(
-                f"SHAP value computation failed: {exc}"
-            ) from exc
+            raise ExplainabilityError(f"SHAP value computation failed: {exc}") from exc
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -204,7 +203,7 @@ class SHAPExplainer:
             DataFrame with ``'feature'`` and ``'mean_abs_shap'`` columns.
         """
         shap_values = self.compute_shap_values(X)
-        mean_abs    = np.abs(shap_values).mean(axis=0)
+        mean_abs = np.abs(shap_values).mean(axis=0)
         return (
             pd.DataFrame({"feature": self.feature_columns, "mean_abs_shap": mean_abs})
             .sort_values("mean_abs_shap", ascending=False)
@@ -239,12 +238,12 @@ class SHAPExplainer:
         # Resolve base value for the positive class
         ev = self._explainer.expected_value
         if isinstance(ev, (list, np.ndarray)):
-            ev_arr     = np.asarray(ev).ravel()
+            ev_arr = np.asarray(ev).ravel()
             base_value = float(ev_arr[1] if len(ev_arr) > 1 else ev_arr[0])
         else:
             base_value = float(ev)
 
-        shap_row  = shap_values[0]
+        shap_row = shap_values[0]
         pred_prob = float(np.clip(base_value + shap_row.sum(), 0.0, 1.0))
 
         feature_shap = sorted(
@@ -254,14 +253,18 @@ class SHAPExplainer:
         )
 
         return {
-            "base_value":             round(base_value, 4),
-            "prediction_probability": round(pred_prob, 4),   # SHAP-internal, uncalibrated
-            "predicted_class":        int(pred_prob >= 0.5), # SHAP-internal, do NOT use for display
+            "base_value": round(base_value, 4),
+            "prediction_probability": round(
+                pred_prob, 4
+            ),  # SHAP-internal, uncalibrated
+            "predicted_class": int(
+                pred_prob >= 0.5
+            ),  # SHAP-internal, do NOT use for display
             "top_features": [
                 {
-                    "feature":       f,
-                    "shap_value":    round(v, 4),
-                    "direction":     "bullish" if v > 0 else "bearish",
+                    "feature": f,
+                    "shap_value": round(v, 4),
+                    "direction": "bullish" if v > 0 else "bearish",
                     "feature_value": round(float(X_instance.iloc[0][f]), 4),
                 }
                 for f, v in feature_shap[:top_n]
@@ -306,9 +309,9 @@ class SHAPExplainer:
         """
         # ── Use authoritative calibrated values when available ─────────────
         if authoritative_prediction is not None:
-            pred   = authoritative_prediction
+            pred = authoritative_prediction
         else:
-            pred   = local_exp["predicted_class"]
+            pred = local_exp["predicted_class"]
 
         if authoritative_p_bullish is not None:
             p_bull = authoritative_p_bullish
@@ -318,7 +321,7 @@ class SHAPExplainer:
 
         direction = "BULLISH (UP)" if pred == 1 else "BEARISH (DOWN)"
         # Directional probability: confidence of the predicted direction
-        prob      = p_bull if pred == 1 else (1.0 - p_bull)
+        prob = p_bull if pred == 1 else (1.0 - p_bull)
 
         # Confidence label using the same thresholds as prediction_service
         delta = abs(p_bull - 0.5)
@@ -344,15 +347,13 @@ class SHAPExplainer:
 
         if bullish_features:
             bull_str = ", ".join(
-                f"{f['feature']} (+{f['shap_value']:.3f})"
-                for f in bullish_features
+                f"{f['feature']} (+{f['shap_value']:.3f})" for f in bullish_features
             )
             parts.append(f"Bullish drivers: {bull_str}.")
 
         if bearish_features:
             bear_str = ", ".join(
-                f"{f['feature']} ({f['shap_value']:.3f})"
-                for f in bearish_features
+                f"{f['feature']} ({f['shap_value']:.3f})" for f in bearish_features
             )
             parts.append(f"Bearish headwinds: {bear_str}.")
 
@@ -362,6 +363,7 @@ class SHAPExplainer:
 # ─────────────────────────────────────────────────────────────────────────────
 # LIME Explainer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class LIMEExplainer:
     """
@@ -375,9 +377,9 @@ class LIMEExplainer:
         except ImportError as exc:
             raise ImportError("lime is required: pip install lime") from exc
 
-        self.model                  = model
-        self.feature_columns        = feature_columns
-        self._LimeTabularExplainer  = LimeTabularExplainer
+        self.model = model
+        self.feature_columns = feature_columns
+        self._LimeTabularExplainer = LimeTabularExplainer
         self._explainer: Optional[Any] = None
 
     def fit(self, X_train: pd.DataFrame) -> "LIMEExplainer":
@@ -410,9 +412,7 @@ class LIMEExplainer:
             ExplainabilityError: If explainer not initialized or fails.
         """
         if self._explainer is None:
-            raise ExplainabilityError(
-                "Call .fit(X_train) before explain_instance()."
-            )
+            raise ExplainabilityError("Call .fit(X_train) before explain_instance().")
         try:
             exp = self._explainer.explain_instance(
                 X_instance.values[0],

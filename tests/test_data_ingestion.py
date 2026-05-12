@@ -4,12 +4,16 @@ Tests for app.ml.data_ingestion
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
-from app.core.exceptions import DataIngestionError, DataValidationError, InsufficientDataError
+from app.core.exceptions import (
+    DataIngestionError,
+    DataValidationError,
+    InsufficientDataError,
+)
 from app.ml.data_ingestion import (
     get_data_summary,
     ingest_market_data,
@@ -45,8 +49,17 @@ class TestValidateOHLCV:
 class TestGetDataSummary:
     def test_returns_expected_keys(self, sample_ohlcv):
         summary = get_data_summary(sample_ohlcv, "AAPL")
-        expected = {"ticker", "start_date", "end_date", "rows", "columns",
-                    "close_min", "close_max", "close_mean", "null_count"}
+        expected = {
+            "ticker",
+            "start_date",
+            "end_date",
+            "rows",
+            "columns",
+            "close_min",
+            "close_max",
+            "close_mean",
+            "null_count",
+        }
         assert expected.issubset(summary.keys())
 
     def test_correct_ticker(self, sample_ohlcv):
@@ -62,9 +75,12 @@ class TestIngestMarketData:
     def test_ingest_uses_cache(self, sample_ohlcv, tmp_path, monkeypatch):
         """Should return cached parquet on second call without hitting yfinance."""
         import app.ml.data_ingestion as ingestion_mod
+
         monkeypatch.setattr(ingestion_mod.settings, "RAW_DATA_DIR", tmp_path)
 
-        with patch("app.ml.data_ingestion.fetch_yfinance", return_value=sample_ohlcv) as mock_fetch:
+        with patch(
+            "app.ml.data_ingestion.fetch_yfinance", return_value=sample_ohlcv
+        ) as mock_fetch:
             df1 = ingest_market_data("AAPL", period_years=2, use_cache=True)
             df2 = ingest_market_data("AAPL", period_years=2, use_cache=True)
             assert mock_fetch.call_count == 1
@@ -72,9 +88,12 @@ class TestIngestMarketData:
 
     def test_ingest_raises_on_fetch_failure(self, tmp_path, monkeypatch):
         import app.ml.data_ingestion as ingestion_mod
+
         monkeypatch.setattr(ingestion_mod.settings, "RAW_DATA_DIR", tmp_path)
 
-        with patch("app.ml.data_ingestion.fetch_yfinance",
-                   side_effect=DataIngestionError("network error")):
+        with patch(
+            "app.ml.data_ingestion.fetch_yfinance",
+            side_effect=DataIngestionError("network error"),
+        ):
             with pytest.raises(DataIngestionError):
                 ingest_market_data("FAKE", period_years=1, use_cache=False)

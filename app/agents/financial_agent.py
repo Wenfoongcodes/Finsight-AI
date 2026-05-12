@@ -57,6 +57,7 @@ logger = get_logger("agents")
 # Suppress noisy third-party loggers (Issue 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _suppress_ddgs_loggers() -> None:
     """
     Silence DEBUG-level loggers emitted by the ``ddgs`` Rust HTTP client.
@@ -89,6 +90,7 @@ _suppress_ddgs_loggers()
 # JSON Extraction Utility
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _extract_json_array(text: str) -> str:
     """
     Robustly extract a JSON array from an LLM response string.
@@ -96,9 +98,9 @@ def _extract_json_array(text: str) -> str:
     Handles: markdown fences, trailing prose, leading prose, whitespace.
     Strategy: strip fences with regex, then slice first ``[`` to last ``]``.
     """
-    text  = re.sub(r"```(?:json|JSON)?\s*", "", text).strip()
+    text = re.sub(r"```(?:json|JSON)?\s*", "", text).strip()
     start = text.find("[")
-    end   = text.rfind("]")
+    end = text.rfind("]")
     if start == -1 or end == -1 or end < start:
         raise ValueError(f"No JSON array found in LLM response: {text!r}")
     return text[start : end + 1]
@@ -108,14 +110,15 @@ def _extract_json_array(text: str) -> str:
 # Tool Definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ToolResult:
     """Standardized output from an agent tool."""
 
     tool_name: str
-    success:   bool
-    output:    Any
-    error:     Optional[str] = None
+    success: bool
+    output: Any
+    error: Optional[str] = None
 
     def to_context_string(self) -> str:
         if self.success:
@@ -127,15 +130,16 @@ class ToolResult:
 class AgentTool:
     """Agent tool descriptor with callable function."""
 
-    name:          str
-    description:   str
-    fn:            Callable[..., Any]
+    name: str
+    description: str
+    fn: Callable[..., Any]
     required_args: list[str]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Individual Tool Implementations
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class FinancialAgentTools:
     """
@@ -152,6 +156,7 @@ class FinancialAgentTools:
     def _svc(self) -> Any:
         if self._prediction_service is None:
             from app.services.prediction_service import PredictionService
+
             self._prediction_service = PredictionService()
         return self._prediction_service
 
@@ -171,10 +176,10 @@ class FinancialAgentTools:
         try:
             result = self._svc.predict(ticker, model_name=model_name)
             return {
-                "ticker":       result.ticker,
-                "prediction":   "BULLISH" if result.prediction == 1 else "BEARISH",
-                "probability":  result.probability,
-                "confidence":   result.confidence_label,
+                "ticker": result.ticker,
+                "prediction": "BULLISH" if result.prediction == 1 else "BEARISH",
+                "probability": result.probability,
+                "confidence": result.confidence_label,
                 "latest_close": result.latest_close,
             }
         except Exception as exc:
@@ -194,8 +199,8 @@ class FinancialAgentTools:
         try:
             result = self._svc.predict(ticker, model_name=model_name)
             return {
-                "ticker":       result.ticker,
-                "narrative":    result.narrative,
+                "ticker": result.ticker,
+                "narrative": result.narrative,
                 "top_features": result.shap_explanation.get("top_features", [])[:5],
             }
         except Exception as exc:
@@ -225,7 +230,7 @@ class FinancialAgentTools:
                 "retrieve_financial_context: knowledge base is empty — skipping."
             )
             return {
-                "query":   query,
+                "query": query,
                 "results": [],
                 "note": (
                     "Knowledge base is empty. "
@@ -263,25 +268,55 @@ class FinancialAgentTools:
         """
         try:
             bullish_kw = {
-                "surge", "rally", "beat", "strong", "growth", "bullish", "up",
-                "gain", "profit", "outperform", "record", "high", "positive",
-                "rises", "jumped", "soared", "lifted", "upgraded", "raises",
+                "surge",
+                "rally",
+                "beat",
+                "strong",
+                "growth",
+                "bullish",
+                "up",
+                "gain",
+                "profit",
+                "outperform",
+                "record",
+                "high",
+                "positive",
+                "rises",
+                "jumped",
+                "soared",
+                "lifted",
+                "upgraded",
+                "raises",
             }
             bearish_kw = {
-                "drop", "fall", "miss", "weak", "loss", "bearish", "down",
-                "decline", "risk", "concern", "low", "negative", "crash",
-                "fell", "tumbled", "slumped", "cut", "downgraded", "warning",
+                "drop",
+                "fall",
+                "miss",
+                "weak",
+                "loss",
+                "bearish",
+                "down",
+                "decline",
+                "risk",
+                "concern",
+                "low",
+                "negative",
+                "crash",
+                "fell",
+                "tumbled",
+                "slumped",
+                "cut",
+                "downgraded",
+                "warning",
             }
-            words      = set(text.lower().split())
+            words = set(text.lower().split())
             bull_count = len(words & bullish_kw)
             bear_count = len(words & bearish_kw)
-            total      = bull_count + bear_count or 1
-            score      = (bull_count - bear_count) / total
+            total = bull_count + bear_count or 1
+            score = (bull_count - bear_count) / total
 
             label = (
-                "positive" if score > 0.1
-                else "negative" if score < -0.1
-                else "neutral"
+                "positive" if score > 0.1 else "negative" if score < -0.1 else "neutral"
             )
             return {"text": text[:300], "sentiment": label, "score": round(score, 3)}
         except Exception as exc:
@@ -299,6 +334,7 @@ class FinancialAgentTools:
         """
         try:
             from app.ml.data_ingestion import get_data_summary, ingest_market_data
+
             df = ingest_market_data(ticker, period_years=1)
             return get_data_summary(df, ticker)
         except Exception as exc:
@@ -345,11 +381,12 @@ class FinancialAgentTools:
 
         if DDGS is None:
             try:
-                from duckduckgo_search import DDGS  # pip install duckduckgo-search (old name)
+                from duckduckgo_search import (
+                    DDGS,
+                )  # pip install duckduckgo-search (old name)
             except ImportError:
                 raise ToolExecutionError(
-                    "Web search package not installed. "
-                    "Run: pip install ddgs"
+                    "Web search package not installed. Run: pip install ddgs"
                 )
 
         try:
@@ -360,15 +397,15 @@ class FinancialAgentTools:
 
             if not raw:
                 return {
-                    "query":   query,
+                    "query": query,
                     "results": [],
                     "summary": "No results found.",
                 }
 
             results = [
                 {
-                    "title":   r.get("title", ""),
-                    "url":     r.get("href", ""),
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
                     "snippet": r.get("body", "")[:400],
                 }
                 for r in raw
@@ -377,9 +414,7 @@ class FinancialAgentTools:
             lines = []
             for i, r in enumerate(results, 1):
                 lines.append(
-                    f"[{i}] {r['title']}\n"
-                    f"    URL: {r['url']}\n"
-                    f"    {r['snippet']}"
+                    f"[{i}] {r['title']}\n    URL: {r['url']}\n    {r['snippet']}"
                 )
             summary = "\n\n".join(lines)
 
@@ -436,6 +471,7 @@ IMPORTANT ordering and usage rules:
 # Agent Orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class FinancialAgent:
     """
     Agentic AI orchestrator that selects and executes tools to answer
@@ -457,12 +493,12 @@ class FinancialAgent:
     def __init__(
         self,
         tools_instance: Optional[FinancialAgentTools] = None,
-        chat_system:    Optional[FinancialChatSystem] = None,
-        rag_pipeline:   Optional[Any] = None,
+        chat_system: Optional[FinancialChatSystem] = None,
+        rag_pipeline: Optional[Any] = None,
     ) -> None:
         self.tools_instance = tools_instance or FinancialAgentTools()
-        self.chat_system    = chat_system
-        self.rag_pipeline   = rag_pipeline
+        self.chat_system = chat_system
+        self.rag_pipeline = rag_pipeline
         self._llm: Optional[OpenAIClient] = None
         self._tool_registry: dict[str, AgentTool] = self._build_tool_registry()
 
@@ -542,24 +578,26 @@ class FinancialAgent:
         # Only register retrieve_financial_context when a rag_pipeline is wired in.
         # The tool itself still guards against empty stores at execution time.
         if self.rag_pipeline:
-            tools.append(AgentTool(
-                name="retrieve_financial_context",
-                description=(
-                    "Search the ingested financial knowledge base for relevant context. "
-                    "Only useful when the knowledge base status is POPULATED."
-                ),
-                fn=lambda query: ti.retrieve_financial_context(
-                    query, self.rag_pipeline
-                ),
-                required_args=["query"],
-            ))
+            tools.append(
+                AgentTool(
+                    name="retrieve_financial_context",
+                    description=(
+                        "Search the ingested financial knowledge base for relevant context. "
+                        "Only useful when the knowledge base status is POPULATED."
+                    ),
+                    fn=lambda query: ti.retrieve_financial_context(
+                        query, self.rag_pipeline
+                    ),
+                    required_args=["query"],
+                )
+            )
 
         return {t.name: t for t in tools}
 
     def _validate_step(self, step: dict) -> tuple[bool, str]:
         """Validate a planned tool call against the registry."""
         tool_name = step.get("tool", "")
-        args      = step.get("args", {})
+        args = step.get("args", {})
 
         if not isinstance(tool_name, str) or not tool_name.strip():
             return False, "Missing or empty tool name"
@@ -569,8 +607,7 @@ class FinancialAgent:
             return False, f"'args' must be a dict, got {type(args).__name__}"
 
         missing = [
-            a for a in self._tool_registry[tool_name].required_args
-            if a not in args
+            a for a in self._tool_registry[tool_name].required_args if a not in args
         ]
         if missing:
             return False, f"Missing required args for {tool_name!r}: {missing}"
@@ -588,8 +625,7 @@ class FinancialAgent:
         """
         try:
             tool_descriptions = "\n".join(
-                f"- {t.name}: {t.description}"
-                for t in self._tool_registry.values()
+                f"- {t.name}: {t.description}" for t in self._tool_registry.values()
             )
             user_message = _PLANNER_USER.format(
                 tool_descriptions=tool_descriptions,
@@ -600,14 +636,14 @@ class FinancialAgent:
             raw_response, _ = self._get_llm().chat(
                 messages=[
                     {"role": "system", "content": _PLANNER_SYSTEM},
-                    {"role": "user",   "content": user_message},
+                    {"role": "user", "content": user_message},
                 ],
                 temperature=0.0,
                 max_tokens=512,
             )
 
             array_str = _extract_json_array(raw_response)
-            plan      = json.loads(array_str)
+            plan = json.loads(array_str)
 
             if not isinstance(plan, list):
                 logger.warning(
@@ -622,9 +658,7 @@ class FinancialAgent:
                 if ok:
                     validated.append(step)
                 else:
-                    logger.warning(
-                        "Dropping invalid tool call %s — %s", step, reason
-                    )
+                    logger.warning("Dropping invalid tool call %s — %s", step, reason)
 
             logger.info("Agent plan for %r: %s", query[:60], validated)
             return validated
@@ -668,16 +702,14 @@ class FinancialAgent:
             AgentError: On unrecoverable failure.
         """
         try:
-            plan         = self._plan_tool_calls(query)
+            plan = self._plan_tool_calls(query)
             tool_results: list[ToolResult] = []
 
             for step in plan[:3]:
                 result = self._execute_tool(step["tool"], step.get("args", {}))
                 tool_results.append(result)
 
-            tool_context = "\n".join(
-                r.to_context_string() for r in tool_results
-            )
+            tool_context = "\n".join(r.to_context_string() for r in tool_results)
 
             if self.chat_system:
                 chat_resp = self.chat_system.chat(
@@ -693,9 +725,9 @@ class FinancialAgent:
                 )
 
             return {
-                "query":        query,
-                "response":     final_response,
-                "tools_used":   [r.tool_name for r in tool_results if r.success],
+                "query": query,
+                "response": final_response,
+                "tools_used": [r.tool_name for r in tool_results if r.success],
                 "tool_results": [
                     {"tool": r.tool_name, "success": r.success, "output": r.output}
                     for r in tool_results

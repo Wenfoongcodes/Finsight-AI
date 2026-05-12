@@ -32,7 +32,11 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
-from app.core.exceptions import DataIngestionError, DataValidationError, InsufficientDataError
+from app.core.exceptions import (
+    DataIngestionError,
+    DataValidationError,
+    InsufficientDataError,
+)
 from app.core.logging_config import get_logger
 from configs.settings import settings
 
@@ -46,6 +50,7 @@ MIN_ROWS_SUMMARY = 20
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema Validation
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def validate_ohlcv(df: pd.DataFrame, ticker: str, min_rows: int = MIN_ROWS) -> None:
     """
@@ -93,6 +98,7 @@ def validate_ohlcv(df: pd.DataFrame, ticker: str, min_rows: int = MIN_ROWS) -> N
 # Caching
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _cache_key(ticker: str, start: str, end: str) -> str:
     raw = f"{ticker}_{start}_{end}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
@@ -122,7 +128,7 @@ def _load_from_cache(
         return None
 
     file_age_seconds = time.time() - path.stat().st_mtime
-    max_age_seconds  = max_age_days * 86_400
+    max_age_seconds = max_age_days * 86_400
 
     if file_age_seconds > max_age_seconds:
         logger.debug(
@@ -147,6 +153,7 @@ def _save_to_cache(df: pd.DataFrame, path: Path) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Fetchers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def fetch_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
     """
@@ -191,6 +198,7 @@ def fetch_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def ingest_market_data(
     ticker: str,
     period_years: int = settings.DEFAULT_PERIOD_YEARS,
@@ -224,7 +232,7 @@ def ingest_market_data(
         DataValidationError: On schema violations.
         InsufficientDataError: On insufficient row count.
     """
-    end   = end_date or date.today().isoformat()
+    end = end_date or date.today().isoformat()
     start = start_date or (
         datetime.strptime(end, "%Y-%m-%d") - timedelta(days=period_years * 365)
     ).strftime("%Y-%m-%d")
@@ -285,13 +293,13 @@ def get_data_summary(df: pd.DataFrame, ticker: str) -> dict:
         Dict with date range, row count, and basic price statistics.
     """
     return {
-        "ticker":     ticker,
+        "ticker": ticker,
         "start_date": str(df.index.min().date()),
-        "end_date":   str(df.index.max().date()),
-        "rows":       len(df),
-        "columns":    list(df.columns),
-        "close_min":  round(float(df["Close"].min()), 4),
-        "close_max":  round(float(df["Close"].max()), 4),
+        "end_date": str(df.index.max().date()),
+        "rows": len(df),
+        "columns": list(df.columns),
+        "close_min": round(float(df["Close"].min()), 4),
+        "close_max": round(float(df["Close"].max()), 4),
         "close_mean": round(float(df["Close"].mean()), 4),
         "null_count": int(df.isnull().sum().sum()),
     }

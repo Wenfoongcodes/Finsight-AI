@@ -63,10 +63,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────────────────
 
 HORIZONS: dict[str, int] = {
-    "1d":   1,
-    "7d":   5,   # trading days
-    "1m":   21,
-    "6m":   126,
+    "1d": 1,
+    "7d": 5,  # trading days
+    "1m": 21,
+    "6m": 126,
 }
 
 
@@ -74,11 +74,12 @@ HORIZONS: dict[str, int] = {
 # Indicator Primitives
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def compute_rsi(series: pd.Series, period: int = settings.RSI_PERIOD) -> pd.Series:
     """Relative Strength Index (Wilder smoothing)."""
     delta = series.diff()
-    gain  = delta.clip(lower=0)
-    loss  = -delta.clip(upper=0)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
@@ -92,9 +93,9 @@ def compute_macd(
     signal: int = settings.MACD_SIGNAL,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """MACD line, Signal line, Histogram."""
-    ema_fast    = series.ewm(span=fast, adjust=False).mean()
-    ema_slow    = series.ewm(span=slow, adjust=False).mean()
-    macd_line   = ema_fast - ema_slow
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line, macd_line - signal_line
 
@@ -106,7 +107,7 @@ def compute_bollinger_bands(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Bollinger Bands: middle (SMA), upper, lower."""
     middle = series.rolling(window=period, min_periods=period).mean()
-    std    = series.rolling(window=period, min_periods=period).std()
+    std = series.rolling(window=period, min_periods=period).std()
     return middle, middle + std_dev * std, middle - std_dev * std
 
 
@@ -138,11 +139,13 @@ def compute_garman_klass_vol(
     full OHLC price path.  Formula:
         σ² = 0.5(ln(H/L))² − (2ln2−1)(ln(C/O))²
     """
-    hl_log  = np.log(high / low.replace(0, np.nan))
-    co_log  = np.log(close / open_.replace(0, np.nan))
-    gk      = 0.5 * hl_log**2 - (2 * np.log(2) - 1) * co_log**2
-    return gk.rolling(period, min_periods=period).mean().apply(
-        lambda x: np.sqrt(max(x, 0) * 252)
+    hl_log = np.log(high / low.replace(0, np.nan))
+    co_log = np.log(close / open_.replace(0, np.nan))
+    gk = 0.5 * hl_log**2 - (2 * np.log(2) - 1) * co_log**2
+    return (
+        gk.rolling(period, min_periods=period)
+        .mean()
+        .apply(lambda x: np.sqrt(max(x, 0) * 252))
     )
 
 
@@ -183,9 +186,9 @@ def compute_amihud_illiquidity(
     Higher values indicate more price impact per dollar traded.
     Scaled by 1e6 for readability.
     """
-    abs_ret    = close.pct_change().abs()
+    abs_ret = close.pct_change().abs()
     dollar_vol = close * volume
-    illiq      = (abs_ret / dollar_vol.replace(0, np.nan)) * 1e6
+    illiq = (abs_ret / dollar_vol.replace(0, np.nan)) * 1e6
     return illiq.rolling(period, min_periods=period).mean()
 
 
@@ -216,9 +219,7 @@ def compute_ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
-def compute_vol_regime(
-    realized_vol: pd.Series, lookback: int = 252
-) -> pd.Series:
+def compute_vol_regime(realized_vol: pd.Series, lookback: int = 252) -> pd.Series:
     """
     Volatility regime percentile rank over ``lookback`` bars.
 
@@ -231,7 +232,9 @@ def compute_vol_regime(
     return realized_vol.rolling(lookback, min_periods=60).rank(pct=True)
 
 
-def compute_trend_regime(close: pd.Series, fast: int = 50, slow: int = 200) -> pd.Series:
+def compute_trend_regime(
+    close: pd.Series, fast: int = 50, slow: int = 200
+) -> pd.Series:
     """
     Simple trend-regime indicator: +1 (uptrend), -1 (downtrend), 0 (neutral).
 
@@ -239,9 +242,9 @@ def compute_trend_regime(close: pd.Series, fast: int = 50, slow: int = 200) -> p
     """
     sma_fast = compute_sma(close, fast)
     sma_slow = compute_sma(close, slow)
-    diff     = (sma_fast - sma_slow) / sma_slow.replace(0, np.nan)
-    regime   = pd.Series(0.0, index=close.index)
-    regime[diff >  0.02] =  1.0
+    diff = (sma_fast - sma_slow) / sma_slow.replace(0, np.nan)
+    regime = pd.Series(0.0, index=close.index)
+    regime[diff > 0.02] = 1.0
     regime[diff < -0.02] = -1.0
     return regime
 
@@ -255,7 +258,7 @@ def compute_volume_imbalance(
     Positive close relative to open suggests buyer-initiated volume.
     Negative → seller-initiated.  Rolling mean smooths the signal.
     """
-    body_pct  = (close - open_) / (close + open_).replace(0, np.nan)
+    body_pct = (close - open_) / (close + open_).replace(0, np.nan)
     imbalance = body_pct * volume
     return imbalance.rolling(period, min_periods=period).mean()
 
@@ -282,13 +285,14 @@ def compute_momentum_persistence(
     < 1 → deceleration / reversal pressure
     """
     mom_short = compute_momentum(close, short)
-    mom_long  = compute_momentum(close, long)
+    mom_long = compute_momentum(close, long)
     return mom_short / mom_long.replace(0, np.nan)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature Selector
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class FeatureSelector:
     """
@@ -317,12 +321,12 @@ class FeatureSelector:
         mi_top_n: Optional[int] = 60,
         random_state: int = settings.RANDOM_SEED,
     ) -> None:
-        self.variance_threshold    = variance_threshold
+        self.variance_threshold = variance_threshold
         self.correlation_threshold = correlation_threshold
-        self.mi_top_n              = mi_top_n
-        self.random_state          = random_state
+        self.mi_top_n = mi_top_n
+        self.random_state = random_state
         self.selected_features_: list[str] = []
-        self._is_fitted            = False
+        self._is_fitted = False
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "FeatureSelector":
         """Fit the selector on training data."""
@@ -336,19 +340,25 @@ class FeatureSelector:
         logger.info("After variance threshold: %d features", len(cols))
 
         # Stage 2: Correlation filter
-        X_sub  = X[cols]
-        corr   = X_sub.corr().abs()
-        upper  = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-        to_drop = {col for col in upper.columns if any(upper[col] > self.correlation_threshold)}
-        cols   = [c for c in cols if c not in to_drop]
-        logger.info("After correlation filter (%.2f): %d features", self.correlation_threshold, len(cols))
+        X_sub = X[cols]
+        corr = X_sub.corr().abs()
+        upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+        to_drop = {
+            col for col in upper.columns if any(upper[col] > self.correlation_threshold)
+        }
+        cols = [c for c in cols if c not in to_drop]
+        logger.info(
+            "After correlation filter (%.2f): %d features",
+            self.correlation_threshold,
+            len(cols),
+        )
 
         # Stage 3: Mutual information
         if self.mi_top_n and len(cols) > self.mi_top_n:
-            X_mi  = X[cols].fillna(0)
-            mi    = mutual_info_classif(X_mi, y, random_state=self.random_state)
+            X_mi = X[cols].fillna(0)
+            mi = mutual_info_classif(X_mi, y, random_state=self.random_state)
             mi_df = pd.Series(mi, index=cols).sort_values(ascending=False)
-            cols  = list(mi_df.head(self.mi_top_n).index)
+            cols = list(mi_df.head(self.mi_top_n).index)
             logger.info("After MI top-%d: %d features", self.mi_top_n, len(cols))
 
         self.selected_features_ = cols
@@ -369,6 +379,7 @@ class FeatureSelector:
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature Engineer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class FeatureEngineer:
     """
@@ -395,7 +406,7 @@ class FeatureEngineer:
         rolling_windows: Optional[list[int]] = None,
         compute_hurst_exp: bool = False,
     ) -> None:
-        self.rolling_windows  = rolling_windows or settings.ROLLING_WINDOWS
+        self.rolling_windows = rolling_windows or settings.ROLLING_WINDOWS
         self.compute_hurst_exp = compute_hurst_exp
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -430,7 +441,8 @@ class FeatureEngineer:
 
             logger.info(
                 "Feature matrix built: %d features × %d rows",
-                feat.shape[1], feat.shape[0],
+                feat.shape[1],
+                feat.shape[0],
             )
 
             feat.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -447,15 +459,16 @@ class FeatureEngineer:
         except (InsufficientDataError, FeatureEngineeringError):
             raise
         except Exception as exc:
-            raise FeatureEngineeringError(
-                f"Feature engineering failed: {exc}"
-            ) from exc
+            raise FeatureEngineeringError(f"Feature engineering failed: {exc}") from exc
 
     def get_feature_columns(self, df: pd.DataFrame) -> list[str]:
         """Return feature column names (excludes OHLCV + all target columns)."""
-        target_cols = set(settings.TARGET_COLUMN)
         horizon_targets = {f"target_{h}" for h in HORIZONS}
-        exclude = {"Open", "High", "Low", "Close", "Volume"} | horizon_targets | {settings.TARGET_COLUMN}
+        exclude = (
+            {"Open", "High", "Low", "Close", "Volume"}
+            | horizon_targets
+            | {settings.TARGET_COLUMN}
+        )
         return [c for c in df.columns if c not in exclude]
 
     def split_X_y(
@@ -489,11 +502,11 @@ class FeatureEngineer:
 
     def _price_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
-        feat["returns_1d"]   = close.pct_change(1)
-        feat["returns_3d"]   = close.pct_change(3)
-        feat["returns_5d"]   = close.pct_change(5)
-        feat["returns_10d"]  = close.pct_change(10)
-        feat["log_returns"]  = np.log(close / close.shift(1))
+        feat["returns_1d"] = close.pct_change(1)
+        feat["returns_3d"] = close.pct_change(3)
+        feat["returns_5d"] = close.pct_change(5)
+        feat["returns_10d"] = close.pct_change(10)
+        feat["log_returns"] = np.log(close / close.shift(1))
         # Gap (overnight jump)
         feat["overnight_gap"] = (feat["Open"] - close.shift(1)) / close.shift(1)
         return feat
@@ -501,17 +514,17 @@ class FeatureEngineer:
     def _momentum_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
         # RSI
-        feat["rsi_14"]         = compute_rsi(close, 14)
-        feat["rsi_7"]          = compute_rsi(close, 7)
-        feat["rsi_21"]         = compute_rsi(close, 21)
+        feat["rsi_14"] = compute_rsi(close, 14)
+        feat["rsi_7"] = compute_rsi(close, 7)
+        feat["rsi_21"] = compute_rsi(close, 21)
         feat["rsi_overbought"] = (feat["rsi_14"] > 70).astype(int)
-        feat["rsi_oversold"]   = (feat["rsi_14"] < 30).astype(int)
+        feat["rsi_oversold"] = (feat["rsi_14"] < 30).astype(int)
         # MACD
-        macd, sig, hist         = compute_macd(close)
-        feat["macd"]            = macd
-        feat["macd_signal"]     = sig
-        feat["macd_histogram"]  = hist
-        feat["macd_bullish"]    = (macd > sig).astype(int)
+        macd, sig, hist = compute_macd(close)
+        feat["macd"] = macd
+        feat["macd_signal"] = sig
+        feat["macd_histogram"] = hist
+        feat["macd_bullish"] = (macd > sig).astype(int)
         # Momentum
         for p in [5, 10, 21, 63]:
             feat[f"momentum_{p}d"] = compute_momentum(close, p)
@@ -522,16 +535,16 @@ class FeatureEngineer:
 
     def _volatility_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
-        high  = feat["High"]
-        low   = feat["Low"]
+        high = feat["High"]
+        low = feat["Low"]
         # ATR
-        feat["atr_14"]     = compute_atr(high, low, close, 14)
-        feat["atr_pct"]    = feat["atr_14"] / close
+        feat["atr_14"] = compute_atr(high, low, close, 14)
+        feat["atr_pct"] = feat["atr_14"] / close
         # Realized volatility
         for w in [5, 10, 21, 63]:
-            feat[f"realized_vol_{w}d"] = (
-                feat["log_returns"].rolling(w, min_periods=w).std() * np.sqrt(252)
-            )
+            feat[f"realized_vol_{w}d"] = feat["log_returns"].rolling(
+                w, min_periods=w
+            ).std() * np.sqrt(252)
         # Garman-Klass
         feat["gk_vol_20"] = compute_garman_klass_vol(
             feat["Open"], high, low, close, period=20
@@ -542,17 +555,17 @@ class FeatureEngineer:
         return feat
 
     def _volume_features(self, feat: pd.DataFrame) -> pd.DataFrame:
-        close  = feat["Close"]
+        close = feat["Close"]
         volume = feat["Volume"]
         # Basic volume ratios
-        feat["volume_sma20"]  = compute_sma(volume, 20)
-        feat["volume_ratio"]  = volume / feat["volume_sma20"]
+        feat["volume_sma20"] = compute_sma(volume, 20)
+        feat["volume_ratio"] = volume / feat["volume_sma20"]
         # OBV
-        feat["obv"]           = compute_obv(close, volume)
-        feat["obv_sma20"]     = compute_sma(feat["obv"], 20)
-        feat["obv_momentum"]  = feat["obv"].pct_change(5)
+        feat["obv"] = compute_obv(close, volume)
+        feat["obv_sma20"] = compute_sma(feat["obv"], 20)
+        feat["obv_momentum"] = feat["obv"].pct_change(5)
         # VWAP deviation
-        vwap                  = compute_vwap(feat["High"], feat["Low"], close, volume)
+        vwap = compute_vwap(feat["High"], feat["Low"], close, volume)
         feat["vwap_deviation"] = (close - vwap) / vwap.replace(0, np.nan)
         # Volume imbalance
         feat["volume_imbalance_20"] = compute_volume_imbalance(
@@ -563,81 +576,90 @@ class FeatureEngineer:
     def _moving_average_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
         for w in self.rolling_windows:
-            feat[f"sma_{w}"]         = compute_sma(close, w)
-            feat[f"ema_{w}"]         = compute_ema(close, w)
+            feat[f"sma_{w}"] = compute_sma(close, w)
+            feat[f"ema_{w}"] = compute_ema(close, w)
             feat[f"close_vs_sma_{w}"] = close / feat[f"sma_{w}"] - 1
         # MA crossovers
-        feat["sma_5_20_cross"]  = (compute_sma(close, 5) > compute_sma(close, 20)).astype(int)
-        feat["sma_20_50_cross"] = (compute_sma(close, 20) > compute_sma(close, 50)).astype(int)
+        feat["sma_5_20_cross"] = (
+            compute_sma(close, 5) > compute_sma(close, 20)
+        ).astype(int)
+        feat["sma_20_50_cross"] = (
+            compute_sma(close, 20) > compute_sma(close, 50)
+        ).astype(int)
         # EMA cross (golden/death cross proxy)
-        feat["ema_12_26_cross"] = (compute_ema(close, 12) > compute_ema(close, 26)).astype(int)
+        feat["ema_12_26_cross"] = (
+            compute_ema(close, 12) > compute_ema(close, 26)
+        ).astype(int)
         return feat
 
     def _bollinger_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
         bb_mid, bb_up, bb_low = compute_bollinger_bands(close)
         feat["bb_middle"] = bb_mid
-        feat["bb_upper"]  = bb_up
-        feat["bb_lower"]  = bb_low
-        feat["bb_width"]  = (bb_up - bb_low) / bb_mid.replace(0, np.nan)
-        feat["bb_pct"]    = (close - bb_low) / (bb_up - bb_low).replace(0, np.nan)
-        feat["bb_squeeze"] = feat["bb_width"] < feat["bb_width"].rolling(20).quantile(0.2)
+        feat["bb_upper"] = bb_up
+        feat["bb_lower"] = bb_low
+        feat["bb_width"] = (bb_up - bb_low) / bb_mid.replace(0, np.nan)
+        feat["bb_pct"] = (close - bb_low) / (bb_up - bb_low).replace(0, np.nan)
+        feat["bb_squeeze"] = feat["bb_width"] < feat["bb_width"].rolling(20).quantile(
+            0.2
+        )
         feat["bb_squeeze"] = feat["bb_squeeze"].astype(int)
         return feat
 
     def _regime_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
         # Volatility regime
-        rv20 = feat.get("realized_vol_21d", feat["log_returns"].rolling(21).std() * np.sqrt(252))
+        rv20 = feat.get(
+            "realized_vol_21d", feat["log_returns"].rolling(21).std() * np.sqrt(252)
+        )
         feat["vol_regime_pct"] = compute_vol_regime(rv20, lookback=252)
         feat["high_vol_regime"] = (feat["vol_regime_pct"] > 0.75).astype(int)
-        feat["low_vol_regime"]  = (feat["vol_regime_pct"] < 0.25).astype(int)
+        feat["low_vol_regime"] = (feat["vol_regime_pct"] < 0.25).astype(int)
         # Trend regime
-        feat["trend_regime"]   = compute_trend_regime(close)
-        feat["in_uptrend"]     = (feat["trend_regime"] > 0).astype(int)
-        feat["in_downtrend"]   = (feat["trend_regime"] < 0).astype(int)
+        feat["trend_regime"] = compute_trend_regime(close)
+        feat["in_uptrend"] = (feat["trend_regime"] > 0).astype(int)
+        feat["in_downtrend"] = (feat["trend_regime"] < 0).astype(int)
         return feat
 
     def _microstructure_features(self, feat: pd.DataFrame) -> pd.DataFrame:
-        close  = feat["Close"]
+        close = feat["Close"]
         volume = feat["Volume"]
-        high   = feat["High"]
-        low    = feat["Low"]
+        high = feat["High"]
+        low = feat["Low"]
         # Amihud illiquidity
         feat["amihud_illiq_20"] = compute_amihud_illiquidity(close, volume, 20)
         # Spread proxy: (High - Low) / Close
-        feat["hl_spread_pct"]  = (high - low) / close.replace(0, np.nan)
+        feat["hl_spread_pct"] = (high - low) / close.replace(0, np.nan)
         feat["hl_spread_ma10"] = feat["hl_spread_pct"].rolling(10).mean()
         # Price range features
         for w in [5, 20]:
-            feat[f"rolling_max_{w}"]   = close.rolling(w).max()
-            feat[f"rolling_min_{w}"]   = close.rolling(w).min()
+            feat[f"rolling_max_{w}"] = close.rolling(w).max()
+            feat[f"rolling_min_{w}"] = close.rolling(w).min()
             feat[f"rolling_range_{w}"] = (
-                (feat[f"rolling_max_{w}"] - feat[f"rolling_min_{w}"])
-                / close.replace(0, np.nan)
-            )
+                feat[f"rolling_max_{w}"] - feat[f"rolling_min_{w}"]
+            ) / close.replace(0, np.nan)
             feat[f"pct_from_high_{w}"] = close / feat[f"rolling_max_{w}"] - 1
-            feat[f"pct_from_low_{w}"]  = close / feat[f"rolling_min_{w}"] - 1
+            feat[f"pct_from_low_{w}"] = close / feat[f"rolling_min_{w}"] - 1
         return feat
 
     def _higher_moment_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
-        feat["rolling_skew_20"]  = compute_rolling_skew(close, 20)
-        feat["rolling_skew_60"]  = compute_rolling_skew(close, 60)
-        feat["rolling_kurt_20"]  = compute_rolling_kurt(close, 20)
-        feat["rolling_kurt_60"]  = compute_rolling_kurt(close, 60)
+        feat["rolling_skew_20"] = compute_rolling_skew(close, 20)
+        feat["rolling_skew_60"] = compute_rolling_skew(close, 60)
+        feat["rolling_kurt_20"] = compute_rolling_kurt(close, 20)
+        feat["rolling_kurt_60"] = compute_rolling_kurt(close, 60)
         return feat
 
     def _candlestick_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
-        high  = feat["High"]
-        low   = feat["Low"]
+        high = feat["High"]
+        low = feat["Low"]
         open_ = feat["Open"]
-        rng   = (high - low).replace(0, np.nan)
-        feat["candle_body"]    = (close - open_).abs() / rng
-        feat["upper_shadow"]   = (high - close.clip(lower=open_)) / rng
-        feat["lower_shadow"]   = (close.clip(upper=open_) - low) / rng
-        feat["candle_dir"]     = (close > open_).astype(int)   # 1 = bullish bar
+        rng = (high - low).replace(0, np.nan)
+        feat["candle_body"] = (close - open_).abs() / rng
+        feat["upper_shadow"] = (high - close.clip(lower=open_)) / rng
+        feat["lower_shadow"] = (close.clip(upper=open_) - low) / rng
+        feat["candle_dir"] = (close > open_).astype(int)  # 1 = bullish bar
         return feat
 
     def _target_labels(self, feat: pd.DataFrame) -> pd.DataFrame:
@@ -661,6 +683,7 @@ class FeatureEngineer:
 # ─────────────────────────────────────────────────────────────────────────────
 # Convenience wrappers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """Convenience wrapper around FeatureEngineer.build_features()."""

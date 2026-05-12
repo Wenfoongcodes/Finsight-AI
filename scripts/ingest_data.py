@@ -18,12 +18,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.logging_config import get_logger, setup_logging
-from app.ml.data_ingestion import get_data_summary, ingest_market_data, ingest_multiple_tickers
+from app.ml.data_ingestion import get_data_summary, ingest_multiple_tickers
 
 setup_logging(level="INFO")
 logger = get_logger("scripts.ingest")
 
-DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "JPM", "GS", "SPY"]
+DEFAULT_TICKERS = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "TSLA",
+    "META",
+    "NVDA",
+    "JPM",
+    "GS",
+    "SPY",
+]
 
 
 def print_summary(summaries: list[dict]) -> None:
@@ -46,11 +57,18 @@ def main() -> None:
     ticker_group = parser.add_mutually_exclusive_group()
     ticker_group.add_argument("--ticker", type=str, help="Single ticker")
     ticker_group.add_argument("--tickers", nargs="+", help="Multiple tickers")
-    ticker_group.add_argument("--defaults", action="store_true",
-                              help=f"Use default watchlist: {DEFAULT_TICKERS}")
+    ticker_group.add_argument(
+        "--defaults",
+        action="store_true",
+        help=f"Use default watchlist: {DEFAULT_TICKERS}",
+    )
 
-    parser.add_argument("--years", type=int, default=5, help="Years of history (default: 5)")
-    parser.add_argument("--no-cache", action="store_true", help="Skip cache, force re-download")
+    parser.add_argument(
+        "--years", type=int, default=5, help="Years of history (default: 5)"
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="Skip cache, force re-download"
+    )
 
     args = parser.parse_args()
 
@@ -65,9 +83,16 @@ def main() -> None:
         sys.exit(1)
 
     use_cache = not args.no_cache
-    logger.info("Ingesting %d ticker(s) | years=%d | cache=%s", len(tickers), args.years, use_cache)
+    logger.info(
+        "Ingesting %d ticker(s) | years=%d | cache=%s",
+        len(tickers),
+        args.years,
+        use_cache,
+    )
 
-    results = ingest_multiple_tickers(tickers, period_years=args.years, use_cache=use_cache)
+    results = ingest_multiple_tickers(
+        tickers, period_years=args.years, use_cache=use_cache
+    )
 
     summaries = [get_data_summary(df, ticker) for ticker, df in results.items()]
     print_summary(summaries)
@@ -77,7 +102,9 @@ def main() -> None:
         logger.warning("Failed tickers: %s", sorted(failed))
         sys.exit(1)
 
-    logger.info("Ingestion complete. %d/%d tickers succeeded.", len(results), len(tickers))
+    logger.info(
+        "Ingestion complete. %d/%d tickers succeeded.", len(results), len(tickers)
+    )
 
 
 if __name__ == "__main__":

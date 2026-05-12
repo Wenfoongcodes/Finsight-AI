@@ -52,9 +52,10 @@ Be concise, factual, and data-driven. When SHAP explanations are provided, inter
 # Message Types
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ChatMessage:
-    role:    str   # 'user' | 'assistant' | 'system'
+    role: str  # 'user' | 'assistant' | 'system'
     content: str
 
     def to_dict(self) -> dict:
@@ -63,16 +64,17 @@ class ChatMessage:
 
 @dataclass
 class ChatResponse:
-    content:          str
-    used_rag:         bool
+    content: str
+    used_rag: bool
     context_snippets: list[str] = field(default_factory=list)
-    model:            str = ""
-    tokens_used:      int = 0
+    model: str = ""
+    tokens_used: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Conversation Memory
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class ConversationMemory:
     def __init__(self, max_turns: int = 10) -> None:
@@ -82,7 +84,7 @@ class ConversationMemory:
     def add(self, role: str, content: str) -> None:
         self._messages.append(ChatMessage(role=role, content=content))
         if len(self._messages) > self.max_turns * 2:
-            self._messages = self._messages[-(self.max_turns * 2):]
+            self._messages = self._messages[-(self.max_turns * 2) :]
 
     def get_history(self) -> list[dict]:
         return [m.to_dict() for m in self._messages]
@@ -98,6 +100,7 @@ class ConversationMemory:
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM Client
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class OpenAIClient:
     """
@@ -188,11 +191,13 @@ class OpenAIClient:
                 max_tokens=max_tokens,
             )
             content = response.choices[0].message.content or ""
-            tokens  = response.usage.total_tokens if response.usage else 0
+            tokens = response.usage.total_tokens if response.usage else 0
 
             logger.debug(
                 "LLM chat response | model=%s | tokens=%d | chars=%d",
-                model, tokens, len(content),
+                model,
+                tokens,
+                len(content),
             )
             return content, tokens
 
@@ -216,6 +221,7 @@ class OpenAIClient:
 # Financial Chat System
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class FinancialChatSystem:
     """
     Conversational financial assistant with RAG context injection
@@ -227,7 +233,7 @@ class FinancialChatSystem:
         rag_pipeline: Optional[RAGPipeline] = None,
         memory_turns: int = 10,
     ) -> None:
-        self.rag          = rag_pipeline
+        self.rag = rag_pipeline
         self.memory_turns = memory_turns
         self._memory_store: dict[str, ConversationMemory] = {}
         self._llm: Optional[OpenAIClient] = None
@@ -272,7 +278,7 @@ class FinancialChatSystem:
 
         memory = self._get_memory(session_id)
 
-        context  = ""
+        context = ""
         snippets: list[str] = []
         used_rag = False
 
@@ -280,8 +286,10 @@ class FinancialChatSystem:
             try:
                 rag_context = self.rag.build_context(user_query)
                 if rag_context and "No relevant context" not in rag_context:
-                    context  = rag_context
-                    snippets = [r["content"][:200] for r in self.rag.retrieve(user_query)]
+                    context = rag_context
+                    snippets = [
+                        r["content"][:200] for r in self.rag.retrieve(user_query)
+                    ]
                     used_rag = True
             except Exception as exc:
                 logger.warning("RAG retrieval failed: %s", exc)
@@ -299,7 +307,9 @@ class FinancialChatSystem:
 
         logger.info(
             "Chat response generated: tokens=%d, rag=%s, turns=%d",
-            tokens, used_rag, memory.turn_count,
+            tokens,
+            used_rag,
+            memory.turn_count,
         )
 
         return ChatResponse(

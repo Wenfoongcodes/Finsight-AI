@@ -49,30 +49,38 @@ class ModelSelector:
         if not leaderboard:
             logger.info(
                 "[%s/%s] No trained models — falling back to %s",
-                ticker, horizon, FALLBACK_MODEL,
+                ticker,
+                horizon,
+                FALLBACK_MODEL,
             )
             return FALLBACK_MODEL
         best_name, best_auc = leaderboard[0]
         logger.info(
             "[%s/%s] Selected: %s (AUC=%.4f) from %d candidates",
-            ticker, horizon, best_name, best_auc, len(leaderboard),
+            ticker,
+            horizon,
+            best_name,
+            best_auc,
+            len(leaderboard),
         )
         return best_name
 
     def leaderboard(self, ticker: str, horizon: str = "1d") -> list[dict]:
-        raw    = self._build_leaderboard(ticker.upper(), horizon)
+        raw = self._build_leaderboard(ticker.upper(), horizon)
         result = []
         for name, _ in raw:
             meta = self._load_meta(ticker.upper(), name, horizon)
             if meta:
-                result.append({
-                    "model":      name,
-                    "horizon":    horizon,
-                    "auc":        round(meta.get("mean_roc_auc", 0.0), 4),
-                    "accuracy":   round(meta.get("mean_accuracy", 0.0), 4),
-                    "f1":         round(meta.get("mean_f1", 0.0), 4),
-                    "trained_at": meta.get("trained_at", ""),
-                })
+                result.append(
+                    {
+                        "model": name,
+                        "horizon": horizon,
+                        "auc": round(meta.get("mean_roc_auc", 0.0), 4),
+                        "accuracy": round(meta.get("mean_accuracy", 0.0), 4),
+                        "f1": round(meta.get("mean_f1", 0.0), 4),
+                        "trained_at": meta.get("trained_at", ""),
+                    }
+                )
         return result
 
     def has_any_model(self, ticker: str, horizon: str = "1d") -> bool:
@@ -93,7 +101,11 @@ class ModelSelector:
             else:
                 logger.debug(
                     "[%s/%s/%s] AUC %.4f below MIN_AUC %.2f",
-                    ticker, model_name, horizon, auc, MIN_AUC,
+                    ticker,
+                    model_name,
+                    horizon,
+                    auc,
+                    MIN_AUC,
                 )
 
         selected = eligible if eligible else all_entries
@@ -104,15 +116,17 @@ class ModelSelector:
             best_m, best_a = max(all_entries, key=lambda x: x[1])
             logger.warning(
                 "[%s/%s] No models meet MIN_AUC %.2f — best available: %s (%.4f)",
-                ticker, horizon, MIN_AUC, best_m, best_a,
+                ticker,
+                horizon,
+                MIN_AUC,
+                best_m,
+                best_a,
             )
 
         selected.sort(key=lambda x: x[1], reverse=True)
         return selected
 
-    def _load_meta(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> Optional[dict]:
+    def _load_meta(self, ticker: str, model_name: str, horizon: str) -> Optional[dict]:
         meta_path = self._model_dir / f"{ticker}_{model_name}_{horizon}_meta.json"
         if not meta_path.exists():
             return None

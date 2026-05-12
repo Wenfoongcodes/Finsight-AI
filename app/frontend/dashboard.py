@@ -57,7 +57,8 @@ st.set_page_config(
 # Design System
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500&display=swap');
 
@@ -404,12 +405,15 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .ingest-result { background: var(--bg-elevated); border: 1px solid rgba(0,230,118,0.3); border-left: 3px solid var(--accent-green); border-radius: 0 6px 6px 0; padding: 0.8rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; line-height: 1.6; }
 .ingest-result .ingest-title { color: var(--text-primary); font-weight: 500; margin-bottom: 0.2rem; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def api_post(endpoint: str, payload: dict) -> Optional[dict]:
     try:
@@ -417,7 +421,9 @@ def api_post(endpoint: str, payload: dict) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
-        st.error("Cannot connect to the FinSight API. Make sure the server is running on port 8000.")
+        st.error(
+            "Cannot connect to the FinSight API. Make sure the server is running on port 8000."
+        )
         return None
     except requests.exceptions.HTTPError as e:
         try:
@@ -446,10 +452,10 @@ def api_get(endpoint: str) -> Optional[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 for key, default in [
-    ("chat_history",    []),
+    ("chat_history", []),
     ("last_prediction", None),
-    ("market_summary",  None),
-    ("session_id",      str(uuid.uuid4())),
+    ("market_summary", None),
+    ("session_id", str(uuid.uuid4())),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -460,12 +466,15 @@ for key, default in [
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("""
+    st.markdown(
+        """
     <div style="padding: 0.5rem 0 1.5rem 0;">
         <div class="finsight-wordmark"><span class="triangle">▲</span> FinSight</div>
         <div class="finsight-tagline">Explainable Financial AI</div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     health = api_get("/health")
     if health:
@@ -473,8 +482,8 @@ with st.sidebar:
             f'<div style="font-family:var(--font-mono);font-size:0.75rem;'
             f'color:#7a8fa8;margin-bottom:1.5rem;">'
             f'<span class="status-dot status-online"></span>'
-            f'API v{health.get("version","?")} &nbsp;·&nbsp; '
-            f'{health.get("environment","?").upper()}</div>',
+            f"API v{health.get('version', '?')} &nbsp;·&nbsp; "
+            f"{health.get('environment', '?').upper()}</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -486,26 +495,38 @@ with st.sidebar:
         )
 
     # ── Instrument ──────────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True)
-    selected_ticker = st.selectbox("Ticker", TICKERS, index=0, label_visibility="collapsed")
-    custom_ticker   = st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
+    st.markdown(
+        '<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True
+    )
+    selected_ticker = st.selectbox(
+        "Ticker", TICKERS, index=0, label_visibility="collapsed"
+    )
+    custom_ticker = (
+        st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
+    )
     if custom_ticker:
         selected_ticker = custom_ticker
 
     # ── Model selection is automatic — show info note ────────────────────────
-    st.markdown('<div class="sidebar-section-title">Model Selection</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sidebar-section-title">Model Selection</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown(
         '<div style="font-family:var(--font-mono);font-size:0.72rem;'
         'color:var(--text-muted);line-height:1.6;padding:0.5rem 0;">'
-        '⚙ The system automatically selects the best-performing model '
-        'for each ticker based on walk-forward ROC-AUC. '
-        'The selected model is shown in the prediction results.'
-        '</div>',
+        "⚙ The system automatically selects the best-performing model "
+        "for each ticker based on walk-forward ROC-AUC. "
+        "The selected model is shown in the prediction results."
+        "</div>",
         unsafe_allow_html=True,
     )
 
     # ── Knowledge Base ───────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Knowledge Base</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sidebar-section-title">Knowledge Base</div>',
+        unsafe_allow_html=True,
+    )
 
     kb_tab_text, kb_tab_url = st.tabs(["Paste Text", "From URL"])
 
@@ -520,7 +541,11 @@ with st.sidebar:
             if ingest_text.strip():
                 result = api_post(
                     "/rag/ingest",
-                    {"source_type": "text", "texts": [ingest_text], "source": "user_input"},
+                    {
+                        "source_type": "text",
+                        "texts": [ingest_text],
+                        "source": "user_input",
+                    },
                 )
                 if result:
                     st.success(result.get("message", "Ingested."))
@@ -548,25 +573,28 @@ with st.sidebar:
                         if result.get("duplicate"):
                             st.info(result.get("message", "Already ingested."))
                         else:
-                            title      = result.get("title", "")
+                            title = result.get("title", "")
                             char_count = result.get("char_count", 0)
-                            chunks     = result.get("chunks_added", 0)
+                            chunks = result.get("chunks_added", 0)
                             st.markdown(
                                 f'<div class="ingest-result">'
                                 f'<div class="ingest-title">{title or "Article ingested"}</div>'
-                                f'{char_count:,} chars &nbsp;·&nbsp; {chunks} chunks indexed'
-                                f'</div>',
+                                f"{char_count:,} chars &nbsp;·&nbsp; {chunks} chunks indexed"
+                                f"</div>",
                                 unsafe_allow_html=True,
                             )
             else:
                 st.warning("Enter a URL before fetching.")
 
-    st.markdown("""
+    st.markdown(
+        """
     <div style="position:fixed;bottom:1.5rem;left:0;width:260px;text-align:center;
                 font-family:var(--font-mono);font-size:0.65rem;color:var(--text-muted);">
         Not investment advice · For research use only
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,7 +603,8 @@ with st.sidebar:
 
 col_title, _ = st.columns([5, 1])
 with col_title:
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div style="margin-bottom:0.25rem;">
         <span style="font-family:var(--font-mono);font-size:0.72rem;
                      letter-spacing:0.2em;text-transform:uppercase;color:var(--text-muted);">
@@ -590,7 +619,9 @@ with col_title:
             &nbsp;/&nbsp; AI-Driven Signal Fusion
         </span>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     '<div style="height:1px;background:var(--border);margin:0.5rem 0 1.5rem 0;"></div>',
@@ -602,9 +633,9 @@ st.markdown(
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab_predict, tab_market, tab_chat, tab_agent = st.tabs([
-    "Signal", "Market Data", "AI Chat", "AI Agent"
-])
+tab_predict, tab_market, tab_chat, tab_agent = st.tabs(
+    ["Signal", "Market Data", "AI Chat", "AI Agent"]
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -634,8 +665,8 @@ with tab_predict:
         model_used = pred.get("model_name", "unknown")
         st.markdown(
             f'<div class="model-badge">'
-            f'⚙ Auto-selected: <strong>{model_used.replace("_", " ").title()}</strong>'
-            f'</div>',
+            f"⚙ Auto-selected: <strong>{model_used.replace('_', ' ').title()}</strong>"
+            f"</div>",
             unsafe_allow_html=True,
         )
 
@@ -644,23 +675,25 @@ with tab_predict:
         if not fusion_applied:
             st.markdown(
                 '<div class="degraded-banner">'
-                '⚠ News fusion unavailable — showing ML-only signal. '
-                'Set OPENAI_API_KEY to enable full signal fusion.'
-                '</div>',
+                "⚠ News fusion unavailable — showing ML-only signal. "
+                "Set OPENAI_API_KEY to enable full signal fusion."
+                "</div>",
                 unsafe_allow_html=True,
             )
 
         # ════════════════════════════════════════════════════════════════════
         # PRIMARY: FUSED SIGNAL
         # ════════════════════════════════════════════════════════════════════
-        st.markdown('<div class="section-label">Fused Signal — ML + News Synthesis</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Fused Signal — ML + News Synthesis</div>',
+            unsafe_allow_html=True,
+        )
 
-        fused_dir  = pred.get("fused_direction", "UNKNOWN")
+        fused_dir = pred.get("fused_direction", "UNKNOWN")
         fused_conf = pred.get("fused_confidence", "LOW").upper()
         fused_prob = pred.get("fused_probability", 0.5)
         fusion_nar = pred.get("fusion_narrative", "")
-        news_sent  = pred.get("news_sentiment", "neutral")
+        news_sent = pred.get("news_sentiment", "neutral")
 
         card_cls_map = {
             "BULLISH": "fused-bullish",
@@ -668,14 +701,14 @@ with tab_predict:
             "NEUTRAL": "fused-neutral",
         }
         arrow_map = {"BULLISH": "↑", "BEARISH": "↓", "NEUTRAL": "↔"}
-        conf_css  = {
-            "HIGH":     "conf-high",
+        conf_css = {
+            "HIGH": "conf-high",
             "MODERATE": "conf-moderate",
-            "LOW":      "conf-low",
+            "LOW": "conf-low",
         }.get(fused_conf, "conf-low")
 
         card_css = card_cls_map.get(fused_dir, "fused-neutral")
-        arrow    = arrow_map.get(fused_dir, "↔")
+        arrow = arrow_map.get(fused_dir, "↔")
 
         c_fused, c_fused_prob = st.columns([3, 2])
 
@@ -685,7 +718,7 @@ with tab_predict:
                 f'<div class="fused-label">{arrow} {fused_dir}</div>'
                 f'<div class="fused-sublabel">Fused direction · Next-day outlook</div>'
                 f'<div class="fused-conf-badge {conf_css}">{fused_conf} CONFIDENCE</div>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
 
@@ -697,7 +730,7 @@ with tab_predict:
             sent_color = {
                 "positive": "var(--accent-green)",
                 "negative": "var(--accent-red)",
-                "neutral":  "var(--text-secondary)",
+                "neutral": "var(--text-secondary)",
             }.get(news_sent, "var(--text-secondary)")
 
             st.markdown(
@@ -706,20 +739,20 @@ with tab_predict:
                 f'<div class="prob-bar-track">'
                 f'  <div class="prob-bar-fill-bull" style="width:{bull_pct}%;"></div>'
                 f'  <div class="prob-bar-fill-bear" style="width:{bear_pct}%;"></div>'
-                f'</div>'
+                f"</div>"
                 f'<div class="prob-bar-labels">'
                 f'  <span style="color:var(--accent-green);">▲ {bull_pct}%</span>'
                 f'  <span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
-                f'</div>'
-                f'</div>'
+                f"</div>"
+                f"</div>"
                 f'<div style="background:var(--bg-card);border:1px solid var(--border);'
                 f'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
                 f'<div style="font-family:var(--font-mono);font-size:0.65rem;'
-                f'letter-spacing:0.15em;text-transform:uppercase;'
+                f"letter-spacing:0.15em;text-transform:uppercase;"
                 f'color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
                 f'<div style="font-family:var(--font-mono);font-size:1.1rem;'
                 f'font-weight:500;color:{sent_color};">{news_sent.upper()}</div>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
 
@@ -734,14 +767,16 @@ with tab_predict:
         # ── News Sources ─────────────────────────────────────────────────────
         news_items = pred.get("news_items", [])
         if news_items:
-            with st.expander(f"📰 News sources used in fusion ({len(news_items)} articles)"):
+            with st.expander(
+                f"📰 News sources used in fusion ({len(news_items)} articles)"
+            ):
                 for item in news_items:
                     st.markdown(
                         f'<div class="news-item">'
-                        f'<div class="news-title">{item.get("title","")}</div>'
-                        f'<div class="news-snippet">{item.get("snippet","")}</div>'
-                        f'<div class="news-url">{item.get("url","")}</div>'
-                        f'</div>',
+                        f'<div class="news-title">{item.get("title", "")}</div>'
+                        f'<div class="news-snippet">{item.get("snippet", "")}</div>'
+                        f'<div class="news-url">{item.get("url", "")}</div>'
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
 
@@ -749,15 +784,17 @@ with tab_predict:
         # SECONDARY: RAW ML SIGNAL
         # ════════════════════════════════════════════════════════════════════
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">Quantitative Signal — ML Model Only</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Quantitative Signal — ML Model Only</div>',
+            unsafe_allow_html=True,
+        )
 
-        ml_dir    = pred.get("prediction_label", "—")
-        ml_prob   = pred.get("probability", 0.0)
-        ml_conf   = pred.get("confidence_label", "—").upper()
-        p_bull    = pred.get("p_bullish", 0.5)
-        p_bear    = pred.get("p_bearish", 0.5)
-        close     = pred.get("latest_close", 0.0)
+        ml_dir = pred.get("prediction_label", "—")
+        ml_prob = pred.get("probability", 0.0)
+        ml_conf = pred.get("confidence_label", "—").upper()
+        p_bull = pred.get("p_bullish", 0.5)
+        p_bear = pred.get("p_bearish", 0.5)
+        close = pred.get("latest_close", 0.0)
 
         ml_dir_color = {
             "BULLISH": "var(--accent-green)",
@@ -769,51 +806,57 @@ with tab_predict:
             f'<div class="ml-stat">'
             f'  <div class="ml-stat-label">ML Direction</div>'
             f'  <div class="ml-stat-value" style="color:{ml_dir_color};">{ml_dir}</div>'
-            f'</div>'
+            f"</div>"
             f'<div class="ml-stat">'
             f'  <div class="ml-stat-label">P(Bull) / P(Bear)</div>'
             f'  <div class="ml-stat-value">{p_bull:.1%} / {p_bear:.1%}</div>'
-            f'</div>'
+            f"</div>"
             f'<div class="ml-stat">'
             f'  <div class="ml-stat-label">ML Confidence</div>'
             f'  <div class="ml-stat-value">{ml_conf}</div>'
-            f'</div>'
+            f"</div>"
             f'<div class="ml-stat">'
             f'  <div class="ml-stat-label">Last Close</div>'
             f'  <div class="ml-stat-value">${close:,.2f}</div>'
-            f'</div>'
-            f'</div>',
+            f"</div>"
+            f"</div>",
             unsafe_allow_html=True,
         )
 
         # ML narrative (SHAP)
         st.markdown(
-            f'<div class="narrative-block">{pred.get("narrative","")}</div>',
+            f'<div class="narrative-block">{pred.get("narrative", "")}</div>',
             unsafe_allow_html=True,
         )
 
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
 
         # ── SHAP Chart ───────────────────────────────────────────────────────
-        st.markdown('<div class="section-label">SHAP Feature Attribution</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">SHAP Feature Attribution</div>',
+            unsafe_allow_html=True,
+        )
         features = pred.get("top_features", [])
         if features:
             df_shap = pd.DataFrame(features)
-            colors  = [
+            colors = [
                 "rgba(0,230,118,0.85)" if v > 0 else "rgba(255,61,87,0.85)"
                 for v in df_shap["shap_value"]
             ]
-            fig = go.Figure(go.Bar(
-                x=df_shap["shap_value"],
-                y=df_shap["feature"],
-                orientation="h",
-                marker=dict(color=colors, line=dict(width=0)),
-                text=[f"{v:+.4f}" for v in df_shap["shap_value"]],
-                textfont=dict(family="DM Mono, monospace", size=11, color="#7a8fa8"),
-                textposition="outside",
-                hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
-            ))
+            fig = go.Figure(
+                go.Bar(
+                    x=df_shap["shap_value"],
+                    y=df_shap["feature"],
+                    orientation="h",
+                    marker=dict(color=colors, line=dict(width=0)),
+                    text=[f"{v:+.4f}" for v in df_shap["shap_value"]],
+                    textfont=dict(
+                        family="DM Mono, monospace", size=11, color="#7a8fa8"
+                    ),
+                    textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
+                )
+            )
             fig.update_layout(
                 margin=dict(l=10, r=60, t=10, b=10),
                 height=340,
@@ -821,36 +864,55 @@ with tab_predict:
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(family="DM Mono, monospace", color="#7a8fa8", size=11),
                 xaxis=dict(
-                    showgrid=True, gridcolor="rgba(30,45,61,0.8)",
-                    zeroline=True, zerolinecolor="rgba(58,80,107,0.9)", zerolinewidth=1.5,
+                    showgrid=True,
+                    gridcolor="rgba(30,45,61,0.8)",
+                    zeroline=True,
+                    zerolinecolor="rgba(58,80,107,0.9)",
+                    zerolinewidth=1.5,
                     tickfont=dict(family="DM Mono, monospace", size=10),
-                    title=dict(text="SHAP Value  (← bearish  ·  bullish →)",
-                               font=dict(size=10, color="#3d5068")),
+                    title=dict(
+                        text="SHAP Value  (← bearish  ·  bullish →)",
+                        font=dict(size=10, color="#3d5068"),
+                    ),
                 ),
                 yaxis=dict(
-                    autorange="reversed", showgrid=False,
-                    tickfont=dict(family="DM Mono, monospace", size=11, color="#a0b4c8"),
+                    autorange="reversed",
+                    showgrid=False,
+                    tickfont=dict(
+                        family="DM Mono, monospace", size=11, color="#a0b4c8"
+                    ),
                 ),
-                hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d",
-                                font=dict(family="DM Mono, monospace", size=11)),
+                hoverlabel=dict(
+                    bgcolor="#131920",
+                    bordercolor="#1e2d3d",
+                    font=dict(family="DM Mono, monospace", size=11),
+                ),
             )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(
+                fig, use_container_width=True, config={"displayModeBar": False}
+            )
 
     elif pred and pred.get("ticker") != selected_ticker:
         # Stale result from a different ticker
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Ticker changed — click Analyse Signal to refresh</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Select a ticker and click Analyse Signal</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -873,95 +935,135 @@ with tab_market:
     mkt = st.session_state.market_summary
 
     if mkt and mkt.get("ticker") == selected_ticker:
-        st.markdown('<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True
+        )
         st.markdown(
             f'<div class="market-stat-row">'
             f'<div class="market-stat"><div class="market-stat-label">Trading Days</div>'
             f'<div class="market-stat-value">{mkt["rows"]}</div></div>'
             f'<div class="market-stat"><div class="market-stat-label">52W Low</div>'
             f'<div class="market-stat-value" style="color:var(--accent-red);">'
-            f'${mkt["close_min"]:,.2f}</div></div>'
+            f"${mkt['close_min']:,.2f}</div></div>"
             f'<div class="market-stat"><div class="market-stat-label">52W High</div>'
             f'<div class="market-stat-value" style="color:var(--accent-green);">'
-            f'${mkt["close_max"]:,.2f}</div></div>'
+            f"${mkt['close_max']:,.2f}</div></div>"
             f'<div class="market-stat"><div class="market-stat-label">Mean Close</div>'
             f'<div class="market-stat-value">${mkt["close_mean"]:,.2f}</div></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-        pct = (mkt["close_mean"] - mkt["close_min"]) / max(
-            mkt["close_max"] - mkt["close_min"], 0.01
-        ) * 100
-        st.markdown('<div class="section-label">52-Week Price Position</div>', unsafe_allow_html=True)
+        pct = (
+            (mkt["close_mean"] - mkt["close_min"])
+            / max(mkt["close_max"] - mkt["close_min"], 0.01)
+            * 100
+        )
+        st.markdown(
+            '<div class="section-label">52-Week Price Position</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(
             f'<div style="background:var(--bg-card);border:1px solid var(--border);'
             f'border-radius:8px;padding:1.2rem 1.5rem;">'
             f'<div style="display:flex;justify-content:space-between;margin-bottom:0.6rem;">'
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-red);">'
-            f'${mkt["close_min"]:,.2f}</span>'
+            f"${mkt['close_min']:,.2f}</span>"
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);">'
-            f'Mean ${mkt["close_mean"]:,.2f}</span>'
+            f"Mean ${mkt['close_mean']:,.2f}</span>"
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-green);">'
-            f'${mkt["close_max"]:,.2f}</span>'
-            f'</div>'
+            f"${mkt['close_max']:,.2f}</span>"
+            f"</div>"
             f'<div style="background:var(--bg-elevated);border-radius:4px;height:6px;position:relative;">'
             f'<div style="position:absolute;left:0;top:0;height:100%;width:{pct:.1f}%;'
             f'background:linear-gradient(90deg,var(--accent-red),var(--accent-cyan));border-radius:4px;"></div>'
             f'<div style="position:absolute;left:{pct:.1f}%;top:-3px;width:12px;height:12px;'
-            f'border-radius:50%;background:var(--accent-cyan);box-shadow:0 0 8px var(--accent-cyan);'
+            f"border-radius:50%;background:var(--accent-cyan);box-shadow:0 0 8px var(--accent-cyan);"
             f'transform:translateX(-50%);"></div>'
-            f'</div>'
+            f"</div>"
             f'<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted);'
             f'text-align:right;margin-top:0.5rem;">Mean at {pct:.1f}th percentile of 52W range</div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
         st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">52-Week Closing Price</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">52-Week Closing Price</div>',
+            unsafe_allow_html=True,
+        )
         try:
             import yfinance as yf
-            df_hist = yf.download(selected_ticker, period="1y", auto_adjust=True, progress=False)
+
+            df_hist = yf.download(
+                selected_ticker, period="1y", auto_adjust=True, progress=False
+            )
             if not df_hist.empty:
                 closes = df_hist["Close"].squeeze()
-                fig_spark = go.Figure(go.Scatter(
-                    x=closes.index, y=closes.values, mode="lines",
-                    line=dict(color="#00d4ff", width=1.5),
-                    fill="tozeroy", fillcolor="rgba(0,212,255,0.05)",
-                    hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>",
-                ))
-                fig_spark.update_layout(
-                    height=200, margin=dict(l=0, r=0, t=0, b=0),
-                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(showgrid=False, showticklabels=True,
-                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068")),
-                    yaxis=dict(showgrid=True, gridcolor="rgba(30,45,61,0.6)",
-                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068"),
-                               tickprefix="$"),
-                    hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d",
-                                    font=dict(family="DM Mono, monospace", size=11)),
+                fig_spark = go.Figure(
+                    go.Scatter(
+                        x=closes.index,
+                        y=closes.values,
+                        mode="lines",
+                        line=dict(color="#00d4ff", width=1.5),
+                        fill="tozeroy",
+                        fillcolor="rgba(0,212,255,0.05)",
+                        hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>",
+                    )
                 )
-                st.plotly_chart(fig_spark, use_container_width=True, config={"displayModeBar": False})
+                fig_spark.update_layout(
+                    height=200,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(
+                        showgrid=False,
+                        showticklabels=True,
+                        tickfont=dict(
+                            family="DM Mono, monospace", size=10, color="#3d5068"
+                        ),
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(30,45,61,0.6)",
+                        tickfont=dict(
+                            family="DM Mono, monospace", size=10, color="#3d5068"
+                        ),
+                        tickprefix="$",
+                    ),
+                    hoverlabel=dict(
+                        bgcolor="#131920",
+                        bordercolor="#1e2d3d",
+                        font=dict(family="DM Mono, monospace", size=11),
+                    ),
+                )
+                st.plotly_chart(
+                    fig_spark,
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
         except Exception:
             st.caption("Price chart unavailable.")
 
         st.markdown(
             f'<div style="font-family:var(--font-mono);font-size:0.72rem;'
             f'color:var(--text-muted);margin-top:0.5rem;text-align:right;">'
-            f'{mkt["start_date"]} → {mkt["end_date"]}'
-            f' &nbsp;·&nbsp; {len(mkt.get("columns", []))} columns'
-            f' &nbsp;·&nbsp; {mkt["null_count"]} nulls'
-            f'</div>',
+            f"{mkt['start_date']} → {mkt['end_date']}"
+            f" &nbsp;·&nbsp; {len(mkt.get('columns', []))} columns"
+            f" &nbsp;·&nbsp; {mkt['null_count']} nulls"
+            f"</div>",
             unsafe_allow_html=True,
         )
     else:
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Click Load Market Data to fetch 12-month statistics</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -971,8 +1073,10 @@ with tab_market:
 with tab_chat:
     top_row, rag_toggle_col = st.columns([5, 1])
     with top_row:
-        st.markdown('<div class="section-label">Financial AI Assistant</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Financial AI Assistant</div>',
+            unsafe_allow_html=True,
+        )
     with rag_toggle_col:
         use_rag = st.toggle("RAG", value=True, help="Inject knowledge base context")
 
@@ -980,7 +1084,7 @@ with tab_chat:
     if not st.session_state.chat_history:
         history_html = (
             '<div style="text-align:center;padding:2rem 1rem;'
-            'font-family:var(--font-mono);font-size:0.78rem;'
+            "font-family:var(--font-mono);font-size:0.78rem;"
             'color:var(--text-muted);letter-spacing:0.05em;">'
             "Ask anything about financial markets, indicators, or model predictions."
             "</div>"
@@ -998,7 +1102,9 @@ with tab_chat:
                     f'<div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
                 )
 
-    st.markdown(f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True
+    )
 
     with st.form("chat_form", clear_on_submit=True):
         input_col, send_col = st.columns([7, 1])
@@ -1017,16 +1123,18 @@ with tab_chat:
             result = api_post(
                 "/rag/chat",
                 {
-                    "query":      user_input,
-                    "use_rag":    use_rag,
+                    "query": user_input,
+                    "use_rag": use_rag,
                     "session_id": st.session_state.session_id,
                 },
             )
             if result:
-                st.session_state.chat_history.append({
-                    "role":    "assistant",
-                    "content": result.get("response", "No response received."),
-                })
+                st.session_state.chat_history.append(
+                    {
+                        "role": "assistant",
+                        "content": result.get("response", "No response received."),
+                    }
+                )
         st.rerun()
 
     if st.session_state.chat_history:
@@ -1042,7 +1150,9 @@ with tab_chat:
 # ═════════════════════════════════════════════════════════════════════════════
 
 with tab_agent:
-    st.markdown('<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True
+    )
     st.markdown(
         '<div style="font-family:var(--font-body);font-size:0.875rem;'
         'color:var(--text-secondary);margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
@@ -1078,7 +1188,9 @@ with tab_agent:
 
     run_agent_col, _ = st.columns([2, 6])
     with run_agent_col:
-        agent_clicked = st.button("▶  Run Agent", type="primary", use_container_width=True)
+        agent_clicked = st.button(
+            "▶  Run Agent", type="primary", use_container_width=True
+        )
 
     if agent_clicked:
         if agent_query.strip():
@@ -1088,17 +1200,23 @@ with tab_agent:
             if result:
                 st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
                 if result.get("tools_used"):
-                    st.markdown('<div class="section-label">Tools Invoked</div>',
-                                unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="section-label">Tools Invoked</div>',
+                        unsafe_allow_html=True,
+                    )
                     chips = "".join(
                         f'<span class="tool-chip">{t}</span>'
                         for t in result["tools_used"]
                     )
-                    st.markdown(f'<div style="margin-bottom:1rem;">{chips}</div>',
-                                unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="margin-bottom:1rem;">{chips}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                st.markdown('<div class="section-label">Agent Response</div>',
-                            unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="section-label">Agent Response</div>',
+                    unsafe_allow_html=True,
+                )
                 st.markdown(
                     f'<div class="narrative-block">{result["response"]}</div>',
                     unsafe_allow_html=True,
@@ -1106,6 +1224,7 @@ with tab_agent:
 
                 with st.expander("Raw tool results"):
                     import json
+
                     st.code(
                         json.dumps(result.get("tool_results", []), indent=2),
                         language="json",

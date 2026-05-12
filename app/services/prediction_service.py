@@ -27,10 +27,9 @@ Changes vs v2
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-import pandas as pd
 
 from app.core.exceptions import PredictionError
 from app.core.logging_config import get_logger
@@ -49,6 +48,7 @@ logger = get_logger("prediction_service")
 # ─────────────────────────────────────────────────────────────────────────────
 # Response
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class PredictionResponse:
@@ -73,21 +73,22 @@ class PredictionResponse:
     intelligence_brief: Raw IntelligenceBrief from news retrieval (or None).
     auto_trained      : True if the model was trained automatically this call.
     """
-    ticker:             str
-    model_name:         str
-    horizon:            str
-    prediction:         int
-    probability:        float
-    p_bullish:          float
-    p_bearish:          float
-    confidence_label:   str
-    shap_explanation:   dict
-    narrative:          str
-    latest_close:       float
-    feature_snapshot:   dict
-    fused_signal:       Optional[FusedSignal] = None
+
+    ticker: str
+    model_name: str
+    horizon: str
+    prediction: int
+    probability: float
+    p_bullish: float
+    p_bearish: float
+    confidence_label: str
+    shap_explanation: dict
+    narrative: str
+    latest_close: float
+    feature_snapshot: dict
+    fused_signal: Optional[FusedSignal] = None
     intelligence_brief: Optional[IntelligenceBrief] = None
-    auto_trained:       bool = False
+    auto_trained: bool = False
 
 
 def _confidence_label(p_bullish: float) -> str:
@@ -103,6 +104,7 @@ def _confidence_label(p_bullish: float) -> str:
 # Service
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class PredictionService:
     """
     End-to-end prediction pipeline with:
@@ -114,9 +116,9 @@ class PredictionService:
     """
 
     def __init__(self) -> None:
-        self.trainer        = ModelTrainer()
-        self.engineer       = FeatureEngineer()
-        self.selector       = ModelSelector()
+        self.trainer = ModelTrainer()
+        self.engineer = FeatureEngineer()
+        self.selector = ModelSelector()
         self.fusion_service = SignalFusionService()
 
     # ── Main prediction entry point ───────────────────────────────────────────
@@ -151,16 +153,14 @@ class PredictionService:
             )
 
         try:
-            logger.info(
-                "Prediction pipeline: ticker=%s horizon=%s", ticker, horizon
-            )
+            logger.info("Prediction pipeline: ticker=%s horizon=%s", ticker, horizon)
 
             # 1. Ingest
             raw_df = ingest_market_data(ticker, use_cache=use_cache)
 
             # 2. Feature engineering
             feature_df = self.engineer.build_features(raw_df)
-            X, y       = self.engineer.split_X_y(feature_df, horizon=horizon)
+            X, y = self.engineer.split_X_y(feature_df, horizon=horizon)
 
             # 3. Optional feature selection
             if apply_feature_selection:
@@ -168,7 +168,9 @@ class PredictionService:
                 X = selector.fit_transform(X, y)
                 logger.info(
                     "[%s/%s] Feature selection: %d features retained",
-                    ticker, horizon, X.shape[1],
+                    ticker,
+                    horizon,
+                    X.shape[1],
                 )
 
             # 4. Auto-select model
@@ -188,7 +190,8 @@ class PredictionService:
             if auto_trained:
                 logger.info(
                     "[%s/%s] Auto-training complete: AUC=%.3f trigger=%s",
-                    ticker, horizon,
+                    ticker,
+                    horizon,
                     train_result.mean_roc_auc,
                     train_result.trigger_reason,
                 )
@@ -203,15 +206,15 @@ class PredictionService:
             X_aligned = X[feature_columns]
 
             # 7. Inference on latest row
-            X_latest  = X_aligned.iloc[[-1]]
-            pred      = int(model.predict(X_latest)[0])
+            X_latest = X_aligned.iloc[[-1]]
+            pred = int(model.predict(X_latest)[0])
             p_bullish = round(float(model.predict_proba(X_latest)[0, 1]), 4)
             p_bearish = round(1.0 - p_bullish, 4)
-            prob      = p_bullish if pred == 1 else p_bearish
+            prob = p_bullish if pred == 1 else p_bearish
 
             # 8. SHAP explanation
             explainer = SHAPExplainer(model, feature_columns)
-            shap_exp  = explainer.local_explanation(X_latest)
+            shap_exp = explainer.local_explanation(X_latest)
 
             # 9. Narrative
             narrative = explainer.generate_narrative(
@@ -251,11 +254,12 @@ class PredictionService:
             if run_fusion and settings.OPENAI_API_KEY:
                 try:
                     fused = self.fusion_service.fuse(ticker, response)
-                    response.fused_signal       = fused
+                    response.fused_signal = fused
                     response.intelligence_brief = fused.intelligence_brief
                     logger.info(
                         "[%s/%s] Fusion: %s → %s (applied=%s)",
-                        ticker, horizon,
+                        ticker,
+                        horizon,
                         "BULLISH" if pred else "BEARISH",
                         fused.final_direction,
                         fused.fusion_applied,
@@ -267,13 +271,17 @@ class PredictionService:
             else:
                 logger.info(
                     "[%s/%s] Fusion skipped (run_fusion=%s, api_key=%s)",
-                    ticker, horizon, run_fusion, bool(settings.OPENAI_API_KEY),
+                    ticker,
+                    horizon,
+                    run_fusion,
+                    bool(settings.OPENAI_API_KEY),
                 )
 
             logger.info(
                 "Prediction done: %s/%s → %s "
                 "(p_bull=%.3f conf=%s model=%s auto_trained=%s)",
-                ticker, horizon,
+                ticker,
+                horizon,
                 "BULLISH" if pred else "BEARISH",
                 p_bullish,
                 response.confidence_label,

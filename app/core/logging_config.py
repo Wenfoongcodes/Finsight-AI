@@ -5,17 +5,11 @@ Provides consistent JSON-structured logging across all modules.
 
 import logging
 import sys
-from pathlib import Path
 from typing import Optional
-
-try:
-    from loguru import logger as loguru_logger
-    LOGURU_AVAILABLE = True
-except ImportError:
-    LOGURU_AVAILABLE = False
-
+from importlib.util import find_spec
 from configs.settings import settings
 
+LOGURU_AVAILABLE = find_spec("loguru") is not None
 
 def setup_logging(
     level: str = "INFO",
@@ -58,7 +52,9 @@ def setup_logging(
         file_handler.setFormatter(formatter)
         handlers.append(file_handler)
 
-    logging.basicConfig(level=getattr(logging, level.upper()), handlers=handlers, force=True)
+    logging.basicConfig(
+        level=getattr(logging, level.upper()), handlers=handlers, force=True
+    )
 
     # Suppress noisy third-party loggers
     for noisy in ("httpx", "httpcore", "openai", "urllib3", "faiss"):

@@ -18,6 +18,7 @@ class FinSightBaseError(Exception):
 
 # ── Data Layer ────────────────────────────────────────────────────────────────
 
+
 class DataIngestionError(FinSightBaseError):
     """Raised when market data cannot be fetched or parsed."""
 
@@ -32,11 +33,13 @@ class InsufficientDataError(FinSightBaseError):
 
 # ── Feature Engineering ───────────────────────────────────────────────────────
 
+
 class FeatureEngineeringError(FinSightBaseError):
     """Raised when feature computation fails."""
 
 
 # ── ML Layer ─────────────────────────────────────────────────────────────────
+
 
 class ModelNotFoundError(FinSightBaseError):
     """Raised when a requested model artifact does not exist on disk."""
@@ -52,11 +55,13 @@ class PredictionError(FinSightBaseError):
 
 # ── Explainability Layer ──────────────────────────────────────────────────────
 
+
 class ExplainabilityError(FinSightBaseError):
     """Raised when SHAP/LIME explanation generation fails."""
 
 
 # ── RAG / LLM Layer ──────────────────────────────────────────────────────────
+
 
 class EmbeddingError(FinSightBaseError):
     """Raised when embedding generation fails."""
@@ -76,6 +81,7 @@ class RAGError(FinSightBaseError):
 
 # ── Agent Layer ───────────────────────────────────────────────────────────────
 
+
 class AgentError(FinSightBaseError):
     """Raised when the AI agent encounters an unrecoverable error."""
 
@@ -85,6 +91,7 @@ class ToolExecutionError(AgentError):
 
 
 # ── API Layer ─────────────────────────────────────────────────────────────────
+
 
 class APIError(FinSightBaseError):
     """Base class for API-level errors."""

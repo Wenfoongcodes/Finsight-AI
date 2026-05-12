@@ -37,8 +37,13 @@ def train_single(
 ) -> None:
     """Train a single ticker/model pair and report results."""
     logger.info("=" * 60)
-    logger.info("Training: ticker=%s  model=%s  years=%d  hpo=%s",
-                ticker, model_name, period_years, run_hpo)
+    logger.info(
+        "Training: ticker=%s  model=%s  years=%d  hpo=%s",
+        ticker,
+        model_name,
+        period_years,
+        run_hpo,
+    )
     t0 = time.perf_counter()
 
     # 1. Ingest
@@ -65,9 +70,12 @@ def train_single(
     elapsed = time.perf_counter() - t0
     logger.info(
         "Done in %.1fs | Acc=%.3f | F1=%.3f | AUC=%.3f",
-        elapsed, result.mean_accuracy, result.mean_f1, result.mean_roc_auc,
+        elapsed,
+        result.mean_accuracy,
+        result.mean_f1,
+        result.mean_roc_auc,
     )
-    print(f"\n{'─'*50}")
+    print(f"\n{'─' * 50}")
     print(f"  {ticker} / {model_name}")
     print(f"  Accuracy : {result.mean_accuracy:.4f}")
     print(f"  F1       : {result.mean_f1:.4f}")
@@ -75,7 +83,7 @@ def train_single(
     print(f"  Folds    : {len(result.fold_results)}")
     if result.best_params:
         print(f"  Params   : {result.best_params}")
-    print(f"{'─'*50}\n")
+    print(f"{'─' * 50}\n")
 
 
 def main() -> None:
@@ -84,20 +92,32 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ticker_group = parser.add_mutually_exclusive_group(required=True)
-    ticker_group.add_argument("--ticker", type=str, help="Single stock ticker (e.g. AAPL)")
+    ticker_group.add_argument(
+        "--ticker", type=str, help="Single stock ticker (e.g. AAPL)"
+    )
     ticker_group.add_argument("--tickers", nargs="+", help="Multiple tickers")
 
     parser.add_argument(
-        "--model", type=str, default="xgboost",
+        "--model",
+        type=str,
+        default="xgboost",
         choices=list_models(),
         help="ML model to train (default: xgboost)",
     )
-    parser.add_argument("--period-years", type=int, default=5, help="Years of history (default: 5)")
-    parser.add_argument("--hpo", action="store_true", help="Run Optuna hyperparameter optimisation")
-    parser.add_argument("--hpo-trials", type=int, default=30, help="Number of HPO trials (default: 30)")
+    parser.add_argument(
+        "--period-years", type=int, default=5, help="Years of history (default: 5)"
+    )
+    parser.add_argument(
+        "--hpo", action="store_true", help="Run Optuna hyperparameter optimisation"
+    )
+    parser.add_argument(
+        "--hpo-trials", type=int, default=30, help="Number of HPO trials (default: 30)"
+    )
 
     args = parser.parse_args()
-    tickers = [args.ticker.upper()] if args.ticker else [t.upper() for t in args.tickers]
+    tickers = (
+        [args.ticker.upper()] if args.ticker else [t.upper() for t in args.tickers]
+    )
 
     errors: list[str] = []
     for ticker in tickers:

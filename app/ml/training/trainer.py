@@ -35,32 +35,34 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
-    accuracy_score, f1_score, roc_auc_score,
-    mean_absolute_error, mean_squared_error,
+    accuracy_score,
+    f1_score,
+    roc_auc_score,
+    mean_absolute_error,
+    mean_squared_error,
 )
 
 from app.core.exceptions import ModelNotFoundError, ModelTrainingError
 from app.core.logging_config import get_logger
-from app.ml.feature_engineering import HORIZONS
 from app.ml.models.model_factory import get_model
 from configs.settings import settings
 
 logger = get_logger("training")
 
 # ── Trigger reasons for audit log ─────────────────────────────────────────────
-TRIGGER_MISSING    = "artifact_not_found"
-TRIGGER_CORRUPT    = "artifact_corrupt"
-TRIGGER_MISMATCH   = "feature_mismatch"
-TRIGGER_MANUAL     = "manual_request"
-TRIGGER_STALE      = "artifact_stale"
+TRIGGER_MISSING = "artifact_not_found"
+TRIGGER_CORRUPT = "artifact_corrupt"
+TRIGGER_MISMATCH = "feature_mismatch"
+TRIGGER_MANUAL = "manual_request"
+TRIGGER_STALE = "artifact_stale"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data Classes
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class FoldResult:
@@ -96,34 +98,35 @@ class TrainingResult:
         if not self.fold_results:
             return
         self.mean_accuracy = float(np.mean([f.accuracy for f in self.fold_results]))
-        self.mean_f1       = float(np.mean([f.f1 for f in self.fold_results]))
-        self.mean_roc_auc  = float(np.mean([f.roc_auc for f in self.fold_results]))
-        self.mean_mae      = float(np.mean([f.mae for f in self.fold_results]))
-        self.mean_rmse     = float(np.mean([f.rmse for f in self.fold_results]))
+        self.mean_f1 = float(np.mean([f.f1 for f in self.fold_results]))
+        self.mean_roc_auc = float(np.mean([f.roc_auc for f in self.fold_results]))
+        self.mean_mae = float(np.mean([f.mae for f in self.fold_results]))
+        self.mean_rmse = float(np.mean([f.rmse for f in self.fold_results]))
 
     def to_dict(self) -> dict:
         return {
-            "model_name":          self.model_name,
-            "ticker":              self.ticker,
-            "horizon":             self.horizon,
-            "trained_at":          self.trained_at,
-            "n_features":          self.n_features,
-            "trigger_reason":      self.trigger_reason,
-            "mean_accuracy":       round(self.mean_accuracy, 4),
-            "mean_f1":             round(self.mean_f1, 4),
-            "mean_roc_auc":        round(self.mean_roc_auc, 4),
-            "mean_mae":            round(self.mean_mae, 4),
-            "mean_rmse":           round(self.mean_rmse, 4),
+            "model_name": self.model_name,
+            "ticker": self.ticker,
+            "horizon": self.horizon,
+            "trained_at": self.trained_at,
+            "n_features": self.n_features,
+            "trigger_reason": self.trigger_reason,
+            "mean_accuracy": round(self.mean_accuracy, 4),
+            "mean_f1": round(self.mean_f1, 4),
+            "mean_roc_auc": round(self.mean_roc_auc, 4),
+            "mean_mae": round(self.mean_mae, 4),
+            "mean_rmse": round(self.mean_rmse, 4),
             "training_duration_s": round(self.training_duration_s, 2),
-            "best_params":         self.best_params,
-            "n_folds":             len(self.fold_results),
-            "feature_columns":     self.feature_columns,
+            "best_params": self.best_params,
+            "n_folds": len(self.fold_results),
+            "feature_columns": self.feature_columns,
         }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Walk-Forward Splitter
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class WalkForwardSplitter:
     """
@@ -139,19 +142,19 @@ class WalkForwardSplitter:
         n_folds: int = settings.WALK_FORWARD_FOLDS,
         min_train_pct: float = 0.4,
     ) -> None:
-        self.n_folds       = n_folds
+        self.n_folds = n_folds
         self.min_train_pct = min_train_pct
 
     def split(self, X: pd.DataFrame) -> list[tuple[np.ndarray, np.ndarray]]:
-        n          = len(X)
-        min_train  = int(n * self.min_train_pct)
-        fold_size  = max(1, (n - min_train) // self.n_folds)
-        splits     = []
+        n = len(X)
+        min_train = int(n * self.min_train_pct)
+        fold_size = max(1, (n - min_train) // self.n_folds)
+        splits = []
         for fold in range(self.n_folds):
             train_end = min_train + fold * fold_size
-            test_end  = min(train_end + fold_size, n)
+            test_end = min(train_end + fold_size, n)
             train_idx = np.arange(0, train_end)
-            test_idx  = np.arange(train_end, test_end)
+            test_idx = np.arange(train_end, test_end)
             if len(test_idx) == 0:
                 break
             splits.append((train_idx, test_idx))
@@ -163,6 +166,7 @@ class WalkForwardSplitter:
 # Metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -170,13 +174,11 @@ def compute_metrics(
 ) -> dict:
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "f1":       float(f1_score(y_true, y_pred, zero_division=0)),
-        "roc_auc":  float(
-            roc_auc_score(y_true, y_prob)
-            if len(np.unique(y_true)) > 1
-            else 0.5
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "roc_auc": float(
+            roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else 0.5
         ),
-        "mae":  float(mean_absolute_error(y_true, y_prob)),
+        "mae": float(mean_absolute_error(y_true, y_prob)),
         "rmse": float(np.sqrt(mean_squared_error(y_true, y_prob))),
     }
 
@@ -184,6 +186,7 @@ def compute_metrics(
 # ─────────────────────────────────────────────────────────────────────────────
 # Hyperparameter Optimization
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def optimize_hyperparameters(
     model_name: str,
@@ -194,31 +197,32 @@ def optimize_hyperparameters(
     """Run Optuna HPO for a given model."""
     try:
         import optuna
+
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     except ImportError as exc:
         raise ImportError("optuna is required: pip install optuna") from exc
 
     splitter = WalkForwardSplitter(n_folds=3)
-    splits   = splitter.split(X)
+    splits = splitter.split(X)
 
     search_spaces: dict[str, Any] = {
         "xgboost": lambda trial: {
-            "n_estimators":     trial.suggest_int("n_estimators", 100, 500),
-            "max_depth":        trial.suggest_int("max_depth", 3, 8),
-            "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "subsample":        trial.suggest_float("subsample", 0.6, 1.0),
+            "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
         },
         "lightgbm": lambda trial: {
-            "n_estimators":     trial.suggest_int("n_estimators", 100, 500),
-            "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "num_leaves":       trial.suggest_int("num_leaves", 20, 127),
-            "subsample":        trial.suggest_float("subsample", 0.6, 1.0),
+            "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 20, 127),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
         },
         "random_forest": lambda trial: {
-            "n_estimators":      trial.suggest_int("n_estimators", 50, 300),
-            "max_depth":         trial.suggest_int("max_depth", 3, 20),
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "max_depth": trial.suggest_int("max_depth", 3, 20),
             "min_samples_split": trial.suggest_int("min_samples_split", 5, 50),
         },
         "logistic_regression": lambda trial: {
@@ -247,7 +251,9 @@ def optimize_hyperparameters(
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     logger.info(
         "Optuna best for %s: AUC=%.4f | %s",
-        model_name, study.best_value, study.best_params,
+        model_name,
+        study.best_value,
+        study.best_params,
     )
     return study.best_params
 
@@ -255,6 +261,7 @@ def optimize_hyperparameters(
 # ─────────────────────────────────────────────────────────────────────────────
 # Model Trainer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class ModelTrainer:
     """
@@ -286,10 +293,15 @@ class ModelTrainer:
         return f"{ticker.upper()}_{model_name}_{horizon}"
 
     def _model_path(self, ticker: str, model_name: str, horizon: str) -> Path:
-        return self.model_dir / f"{self._artifact_slug(ticker, model_name, horizon)}.pkl"
+        return (
+            self.model_dir / f"{self._artifact_slug(ticker, model_name, horizon)}.pkl"
+        )
 
     def _meta_path(self, ticker: str, model_name: str, horizon: str) -> Path:
-        return self.model_dir / f"{self._artifact_slug(ticker, model_name, horizon)}_meta.json"
+        return (
+            self.model_dir
+            / f"{self._artifact_slug(ticker, model_name, horizon)}_meta.json"
+        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -323,7 +335,10 @@ class ModelTrainer:
         # Trigger detected — train fresh model
         logger.info(
             "[%s/%s/%s] Training triggered: %s",
-            ticker, model_name, horizon, trigger,
+            ticker,
+            model_name,
+            horizon,
+            trigger,
         )
         model, result = self.train(
             model_name=model_name,
@@ -361,18 +376,25 @@ class ModelTrainer:
         except Exception as exc:
             logger.warning(
                 "[%s/%s/%s] Artifact corrupt (%s) — will retrain.",
-                ticker, model_name, horizon, exc,
+                ticker,
+                model_name,
+                horizon,
+                exc,
             )
             return TRIGGER_CORRUPT
 
         saved_cols = set(artifact.get("feature_columns", []))
         current_cols = set(current_feature_cols)
         if saved_cols != current_cols:
-            added   = current_cols - saved_cols
+            added = current_cols - saved_cols
             removed = saved_cols - current_cols
             logger.warning(
                 "[%s/%s/%s] Feature mismatch — added=%d removed=%d — retraining.",
-                ticker, model_name, horizon, len(added), len(removed),
+                ticker,
+                model_name,
+                horizon,
+                len(added),
+                len(removed),
             )
             return TRIGGER_MISMATCH
 
@@ -410,20 +432,23 @@ class ModelTrainer:
             (final_model, TrainingResult)
         """
         try:
-            t_start    = time.perf_counter()
+            t_start = time.perf_counter()
             best_params = hyperparams or {}
 
             if run_hpo and not hyperparams:
                 logger.info(
                     "[%s/%s/%s] Running HPO (%d trials)…",
-                    ticker, model_name, horizon, hpo_trials,
+                    ticker,
+                    model_name,
+                    horizon,
+                    hpo_trials,
                 )
                 best_params = optimize_hyperparameters(
                     model_name, X, y, n_trials=hpo_trials
                 )
 
             splitter = WalkForwardSplitter()
-            splits   = splitter.split(X)
+            splits = splitter.split(X)
 
             result = TrainingResult(
                 model_name=model_name,
@@ -444,22 +469,29 @@ class ModelTrainer:
                 fold_model = get_model(model_name, **best_params)
                 fold_model.fit(X_tr, y_tr)
 
-                y_pred   = fold_model.predict(X_te)
-                y_prob   = fold_model.predict_proba(X_te)[:, 1]
-                metrics  = compute_metrics(y_te.values, y_pred, y_prob)
+                y_pred = fold_model.predict(X_te)
+                y_prob = fold_model.predict_proba(X_te)[:, 1]
+                metrics = compute_metrics(y_te.values, y_pred, y_prob)
 
-                result.fold_results.append(FoldResult(
-                    fold=fold_idx + 1,
-                    train_size=len(X_tr),
-                    test_size=len(X_te),
-                    **metrics,
-                ))
+                result.fold_results.append(
+                    FoldResult(
+                        fold=fold_idx + 1,
+                        train_size=len(X_tr),
+                        test_size=len(X_te),
+                        **metrics,
+                    )
+                )
 
                 logger.info(
                     "[%s/%s/%s] Fold %d/%d — Acc=%.3f F1=%.3f AUC=%.3f",
-                    ticker, model_name, horizon,
-                    fold_idx + 1, len(splits),
-                    metrics["accuracy"], metrics["f1"], metrics["roc_auc"],
+                    ticker,
+                    model_name,
+                    horizon,
+                    fold_idx + 1,
+                    len(splits),
+                    metrics["accuracy"],
+                    metrics["f1"],
+                    metrics["roc_auc"],
                 )
 
             result.compute_aggregates()
@@ -468,9 +500,16 @@ class ModelTrainer:
             should_calibrate = calibrate and model_name != "logistic_regression"
 
             if should_calibrate:
-                logger.info("[%s/%s/%s] Applying Platt scaling (cv=3)…", ticker, model_name, horizon)
+                logger.info(
+                    "[%s/%s/%s] Applying Platt scaling (cv=3)…",
+                    ticker,
+                    model_name,
+                    horizon,
+                )
                 base_estimator = get_model(model_name, **best_params)
-                final_model    = CalibratedClassifierCV(base_estimator, cv=3, method="sigmoid")
+                final_model = CalibratedClassifierCV(
+                    base_estimator, cv=3, method="sigmoid"
+                )
                 final_model.fit(X, y)
             else:
                 final_model = get_model(model_name, **best_params)
@@ -482,9 +521,13 @@ class ModelTrainer:
             logger.info(
                 "[%s/%s/%s] Training complete in %.1fs | "
                 "Acc=%.3f F1=%.3f AUC=%.3f | trigger=%s",
-                ticker, model_name, horizon,
+                ticker,
+                model_name,
+                horizon,
                 result.training_duration_s,
-                result.mean_accuracy, result.mean_f1, result.mean_roc_auc,
+                result.mean_accuracy,
+                result.mean_f1,
+                result.mean_roc_auc,
                 trigger_reason,
             )
             return final_model, result
@@ -504,17 +547,17 @@ class ModelTrainer:
         model_name: str,
         horizon: str,
     ) -> None:
-        slug       = self._artifact_slug(ticker, model_name, horizon)
+        slug = self._artifact_slug(ticker, model_name, horizon)
         model_path = self.model_dir / f"{slug}.pkl"
-        meta_path  = self.model_dir / f"{slug}_meta.json"
+        meta_path = self.model_dir / f"{slug}_meta.json"
 
         with open(model_path, "wb") as f:
             pickle.dump(
                 {
-                    "model":           model,
+                    "model": model,
                     "feature_columns": result.feature_columns,
-                    "horizon":         horizon,
-                    "trained_at":      result.trained_at,
+                    "horizon": horizon,
+                    "trained_at": result.trained_at,
                 },
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,

@@ -41,18 +41,23 @@ class TestModelTrainer:
         X, y = X_y
         trainer = ModelTrainer(model_dir=tmp_path)
         model, result = trainer.train(
-            "random_forest", X, y, ticker="TEST",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
             hyperparams={"n_estimators": 10, "max_depth": 3},
         )
         assert model is not None
         assert result.mean_roc_auc > 0
 
     def test_artifacts_persisted(self, X_y, tmp_path):
-        import pickle
         X, y = X_y
         trainer = ModelTrainer(model_dir=tmp_path)
         trainer.train(
-            "random_forest", X, y, ticker="TEST",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
             hyperparams={"n_estimators": 10},
         )
         assert (tmp_path / "TEST_random_forest.pkl").exists()
@@ -62,7 +67,10 @@ class TestModelTrainer:
         X, y = X_y
         trainer = ModelTrainer(model_dir=tmp_path)
         trainer.train(
-            "random_forest", X, y, ticker="TEST",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
             hyperparams={"n_estimators": 10},
         )
         model, feature_cols = trainer.load_model("TEST", "random_forest")
@@ -71,6 +79,7 @@ class TestModelTrainer:
 
     def test_load_model_raises_if_not_found(self, tmp_path):
         from app.core.exceptions import ModelNotFoundError
+
         trainer = ModelTrainer(model_dir=tmp_path)
         with pytest.raises(ModelNotFoundError):
             trainer.load_model("NONEXISTENT", "xgboost")

@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from app.core.exceptions import InsufficientDataError
 from app.ml.feature_engineering import (
     FeatureEngineer,
     compute_atr,
@@ -37,7 +35,9 @@ class TestIndicatorPrimitives:
         assert (valid.values >= valid_lower.dropna().values).all()
 
     def test_atr_positive(self, sample_ohlcv):
-        atr = compute_atr(sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"])
+        atr = compute_atr(
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
+        )
         assert (atr.dropna() > 0).all()
 
 
@@ -55,6 +55,7 @@ class TestFeatureEngineer:
 
     def test_target_column_is_binary(self, sample_ohlcv):
         from configs.settings import settings
+
         fe = FeatureEngineer()
         df = fe.build_features(sample_ohlcv)
         assert set(df[settings.TARGET_COLUMN].unique()).issubset({0, 1})
@@ -72,6 +73,7 @@ class TestFeatureEngineer:
 
     def test_target_not_in_X(self, feature_df):
         from configs.settings import settings
+
         fe = FeatureEngineer()
         X, _ = fe.split_X_y(feature_df)
         assert settings.TARGET_COLUMN not in X.columns

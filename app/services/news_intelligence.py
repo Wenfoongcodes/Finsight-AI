@@ -35,7 +35,6 @@ import hashlib
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 from urllib.parse import urlparse
 
 from app.core.logging_config import get_logger
@@ -49,38 +48,38 @@ logger = get_logger("news_retrieval")
 
 # Tier 1 — institutional / primary sources (highest credibility weight)
 TIER1_SOURCES: dict[str, float] = {
-    "reuters.com":          1.00,
-    "bloomberg.com":        1.00,
-    "wsj.com":              0.98,
-    "ft.com":               0.97,
-    "sec.gov":              1.00,
-    "federalreserve.gov":   1.00,
-    "ecb.europa.eu":        0.95,
-    "bls.gov":              0.95,
-    "bea.gov":              0.95,
-    "cnbc.com":             0.90,
-    "marketwatch.com":      0.88,
-    "finance.yahoo.com":    0.85,
-    "barrons.com":          0.92,
-    "morningstar.com":      0.90,
-    "seekingalpha.com":     0.75,
-    "fool.com":             0.70,
-    "investopedia.com":     0.72,
-    "thestreet.com":        0.78,
-    "zacks.com":            0.80,
+    "reuters.com": 1.00,
+    "bloomberg.com": 1.00,
+    "wsj.com": 0.98,
+    "ft.com": 0.97,
+    "sec.gov": 1.00,
+    "federalreserve.gov": 1.00,
+    "ecb.europa.eu": 0.95,
+    "bls.gov": 0.95,
+    "bea.gov": 0.95,
+    "cnbc.com": 0.90,
+    "marketwatch.com": 0.88,
+    "finance.yahoo.com": 0.85,
+    "barrons.com": 0.92,
+    "morningstar.com": 0.90,
+    "seekingalpha.com": 0.75,
+    "fool.com": 0.70,
+    "investopedia.com": 0.72,
+    "thestreet.com": 0.78,
+    "zacks.com": 0.80,
 }
 
 # Tier 2 — acceptable mainstream media
 TIER2_SOURCES: dict[str, float] = {
-    "apnews.com":           0.82,
-    "nytimes.com":          0.80,
-    "washingtonpost.com":   0.78,
-    "theguardian.com":      0.75,
-    "economist.com":        0.85,
-    "businessinsider.com":  0.68,
-    "fortune.com":          0.72,
-    "forbes.com":           0.70,
-    "techcrunch.com":       0.65,
+    "apnews.com": 0.82,
+    "nytimes.com": 0.80,
+    "washingtonpost.com": 0.78,
+    "theguardian.com": 0.75,
+    "economist.com": 0.85,
+    "businessinsider.com": 0.68,
+    "fortune.com": 0.72,
+    "forbes.com": 0.70,
+    "techcrunch.com": 0.65,
 }
 
 # Explicitly blocked domains — excluded before any processing
@@ -97,38 +96,99 @@ BLOCKED_DOMAINS: set[str] = {
     "reddit.com",
     "pinterest.com",
     "tumblr.com",
-    "medium.com",      # too mixed quality — occasional exception handled via title check
+    "medium.com",  # too mixed quality — occasional exception handled via title check
     "substack.com",
 }
 
 # Keyword signals for sentiment classification
-BULLISH_KEYWORDS: frozenset[str] = frozenset({
-    "beats", "beat", "surge", "surged", "upgrade", "upgraded",
-    "raised", "raise", "strong", "record profit", "growth",
-    "positive outlook", "exceeds", "bullish", "rally", "rallied",
-    "outperform", "record high", "buyback", "dividend", "raised guidance",
-    "above expectations", "strong demand", "expansion", "breakout",
-})
+BULLISH_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "beats",
+        "beat",
+        "surge",
+        "surged",
+        "upgrade",
+        "upgraded",
+        "raised",
+        "raise",
+        "strong",
+        "record profit",
+        "growth",
+        "positive outlook",
+        "exceeds",
+        "bullish",
+        "rally",
+        "rallied",
+        "outperform",
+        "record high",
+        "buyback",
+        "dividend",
+        "raised guidance",
+        "above expectations",
+        "strong demand",
+        "expansion",
+        "breakout",
+    }
+)
 
-BEARISH_KEYWORDS: frozenset[str] = frozenset({
-    "miss", "missed", "downgrade", "downgraded", "lawsuit", "investigation",
-    "fraud", "decline", "cut", "weak", "loss", "losses", "bankruptcy",
-    "warning", "sell-off", "selloff", "below expectations", "layoffs",
-    "recall", "probe", "fine", "penalty", "default", "restructuring",
-    "missed earnings", "lowered guidance", "weak demand", "contraction",
-})
+BEARISH_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "miss",
+        "missed",
+        "downgrade",
+        "downgraded",
+        "lawsuit",
+        "investigation",
+        "fraud",
+        "decline",
+        "cut",
+        "weak",
+        "loss",
+        "losses",
+        "bankruptcy",
+        "warning",
+        "sell-off",
+        "selloff",
+        "below expectations",
+        "layoffs",
+        "recall",
+        "probe",
+        "fine",
+        "penalty",
+        "default",
+        "restructuring",
+        "missed earnings",
+        "lowered guidance",
+        "weak demand",
+        "contraction",
+    }
+)
 
-SEVERITY_KEYWORDS: frozenset[str] = frozenset({
-    "bankruptcy", "fraud", "lawsuit", "investigation", "earnings",
-    "federal reserve", "fed rate", "gdp", "inflation", "recession",
-    "merger", "acquisition", "ipo", "guidance", "restatement",
-})
+SEVERITY_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "bankruptcy",
+        "fraud",
+        "lawsuit",
+        "investigation",
+        "earnings",
+        "federal reserve",
+        "fed rate",
+        "gdp",
+        "inflation",
+        "recession",
+        "merger",
+        "acquisition",
+        "ipo",
+        "guidance",
+        "restatement",
+    }
+)
 
 # Constants
 _MAX_SNIPPET_CHARS = 400
-_FETCH_TIMEOUT_S   = 12
-_MAX_RETRIES       = 2
-_RETRY_DELAY_S     = 1.5
+_FETCH_TIMEOUT_S = 12
+_MAX_RETRIES = 2
+_RETRY_DELAY_S = 1.5
 _DEFAULT_CREDIBILITY = 0.55
 
 
@@ -136,17 +196,19 @@ _DEFAULT_CREDIBILITY = 0.55
 # Data classes
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class NewsItem:
     """A single retrieved and scored news item."""
-    title:             str
-    snippet:           str
-    url:               str
-    sentiment:         str  = "neutral"
-    sentiment_score:   float = 0.0
-    severity_score:    float = 0.0
+
+    title: str
+    snippet: str
+    url: str
+    sentiment: str = "neutral"
+    sentiment_score: float = 0.0
+    severity_score: float = 0.0
     credibility_score: float = _DEFAULT_CREDIBILITY
-    final_weight:      float = 0.5
+    final_weight: float = 0.5
 
     @property
     def domain(self) -> str:
@@ -178,21 +240,23 @@ class IntelligenceBrief:
     top_news           : Top-N scored news items.
     source_quality_note: Human-readable note about source quality.
     """
-    ticker:              str
-    situation_summary:   str
-    bullish_catalysts:   list[str] = field(default_factory=list)
-    bearish_catalysts:   list[str] = field(default_factory=list)
+
+    ticker: str
+    situation_summary: str
+    bullish_catalysts: list[str] = field(default_factory=list)
+    bearish_catalysts: list[str] = field(default_factory=list)
     aggregate_sentiment: str = "neutral"
-    sentiment_score:     float = 0.0
-    top_news:            list[NewsItem] = field(default_factory=list)
+    sentiment_score: float = 0.0
+    top_news: list[NewsItem] = field(default_factory=list)
     source_quality_note: str = ""
-    retrieval_success:   bool = True
-    error_message:       str = ""
+    retrieval_success: bool = True
+    error_message: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source quality helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _credibility_score(domain: str) -> float:
     """Return credibility weight for a domain."""
@@ -212,6 +276,7 @@ def _is_blocked(domain: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # News Retriever
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class NewsRetriever:
     """
@@ -300,10 +365,12 @@ class NewsRetriever:
                     return list(ddgs.text(query, max_results=max_results))
             except Exception as exc:
                 if attempt < _MAX_RETRIES:
-                    wait = _RETRY_DELAY_S * (2 ** attempt)
+                    wait = _RETRY_DELAY_S * (2**attempt)
                     logger.debug(
                         "DDGS attempt %d failed (%s); retrying in %.1fs…",
-                        attempt + 1, exc, wait,
+                        attempt + 1,
+                        exc,
+                        wait,
                     )
                     time.sleep(wait)
                 else:
@@ -313,6 +380,7 @@ class NewsRetriever:
 # ─────────────────────────────────────────────────────────────────────────────
 # News Analyzer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class NewsAnalyzer:
     """
@@ -336,13 +404,13 @@ class NewsAnalyzer:
             bear = sum(1 for kw in BEARISH_KEYWORDS if kw in text)
 
             if bull > bear:
-                item.sentiment       = "positive"
+                item.sentiment = "positive"
                 item.sentiment_score = min(1.0, bull / max(bull + bear, 1))
             elif bear > bull:
-                item.sentiment       = "negative"
+                item.sentiment = "negative"
                 item.sentiment_score = -min(1.0, bear / max(bull + bear, 1))
             else:
-                item.sentiment       = "neutral"
+                item.sentiment = "neutral"
                 item.sentiment_score = 0.0
 
             item.severity_score = min(
@@ -352,7 +420,7 @@ class NewsAnalyzer:
 
             item.final_weight = (
                 item.credibility_score * 0.40
-                + item.severity_score  * 0.30
+                + item.severity_score * 0.30
                 + abs(item.sentiment_score) * 0.30
             )
 
@@ -363,6 +431,7 @@ class NewsAnalyzer:
 # ─────────────────────────────────────────────────────────────────────────────
 # Intelligence Summarizer
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class IntelligenceSummarizer:
     """
@@ -398,9 +467,9 @@ class IntelligenceSummarizer:
 
         # Weighted aggregate sentiment score
         total_weight = sum(i.final_weight for i in items) or 1.0
-        agg_score    = sum(
-            i.sentiment_score * i.final_weight for i in items
-        ) / total_weight
+        agg_score = (
+            sum(i.sentiment_score * i.final_weight for i in items) / total_weight
+        )
 
         if agg_score > 0.10:
             agg_sentiment = "positive"
@@ -410,18 +479,16 @@ class IntelligenceSummarizer:
             agg_sentiment = "neutral"
 
         # Situation summary
-        top3       = items[:3]
+        top3 = items[:3]
         top3_titles = "; ".join(t.title for t in top3)
-        situation  = (
+        situation = (
             f"Recent coverage of {ticker} is {agg_sentiment}. "
             f"Key headlines: {top3_titles}. "
             f"Analysis based on {len(items)} filtered, source-weighted articles."
         )
 
         # Source quality note
-        tier1_count = sum(
-            1 for i in items if i.credibility_score >= 0.90
-        )
+        tier1_count = sum(1 for i in items if i.credibility_score >= 0.90)
         source_note = (
             f"{tier1_count}/{len(items)} articles from Tier-1 institutional sources."
         )
@@ -443,6 +510,7 @@ class IntelligenceSummarizer:
 # Facade
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class FinancialIntelligenceService:
     """
     End-to-end financial intelligence retrieval facade.
@@ -452,8 +520,8 @@ class FinancialIntelligenceService:
     """
 
     def __init__(self, top_k: int = 8) -> None:
-        self._retriever  = NewsRetriever(top_k=top_k)
-        self._analyzer   = NewsAnalyzer()
+        self._retriever = NewsRetriever(top_k=top_k)
+        self._analyzer = NewsAnalyzer()
         self._summarizer = IntelligenceSummarizer()
 
     def get_brief(self, ticker: str) -> IntelligenceBrief:
@@ -469,7 +537,10 @@ class FinancialIntelligenceService:
             brief = self._summarizer.summarize(ticker, items)
             logger.info(
                 "[%s] Intelligence brief: sentiment=%s score=%.3f items=%d",
-                ticker, brief.aggregate_sentiment, brief.sentiment_score, len(items),
+                ticker,
+                brief.aggregate_sentiment,
+                brief.sentiment_score,
+                len(items),
             )
             return brief
         except Exception as exc:
