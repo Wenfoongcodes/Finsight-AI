@@ -30,16 +30,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-
 from app.core.exceptions import PredictionError
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import ingest_market_data
 from app.ml.explainability import SHAPExplainer
-from app.ml.feature_engineering import FeatureEngineer, FeatureSelector, HORIZONS
+from app.ml.feature_engineering import HORIZONS, FeatureEngineer, FeatureSelector
 from app.ml.training.trainer import ModelTrainer
 from app.services.model_selector import ModelSelector
-from app.services.signal_fusion import FusedSignal, SignalFusionService
 from app.services.news_intelligence import IntelligenceBrief
+from app.services.signal_fusion import FusedSignal, SignalFusionService
 from configs.settings import settings
 
 logger = get_logger("prediction_service")
@@ -209,7 +208,7 @@ class PredictionService:
             X_latest = X_aligned.iloc[[-1]]
             pred = int(model.predict(X_latest)[0])
             p_bullish = round(float(model.predict_proba(X_latest)[0, 1]), 4)
-            p_bearish = round(1.0 - p_bullish, 4)
+            p_bearish = round(max(0.0, min(1.0, 1.0 - p_bullish)), 4)
             prob = p_bullish if pred == 1 else p_bearish
 
             # 8. SHAP explanation

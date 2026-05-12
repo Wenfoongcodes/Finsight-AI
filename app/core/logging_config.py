@@ -5,8 +5,9 @@ Provides consistent JSON-structured logging across all modules.
 
 import logging
 import sys
-from typing import Optional
 from importlib.util import find_spec
+from typing import Optional
+
 from configs.settings import settings
 
 LOGURU_AVAILABLE = find_spec("loguru") is not None

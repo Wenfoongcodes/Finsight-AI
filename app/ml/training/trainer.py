@@ -39,9 +39,9 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
-    roc_auc_score,
     mean_absolute_error,
     mean_squared_error,
+    roc_auc_score,
 )
 
 from app.core.exceptions import ModelNotFoundError, ModelTrainingError

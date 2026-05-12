@@ -31,7 +31,6 @@ from app.api.schemas import (
     AgentResponse,
     BatchPredictionRequest,
     ChatRequest,
-    ChatResponse as ChatResponseSchema,
     IngestRequest,
     IngestResponse,
     LeaderboardEntry,
@@ -45,16 +44,19 @@ from app.api.schemas import (
     TrainRequest,
     TrainResponse,
 )
+from app.api.schemas import (
+    ChatResponse as ChatResponseSchema,
+)
 from app.core.exceptions import (
+    AgentError,
     DataIngestionError,
     DataValidationError,
     InsufficientDataError,
+    LLMError,
     ModelNotFoundError,
     ModelTrainingError,
     PredictionError,
     RAGError,
-    LLMError,
-    AgentError,
 )
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import (
@@ -173,6 +175,10 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             fusion_applied = False
             news_sentiment = "neutral"
             news_items = []
+
+        # ── HARD SAFETY NORMALIZATION ─────────────────────
+        p_bullish = float(resp.p_bullish or 0.0)
+        p_bearish = float(resp.p_bearish or (1.0 - p_bullish))
 
         return PredictionResult(
             ticker=resp.ticker,
