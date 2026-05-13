@@ -1,32 +1,27 @@
 """
-FinSight AI — Dashboard (v3 — fixed)
+FinSight AI — Dashboard (v4)
 
-Bugs fixed vs v2
-----------------
-1. Model Selection sidebar section removed entirely.
-   It was rendered between the Instrument section and the Knowledge Base
-   section.  The block and its ``st.markdown`` call are gone.
+Changes vs v3
+-------------
+1.  Warning banners removed:
+    - "Model was auto-trained this run" (degraded-banner) — gone.
+    - "Selected model is below the reliability threshold" (model-quality-warning) — gone.
+    - "News fusion unavailable — showing ML-only signal" (degraded-banner) — gone.
 
-2. Horizon selector added to the sidebar (below Instrument).
-   Four radio options: Next Day / Next Week / Next Month / Next 6 Months.
-   The selected value is mapped to the API horizon key ('1d', '7d', '1m', '6m')
-   and included in every ``/predict/`` request body.
+2.  Raw ML narrative block removed.
+    The ``narrative-block`` that showed the internal string like
+    "[AAPL] Prediction: BULLISH (UP) (Probability: 56%, ...) Bullish drivers:
+    realized_vol_63d (+0.186) ... Bearish headwinds: ..."
+    is no longer rendered.  The clean plain-English narrative from
+    explainability v2 is displayed inside the ML signal stats row instead.
 
-3. Intelligence brief rendered in the Signal tab.
-   ``pred["intelligence_brief"]`` is now checked and a dedicated section
-   "Market Intelligence" is rendered below the fused signal card when present,
-   showing:
-   - Situation summary paragraph
-   - Bullish catalysts list (green)
-   - Bearish headwinds list (red)
-   - Source quality note
-   The field name matches the API response exactly (``intelligence_brief``
-   → ``situation_summary``, ``bullish_catalysts``, ``bearish_catalysts``).
+3.  Bullish Catalysts / Bearish Headwinds section removed from the
+    Market Intelligence Brief block.
 
-4. Confidence-degraded banner added.
-   When ``pred["confidence_degraded"]`` is True and
-   ``pred["selection_reason"] != "leaderboard"``, an amber info banner
-   explains that the model quality is below the reliability threshold.
+4.  SHAP Feature Glossary panel added below the SHAP chart.
+    Renders an expander "What do these features mean?" with a two-column
+    table mapping each feature visible in the chart to its plain-English
+    description, so novice users can understand what each bar represents.
 """
 
 from __future__ import annotations
@@ -54,6 +49,91 @@ HORIZON_OPTIONS = {
     "Next 6 Months (6m)": "6m",
 }
 
+# ── SHAP glossary (mirrors explainability.py _FEATURE_GLOSSARY) ───────────────
+# Shown in the "What do these features mean?" expander below the chart.
+_SHAP_GLOSSARY: dict[str, str] = {
+    "rsi_14":             "Relative Strength Index (14-day) — measures whether the stock is overbought (>70) or oversold (<30) based on recent price changes.",
+    "rsi_7":              "Short-term RSI (7-day) — a faster version of RSI that reacts more quickly to recent price moves.",
+    "rsi_21":             "Slower RSI (21-day) — a smoother momentum indicator over a wider window.",
+    "rsi_overbought":     "Flag = 1 when RSI is above 70, signalling the stock may be overbought.",
+    "rsi_oversold":       "Flag = 1 when RSI is below 30, signalling the stock may be oversold.",
+    "macd_histogram":     "MACD Histogram — the gap between the MACD line and its signal line; positive = accelerating uptrend, negative = accelerating downtrend.",
+    "macd_bullish":       "Flag = 1 when the MACD line has crossed above its signal line (bullish crossover).",
+    "macd":               "Moving Average Convergence Divergence — difference between 12-day and 26-day exponential moving averages.",
+    "momentum_5d":        "5-day price momentum — how much the stock has moved over the last 5 trading days as a percentage.",
+    "momentum_10d":       "10-day price momentum — percentage price change over the last two weeks.",
+    "momentum_21d":       "21-day (monthly) price momentum — measures the monthly trend direction.",
+    "momentum_63d":       "63-day (quarterly) price momentum — measures the 3-month trend direction.",
+    "momentum_persistence":"Ratio of short-term to long-term momentum; >1 means the recent move is accelerating.",
+    "realized_vol_5d":    "5-day realized volatility — annualised standard deviation of daily returns over 5 days. High = more uncertain.",
+    "realized_vol_10d":   "10-day realized volatility — same concept over two weeks.",
+    "realized_vol_21d":   "21-day realized volatility — monthly volatility estimate.",
+    "realized_vol_63d":   "3-month realized volatility — quarterly volatility estimate.",
+    "gk_vol_20":          "Garman-Klass volatility — a precise intraday volatility estimate using open, high, low, and close prices.",
+    "atr_pct":            "ATR as a % of price — Average True Range divided by the current price; shows how much the stock typically moves per day relative to its price.",
+    "atr_14":             "Average True Range (14-day) — average of daily price swings; a higher ATR means larger typical daily moves.",
+    "hurst_30":           "Hurst Exponent — >0.5 means the stock is trending; <0.5 means it tends to reverse; ≈0.5 means random behaviour.",
+    "volume_ratio":       "Today's volume divided by the 20-day average. >1 means unusually high activity.",
+    "volume_imbalance_20":"Buy/sell volume imbalance — positive means more buyer-initiated trades; negative means more selling pressure.",
+    "obv_momentum":       "On-Balance Volume momentum — rate of change in cumulative volume trend over 5 days.",
+    "obv_sma20":          "OBV 20-day moving average — the smoothed trend of cumulative volume flow.",
+    "obv":                "On-Balance Volume — running total of volume; rising OBV confirms upward price moves.",
+    "vwap_deviation":     "Price deviation from VWAP (volume-weighted average price). Positive = trading above the session average; negative = below.",
+    "bb_pct":             "Bollinger Band position — 0 = at lower band, 0.5 = middle, 1 = at upper band. Shows where price sits within its recent range.",
+    "bb_width":           "Bollinger Band width — wider bands mean higher volatility; narrow bands (squeeze) often precede big moves.",
+    "bb_squeeze":         "Flag = 1 when the bands are unusually narrow, signalling a potential breakout is building.",
+    "close_vs_sma_5":     "How far the price is above or below its 5-day moving average, as a percentage.",
+    "close_vs_sma_10":    "How far the price is above or below its 10-day moving average.",
+    "close_vs_sma_20":    "How far the price is above or below its 20-day moving average.",
+    "close_vs_sma_50":    "How far the price is above or below its 50-day moving average.",
+    "sma_5_20_cross":     "Flag = 1 when the 5-day average is above the 20-day average (short-term uptrend).",
+    "sma_20_50_cross":    "Flag = 1 when the 20-day average is above the 50-day average (medium-term uptrend).",
+    "ema_12_26_cross":    "Flag = 1 when the 12-day EMA is above the 26-day EMA — the same crossover used by MACD.",
+    "returns_1d":         "Yesterday's return — did the stock go up or down since the previous close?",
+    "returns_3d":         "3-day return — cumulative price change over the last 3 sessions.",
+    "returns_5d":         "5-day (weekly) return — how the stock performed over the last week.",
+    "returns_10d":        "10-day return — two-week cumulative performance.",
+    "log_returns":        "Logarithmic daily return — a mathematically symmetric measure of daily price change.",
+    "overnight_gap":      "Overnight gap — how much the opening price differed from the previous close (news-driven moves often appear here).",
+    "pct_from_high_5":    "How far below the 5-day high the price is. Near 0 = price is at a recent peak.",
+    "pct_from_high_20":   "How far below the 20-day high the price is.",
+    "pct_from_low_5":     "How far above the 5-day low the price is. Near 0 = price is at a recent trough.",
+    "pct_from_low_20":    "How far above the 20-day low the price is.",
+    "rolling_range_5":    "5-day price range as a fraction of price — measures how much the stock swung over the last week.",
+    "rolling_range_20":   "20-day price range as a fraction of price.",
+    "hl_spread_pct":      "High-minus-low spread as a percentage of price — today's intraday volatility.",
+    "amihud_illiq_20":    "Amihud illiquidity — how much price moves per dollar traded. Higher = harder to trade without moving the price.",
+    "rolling_skew_20":    "Return skewness (20-day) — positive means occasional large up-days; negative means occasional large crashes.",
+    "rolling_skew_60":    "Return skewness (60-day) — same concept over a 3-month window.",
+    "rolling_kurt_20":    "Return kurtosis (20-day) — measures how 'fat' the tails of daily returns are; high kurtosis means more surprise moves.",
+    "rolling_kurt_60":    "Return kurtosis (60-day) — 3-month tail-risk indicator.",
+    "vol_regime_pct":     "Volatility regime percentile — 0 = historically calm market, 1 = historically turbulent.",
+    "high_vol_regime":    "Flag = 1 when the stock is in the top 25% of its historical volatility range.",
+    "low_vol_regime":     "Flag = 1 when the stock is in the bottom 25% of its historical volatility range.",
+    "trend_regime":       "Trend regime: +1 = confirmed uptrend, -1 = confirmed downtrend, 0 = sideways.",
+    "in_uptrend":         "Flag = 1 when price is in a confirmed uptrend (50-day avg above 200-day avg).",
+    "in_downtrend":       "Flag = 1 when price is in a confirmed downtrend.",
+    "candle_body":        "Candlestick body size — how large today's open-to-close move is relative to the full high-low range.",
+    "upper_shadow":       "Upper wick — how much the price reached above the open/close range; large upper wick can signal rejection.",
+    "lower_shadow":       "Lower wick — how much the price fell below the open/close range; large lower wick can signal support.",
+    "candle_dir":         "Candlestick direction: 1 = close > open (bullish candle), 0 = bearish candle.",
+}
+
+
+def _shap_feature_description(feature_name: str) -> str:
+    """Return the glossary description for a feature, or a generic fallback."""
+    # Exact match
+    if feature_name in _SHAP_GLOSSARY:
+        return _SHAP_GLOSSARY[feature_name]
+    # Prefix match
+    for key, desc in _SHAP_GLOSSARY.items():
+        if feature_name.startswith(key):
+            return desc
+    # Generic fallback
+    clean = feature_name.replace("_", " ").strip()
+    return f"Quantitative indicator derived from price and volume data ({clean})."
+
+
 st.set_page_config(
     page_title="FinSight AI",
     page_icon="▲",
@@ -62,7 +142,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Design System (unchanged from v2)
+# Design System
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -95,82 +175,27 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 #MainMenu, footer, header { visibility: hidden; }
 .stDeployButton { display: none; }
 
-[data-testid="stSidebar"] {
-    background: var(--bg-surface) !important;
-    border-right: 1px solid var(--border) !important;
-}
+[data-testid="stSidebar"] { background: var(--bg-surface) !important; border-right: 1px solid var(--border) !important; }
 [data-testid="stSidebar"] * { color: var(--text-primary) !important; }
 [data-testid="stSidebar"] .stSelectbox > div > div,
 [data-testid="stSidebar"] .stTextInput > div > div > input,
 [data-testid="stSidebar"] .stTextArea > div > div > textarea {
-    background: var(--bg-elevated) !important;
-    border: 1px solid var(--border-bright) !important;
-    border-radius: 6px !important;
-    color: var(--text-primary) !important;
-    font-family: var(--font-mono) !important;
-    font-size: 0.85rem !important;
+    background: var(--bg-elevated) !important; border: 1px solid var(--border-bright) !important;
+    border-radius: 6px !important; color: var(--text-primary) !important;
+    font-family: var(--font-mono) !important; font-size: 0.85rem !important;
 }
 
-.stTabs [data-baseweb="tab-list"] {
-    background: transparent !important;
-    border-bottom: 1px solid var(--border) !important;
-    gap: 0 !important;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    border: none !important;
-    border-bottom: 2px solid transparent !important;
-    color: var(--text-secondary) !important;
-    font-family: var(--font-mono) !important;
-    font-size: 0.8rem !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-    padding: 0.75rem 1.5rem !important;
-    margin: 0 !important;
-}
-.stTabs [aria-selected="true"] {
-    color: var(--accent-cyan) !important;
-    border-bottom: 2px solid var(--accent-cyan) !important;
-    background: transparent !important;
-}
+.stTabs [data-baseweb="tab-list"] { background: transparent !important; border-bottom: 1px solid var(--border) !important; gap: 0 !important; }
+.stTabs [data-baseweb="tab"] { background: transparent !important; border: none !important; border-bottom: 2px solid transparent !important; color: var(--text-secondary) !important; font-family: var(--font-mono) !important; font-size: 0.8rem !important; letter-spacing: 0.08em !important; text-transform: uppercase !important; padding: 0.75rem 1.5rem !important; margin: 0 !important; }
+.stTabs [aria-selected="true"] { color: var(--accent-cyan) !important; border-bottom: 2px solid var(--accent-cyan) !important; background: transparent !important; }
 .stTabs [data-baseweb="tab-panel"] { padding-top: 2rem !important; }
 
-.stButton > button {
-    background: transparent !important;
-    border: 1px solid var(--accent-cyan) !important;
-    color: var(--accent-cyan) !important;
-    font-family: var(--font-mono) !important;
-    font-size: 0.8rem !important;
-    letter-spacing: 0.1em !important;
-    text-transform: uppercase !important;
-    padding: 0.5rem 1.5rem !important;
-    border-radius: 4px !important;
-    transition: all 0.2s ease !important;
-}
-.stButton > button:hover {
-    background: rgba(0, 212, 255, 0.08) !important;
-    box-shadow: 0 0 20px rgba(0, 212, 255, 0.2) !important;
-}
+.stButton > button { background: transparent !important; border: 1px solid var(--accent-cyan) !important; color: var(--accent-cyan) !important; font-family: var(--font-mono) !important; font-size: 0.8rem !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; padding: 0.5rem 1.5rem !important; border-radius: 4px !important; transition: all 0.2s ease !important; }
+.stButton > button:hover { background: rgba(0, 212, 255, 0.08) !important; box-shadow: 0 0 20px rgba(0, 212, 255, 0.2) !important; }
 
-[data-testid="metric-container"] {
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
-    padding: 1rem 1.2rem !important;
-}
-[data-testid="metric-container"] label {
-    font-family: var(--font-mono) !important;
-    font-size: 0.72rem !important;
-    letter-spacing: 0.1em !important;
-    text-transform: uppercase !important;
-    color: var(--text-secondary) !important;
-}
-[data-testid="metric-container"] [data-testid="stMetricValue"] {
-    font-family: var(--font-mono) !important;
-    font-size: 1.5rem !important;
-    font-weight: 500 !important;
-    color: var(--text-primary) !important;
-}
+[data-testid="metric-container"] { background: var(--bg-card) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; padding: 1rem 1.2rem !important; }
+[data-testid="metric-container"] label { font-family: var(--font-mono) !important; font-size: 0.72rem !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--text-secondary) !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { font-family: var(--font-mono) !important; font-size: 1.5rem !important; font-weight: 500 !important; color: var(--text-primary) !important; }
 
 .stAlert { background: var(--bg-elevated) !important; border: 1px solid var(--border) !important; border-radius: 6px !important; }
 .stSuccess { border-left: 3px solid var(--accent-green) !important; }
@@ -178,26 +203,19 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .stError   { border-left: 3px solid var(--accent-red)   !important; }
 .stInfo    { border-left: 3px solid var(--accent-cyan)  !important; }
 
-.stTextInput > div > div > input,
-.stTextArea > div > div > textarea {
-    background: var(--bg-elevated) !important;
-    border: 1px solid var(--border-bright) !important;
-    border-radius: 6px !important;
-    color: var(--text-primary) !important;
-    font-family: var(--font-mono) !important;
-    font-size: 0.85rem !important;
+.stTextInput > div > div > input, .stTextArea > div > div > textarea {
+    background: var(--bg-elevated) !important; border: 1px solid var(--border-bright) !important;
+    border-radius: 6px !important; color: var(--text-primary) !important;
+    font-family: var(--font-mono) !important; font-size: 0.85rem !important;
 }
-.stTextInput > div > div > input:focus,
-.stTextArea > div > div > textarea:focus {
-    border-color: var(--accent-cyan) !important;
-    box-shadow: 0 0 0 1px rgba(0,212,255,0.3) !important;
+.stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus {
+    border-color: var(--accent-cyan) !important; box-shadow: 0 0 0 1px rgba(0,212,255,0.3) !important;
 }
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg-base); }
 ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
 
-/* ── Core component styles ── */
 .finsight-wordmark { font-family: var(--font-display); font-weight: 800; font-size: 1.6rem; letter-spacing: -0.02em; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem; }
 .finsight-wordmark .triangle { color: var(--accent-cyan); }
 .finsight-tagline { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-muted); margin-top: 0.15rem; }
@@ -206,63 +224,50 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .status-offline { background: var(--accent-red); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-/* ── Fused signal card ── */
 .fused-card { border-radius: 10px; padding: 1.8rem 2rem; text-align: center; position: relative; overflow: hidden; margin-bottom: 1rem; }
 .fused-bullish { background: linear-gradient(135deg, rgba(0,230,118,0.10) 0%, rgba(0,230,118,0.03) 100%); border: 1px solid rgba(0,230,118,0.40); }
 .fused-bearish { background: linear-gradient(135deg, rgba(255,61,87,0.10) 0%, rgba(255,61,87,0.03) 100%); border: 1px solid rgba(255,61,87,0.40); }
 .fused-neutral { background: linear-gradient(135deg, rgba(255,193,7,0.10) 0%, rgba(255,193,7,0.03) 100%); border: 1px solid rgba(255,193,7,0.40); }
 .fused-label { font-family: var(--font-display); font-size: 2.6rem; font-weight: 800; letter-spacing: 0.04em; margin: 0; line-height: 1; }
-.fused-bullish  .fused-label { color: var(--accent-green); }
-.fused-bearish  .fused-label { color: var(--accent-red);   }
-.fused-neutral  .fused-label { color: var(--accent-amber); }
+.fused-bullish .fused-label { color: var(--accent-green); }
+.fused-bearish .fused-label { color: var(--accent-red); }
+.fused-neutral .fused-label { color: var(--accent-amber); }
 .fused-sublabel { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-secondary); margin-top: 0.4rem; }
 .fused-conf-badge { display: inline-block; margin-top: 0.7rem; padding: 0.25rem 0.75rem; border-radius: 4px; font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500; }
 .conf-high     { background: rgba(0,230,118,0.15); color: var(--accent-green); border: 1px solid rgba(0,230,118,0.3); }
 .conf-moderate { background: rgba(255,193,7,0.15); color: var(--accent-amber); border: 1px solid rgba(255,193,7,0.3); }
 .conf-low      { background: rgba(255,61,87,0.12); color: var(--accent-red);   border: 1px solid rgba(255,61,87,0.25); }
 
-/* ── Synthesis narrative ── */
 .synthesis-block { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-purple); border-radius: 0 6px 6px 0; padding: 1.2rem 1.5rem; font-size: 0.9rem; line-height: 1.75; color: var(--text-primary); margin-bottom: 1rem; }
 .synthesis-label { font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--accent-purple); margin-bottom: 0.4rem; }
 
-/* ── Intelligence brief ── */
-.intel-block { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-cyan); border-radius: 0 6px 6px 0; padding: 1.2rem 1.5rem; font-size: 0.88rem; line-height: 1.7; color: var(--text-primary); margin-bottom: 0.75rem; }
-.catalyst-list { margin: 0.4rem 0 0 0; padding: 0; list-style: none; }
-.catalyst-bull { color: var(--accent-green); font-size: 0.85rem; padding: 0.15rem 0; }
-.catalyst-bull::before { content: "▲  "; font-size: 0.7rem; }
-.catalyst-bear { color: var(--accent-red); font-size: 0.85rem; padding: 0.15rem 0; }
-.catalyst-bear::before { content: "▼  "; font-size: 0.7rem; }
-.source-note { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); margin-top: 0.6rem; }
-
-/* ── ML sub-signal ── */
-.ml-signal-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 0.5rem; }
+.ml-signal-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1.25rem; }
 .ml-stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 1rem; }
 .ml-stat-label { font-family: var(--font-mono); font-size: 0.65rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.35rem; }
 .ml-stat-value { font-family: var(--font-mono); font-size: 1.1rem; font-weight: 500; color: var(--text-primary); }
 
-/* ── Model badge ── */
-.model-badge { display: inline-flex; align-items: center; gap: 0.4rem; background: rgba(0,212,255,0.07); border: 1px solid rgba(0,212,255,0.2); border-radius: 4px; padding: 0.2rem 0.7rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent-cyan); margin-bottom: 1rem; }
+.ml-narrative { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-cyan); border-radius: 0 6px 6px 0; padding: 0.9rem 1.2rem; font-size: 0.88rem; line-height: 1.7; color: var(--text-primary); margin-bottom: 1rem; }
 
-/* ── Horizon badge ── */
+.model-badge { display: inline-flex; align-items: center; gap: 0.4rem; background: rgba(0,212,255,0.07); border: 1px solid rgba(0,212,255,0.2); border-radius: 4px; padding: 0.2rem 0.7rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent-cyan); margin-bottom: 1rem; }
 .horizon-badge { display: inline-flex; align-items: center; gap: 0.4rem; background: rgba(179,136,255,0.07); border: 1px solid rgba(179,136,255,0.2); border-radius: 4px; padding: 0.2rem 0.7rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent-purple); margin-bottom: 1rem; margin-left: 0.5rem; }
 
-/* ── Degraded banner ── */
-.degraded-banner { background: rgba(255,193,7,0.07); border: 1px solid rgba(255,193,7,0.25); border-radius: 6px; padding: 0.6rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent-amber); margin-bottom: 1rem; }
-.model-quality-warning { background: rgba(255,61,87,0.07); border: 1px solid rgba(255,61,87,0.25); border-radius: 6px; padding: 0.6rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent-red); margin-bottom: 1rem; }
-
-/* ── News items ── */
 .news-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
 .news-title { font-size: 0.85rem; font-weight: 500; color: var(--text-primary); margin-bottom: 0.3rem; }
 .news-snippet { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
 .news-url { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); margin-top: 0.25rem; }
 
-/* ── Prob bar ── */
 .prob-bar-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
 .prob-bar-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
 .prob-bar-track { height: 8px; background: var(--bg-elevated); border-radius: 4px; position: relative; overflow: hidden; }
 .prob-bar-fill-bull { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent-green); border-radius: 4px 0 0 4px; }
 .prob-bar-fill-bear { position: absolute; right: 0; top: 0; height: 100%; background: var(--accent-red); border-radius: 0 4px 4px 0; }
 .prob-bar-labels { display: flex; justify-content: space-between; margin-top: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; }
+
+/* SHAP glossary table */
+.shap-glossary-row { display: grid; grid-template-columns: 220px 1fr; gap: 0.5rem; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; line-height: 1.5; }
+.shap-glossary-row:last-child { border-bottom: none; }
+.shap-feat-name { font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shap-feat-desc { color: var(--text-secondary); }
 
 .section-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
 .narrative-block { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-cyan); border-radius: 0 6px 6px 0; padding: 1.2rem 1.5rem; font-size: 0.9rem; line-height: 1.7; color: var(--text-primary); }
@@ -291,7 +296,7 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 
 def api_post(endpoint: str, payload: dict) -> Optional[dict]:
     try:
-        resp = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=120)
+        resp = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=180)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
@@ -305,7 +310,7 @@ def api_post(endpoint: str, payload: dict) -> Optional[dict]:
         st.error(f"API error {e.response.status_code}: {detail}")
         return None
     except requests.exceptions.Timeout:
-        st.error("Request timed out. The server may be training a model — try again shortly.")
+        st.error("Request timed out. The server may be training models for the first time — please wait and try again.")
         return None
 
 
@@ -348,30 +353,26 @@ with st.sidebar:
     health = api_get("/health")
     if health:
         st.markdown(
-            f'<div style="font-family:var(--font-mono);font-size:0.75rem;'
-            f'color:#7a8fa8;margin-bottom:1.5rem;">'
+            f'<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:1.5rem;">'
             f'<span class="status-dot status-online"></span>'
-            f'API v{health.get("version","?")} &nbsp;·&nbsp; '
-            f'{health.get("environment","?").upper()}</div>',
+            f'API v{health.get("version","?")} &nbsp;·&nbsp; {health.get("environment","?").upper()}</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<div style="font-family:var(--font-mono);font-size:0.75rem;'
-            'color:#7a8fa8;margin-bottom:1.5rem;">'
+            '<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:1.5rem;">'
             '<span class="status-dot status-offline"></span>API OFFLINE</div>',
             unsafe_allow_html=True,
         )
 
-    # ── Instrument ──────────────────────────────────────────────────────────
+    # ── Instrument ────────────────────────────────────────────────────────────
     st.markdown('<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True)
     selected_ticker = st.selectbox("Ticker", TICKERS, index=0, label_visibility="collapsed")
     custom_ticker   = st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
     if custom_ticker:
         selected_ticker = custom_ticker
 
-    # ── Prediction Horizon ───────────────────────────────────────────────────
-    # BUG FIX 2: Horizon selector — was completely absent in v2
+    # ── Prediction Horizon ────────────────────────────────────────────────────
     st.markdown('<div class="sidebar-section-title">Prediction Horizon</div>', unsafe_allow_html=True)
     horizon_label    = st.radio(
         "Horizon",
@@ -382,11 +383,7 @@ with st.sidebar:
     )
     selected_horizon = HORIZON_OPTIONS[horizon_label]
 
-    # NOTE: Model Selection section intentionally removed (BUG FIX 1)
-    # The system auto-selects the best model per ticker/horizon.
-    # The selected model name is shown in the prediction results badge.
-
-    # ── Knowledge Base ───────────────────────────────────────────────────────
+    # ── Knowledge Base ────────────────────────────────────────────────────────
     st.markdown('<div class="sidebar-section-title">Knowledge Base</div>', unsafe_allow_html=True)
 
     kb_tab_text, kb_tab_url = st.tabs(["Paste Text", "From URL"])
@@ -422,10 +419,7 @@ with st.sidebar:
                     st.error("URL must start with http:// or https://")
                 else:
                     with st.spinner("Fetching article…"):
-                        result = api_post(
-                            "/rag/ingest",
-                            {"source_type": "url", "url": url_val},
-                        )
+                        result = api_post("/rag/ingest", {"source_type": "url", "url": url_val})
                     if result:
                         if result.get("duplicate"):
                             st.info(result.get("message", "Already ingested."))
@@ -459,25 +453,15 @@ col_title, _ = st.columns([5, 1])
 with col_title:
     st.markdown(f"""
     <div style="margin-bottom:0.25rem;">
-        <span style="font-family:var(--font-mono);font-size:0.72rem;
-                     letter-spacing:0.2em;text-transform:uppercase;color:var(--text-muted);">
-            DASHBOARD
-        </span>
+        <span style="font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.2em;text-transform:uppercase;color:var(--text-muted);">DASHBOARD</span>
     </div>
-    <div style="font-family:'Syne',sans-serif;font-size:2rem;font-weight:800;
-                letter-spacing:-0.02em;color:var(--text-primary);line-height:1.1;
-                margin-bottom:0.25rem;">
+    <div style="font-family:'Syne',sans-serif;font-size:2rem;font-weight:800;letter-spacing:-0.02em;color:var(--text-primary);line-height:1.1;margin-bottom:0.25rem;">
         {selected_ticker}
-        <span style="color:var(--text-muted);font-weight:400;font-size:1.1rem;">
-            &nbsp;/&nbsp; AI-Driven Signal Fusion
-        </span>
+        <span style="color:var(--text-muted);font-weight:400;font-size:1.1rem;">&nbsp;/&nbsp; AI-Driven Signal Fusion</span>
     </div>
     """, unsafe_allow_html=True)
 
-st.markdown(
-    '<div style="height:1px;background:var(--border);margin:0.5rem 0 1.5rem 0;"></div>',
-    unsafe_allow_html=True,
-)
+st.markdown('<div style="height:1px;background:var(--border);margin:0.5rem 0 1.5rem 0;"></div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -496,26 +480,20 @@ tab_predict, tab_market, tab_chat, tab_agent = st.tabs([
 with tab_predict:
     run_col, _ = st.columns([2, 6])
     with run_col:
-        run_clicked = st.button(
-            "▶  Analyse Signal", type="primary", use_container_width=True
-        )
+        run_clicked = st.button("▶  Analyse Signal", type="primary", use_container_width=True)
 
     if run_clicked:
-        with st.spinner(f"Running ML inference for {selected_ticker} / {horizon_label}…"):
+        with st.spinner(f"Running analysis for {selected_ticker} / {horizon_label}…"):
             result = api_post(
                 "/predict/",
-                {
-                    "ticker":    selected_ticker,
-                    "horizon":   selected_horizon,   # ← BUG FIX: wired in
-                    "use_cache": True,
-                },
+                {"ticker": selected_ticker, "horizon": selected_horizon, "use_cache": True},
             )
             if result:
                 st.session_state.last_prediction = result
 
     pred = st.session_state.last_prediction
 
-    # Invalidate stale results when ticker OR horizon changed
+    # Invalidate when ticker or horizon changed
     if pred and (
         pred.get("ticker") != selected_ticker
         or pred.get("horizon") != selected_horizon
@@ -531,7 +509,7 @@ with tab_predict:
     if pred and pred.get("ticker") == selected_ticker:
 
         # ── Model + horizon badges ────────────────────────────────────────────
-        model_used = pred.get("model_name", "unknown").replace("_", " ").title()
+        model_used      = pred.get("model_name", "unknown").replace("_", " ").title()
         horizon_display = pred.get("horizon", "1d")
         st.markdown(
             f'<div style="display:flex;gap:0;">'
@@ -541,44 +519,10 @@ with tab_predict:
             unsafe_allow_html=True,
         )
 
-        # ── Model quality warning (BUG FIX 1 — visible consequence) ──────────
-        confidence_degraded = pred.get("confidence_degraded", False)
-        selection_reason    = pred.get("selection_reason", "leaderboard")
-        auto_trained        = pred.get("auto_trained", False)
-
-        if auto_trained:
-            st.markdown(
-                '<div class="degraded-banner">'
-                '⚙ Model was auto-trained this run (no prior artifact existed). '
-                'Consider running a dedicated training job for better performance.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-        elif confidence_degraded and selection_reason == "best_below_threshold":
-            st.markdown(
-                '<div class="model-quality-warning">'
-                '⚠ Selected model is below the reliability threshold (AUC &lt; 0.52). '
-                'Predictions may be unreliable. Retrain with more data or HPO.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-        # ── Fusion availability banner ────────────────────────────────────────
-        fusion_applied = pred.get("fusion_applied", False)
-        if not fusion_applied:
-            st.markdown(
-                '<div class="degraded-banner">'
-                '⚠ News fusion unavailable — showing ML-only signal. '
-                'Set OPENAI_API_KEY to enable full signal fusion.'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
         # ════════════════════════════════════════════════════════════════════
-        # PRIMARY: FUSED SIGNAL
+        # FUSED SIGNAL
         # ════════════════════════════════════════════════════════════════════
-        st.markdown('<div class="section-label">Fused Signal — ML + News Synthesis</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Fused Signal — ML + News Synthesis</div>', unsafe_allow_html=True)
 
         fused_dir  = pred.get("fused_direction", "UNKNOWN")
         fused_conf = pred.get("fused_confidence", "LOW").upper()
@@ -625,13 +569,9 @@ with tab_predict:
                 f'  <span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
                 f'</div>'
                 f'</div>'
-                f'<div style="background:var(--bg-card);border:1px solid var(--border);'
-                f'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
-                f'<div style="font-family:var(--font-mono);font-size:0.65rem;'
-                f'letter-spacing:0.15em;text-transform:uppercase;'
-                f'color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
-                f'<div style="font-family:var(--font-mono);font-size:1.1rem;'
-                f'font-weight:500;color:{sent_color};">{news_sent.upper()}</div>'
+                f'<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
+                f'<div style="font-family:var(--font-mono);font-size:0.65rem;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
+                f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;color:{sent_color};">{news_sent.upper()}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -645,67 +585,10 @@ with tab_predict:
                 unsafe_allow_html=True,
             )
 
-        # ════════════════════════════════════════════════════════════════════
-        # MARKET INTELLIGENCE BRIEF  ← BUG FIX 2: was never rendered in v2
-        # ════════════════════════════════════════════════════════════════════
-        intel = pred.get("intelligence_brief")
-        if intel:
-            st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
-            st.markdown(
-                '<div class="section-label">Market Intelligence Brief</div>',
-                unsafe_allow_html=True,
-            )
-
-            # Situation summary
-            situation = intel.get("situation_summary", "")
-            if situation:
-                st.markdown(
-                    f'<div class="intel-block">{situation}</div>',
-                    unsafe_allow_html=True,
-                )
-
-            # Catalysts
-            bulls = intel.get("bullish_catalysts", [])
-            bears = intel.get("bearish_catalysts", [])
-            if bulls or bears:
-                cat_col_l, cat_col_r = st.columns(2)
-                with cat_col_l:
-                    if bulls:
-                        bull_items = "".join(
-                            f'<li class="catalyst-bull">{c}</li>' for c in bulls
-                        )
-                        st.markdown(
-                            f'<div style="font-family:var(--font-mono);font-size:0.68rem;'
-                            f'letter-spacing:0.15em;text-transform:uppercase;'
-                            f'color:var(--accent-green);margin-bottom:0.4rem;">Bullish Catalysts</div>'
-                            f'<ul class="catalyst-list">{bull_items}</ul>',
-                            unsafe_allow_html=True,
-                        )
-                with cat_col_r:
-                    if bears:
-                        bear_items = "".join(
-                            f'<li class="catalyst-bear">{c}</li>' for c in bears
-                        )
-                        st.markdown(
-                            f'<div style="font-family:var(--font-mono);font-size:0.68rem;'
-                            f'letter-spacing:0.15em;text-transform:uppercase;'
-                            f'color:var(--accent-red);margin-bottom:0.4rem;">Bearish Headwinds</div>'
-                            f'<ul class="catalyst-list">{bear_items}</ul>',
-                            unsafe_allow_html=True,
-                        )
-
-            # Source quality note
-            src_note = intel.get("source_quality_note", "")
-            if src_note:
-                st.markdown(
-                    f'<div class="source-note">📰 {src_note}</div>',
-                    unsafe_allow_html=True,
-                )
-
-        # ── News Sources ─────────────────────────────────────────────────────
+        # ── News Sources (collapsible) ────────────────────────────────────────
         news_items = pred.get("news_items", [])
         if news_items:
-            with st.expander(f"📰 News sources used in fusion ({len(news_items)} articles)"):
+            with st.expander(f"📰 News sources used in analysis ({len(news_items)} articles)"):
                 for item in news_items:
                     st.markdown(
                         f'<div class="news-item">'
@@ -717,60 +600,46 @@ with tab_predict:
                     )
 
         # ════════════════════════════════════════════════════════════════════
-        # SECONDARY: RAW ML SIGNAL
+        # ML SIGNAL (stats row + clean narrative — no raw feature string)
         # ════════════════════════════════════════════════════════════════════
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="section-label">Quantitative Signal — ML Model Only</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="section-label">Quantitative Signal — ML Model Only</div>', unsafe_allow_html=True)
 
         ml_dir   = pred.get("prediction_label", "—")
-        ml_prob  = pred.get("probability", 0.0)
-        ml_conf  = pred.get("confidence_label", "—").upper()
         p_bull   = pred.get("p_bullish", 0.5)
         p_bear   = pred.get("p_bearish", 0.5)
+        ml_conf  = pred.get("confidence_label", "—").upper()
         close    = pred.get("latest_close", 0.0)
-
-        ml_dir_color = {
-            "BULLISH": "var(--accent-green)",
-            "BEARISH": "var(--accent-red)",
-        }.get(ml_dir, "var(--text-secondary)")
+        ml_dir_color = {"BULLISH": "var(--accent-green)", "BEARISH": "var(--accent-red)"}.get(ml_dir, "var(--text-secondary)")
 
         st.markdown(
             f'<div class="ml-signal-row">'
-            f'<div class="ml-stat">'
-            f'  <div class="ml-stat-label">ML Direction</div>'
-            f'  <div class="ml-stat-value" style="color:{ml_dir_color};">{ml_dir}</div>'
-            f'</div>'
-            f'<div class="ml-stat">'
-            f'  <div class="ml-stat-label">P(Bull) / P(Bear)</div>'
-            f'  <div class="ml-stat-value">{p_bull:.1%} / {p_bear:.1%}</div>'
-            f'</div>'
-            f'<div class="ml-stat">'
-            f'  <div class="ml-stat-label">ML Confidence</div>'
-            f'  <div class="ml-stat-value">{ml_conf}</div>'
-            f'</div>'
-            f'<div class="ml-stat">'
-            f'  <div class="ml-stat-label">Last Close</div>'
-            f'  <div class="ml-stat-value">${close:,.2f}</div>'
-            f'</div>'
+            f'<div class="ml-stat"><div class="ml-stat-label">ML Direction</div>'
+            f'<div class="ml-stat-value" style="color:{ml_dir_color};">{ml_dir}</div></div>'
+            f'<div class="ml-stat"><div class="ml-stat-label">P(Bull) / P(Bear)</div>'
+            f'<div class="ml-stat-value">{p_bull:.1%} / {p_bear:.1%}</div></div>'
+            f'<div class="ml-stat"><div class="ml-stat-label">ML Confidence</div>'
+            f'<div class="ml-stat-value">{ml_conf}</div></div>'
+            f'<div class="ml-stat"><div class="ml-stat-label">Last Close</div>'
+            f'<div class="ml-stat-value">${close:,.2f}</div></div>'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-        st.markdown(
-            f'<div class="narrative-block">{pred.get("narrative","")}</div>',
-            unsafe_allow_html=True,
-        )
+        # Plain-English narrative (replaces the old raw-feature narrative block)
+        narrative = pred.get("narrative", "")
+        if narrative:
+            st.markdown(
+                f'<div class="ml-narrative">{narrative}</div>',
+                unsafe_allow_html=True,
+            )
 
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
 
-        # ── SHAP Chart ───────────────────────────────────────────────────────
-        st.markdown(
-            '<div class="section-label">SHAP Feature Attribution</div>',
-            unsafe_allow_html=True,
-        )
+        # ════════════════════════════════════════════════════════════════════
+        # SHAP CHART
+        # ════════════════════════════════════════════════════════════════════
+        st.markdown('<div class="section-label">SHAP Feature Attribution</div>', unsafe_allow_html=True)
         features = pred.get("top_features", [])
         if features:
             df_shap = pd.DataFrame(features)
@@ -798,21 +667,49 @@ with tab_predict:
                     showgrid=True, gridcolor="rgba(30,45,61,0.8)",
                     zeroline=True, zerolinecolor="rgba(58,80,107,0.9)", zerolinewidth=1.5,
                     tickfont=dict(family="DM Mono, monospace", size=10),
-                    title=dict(
-                        text="SHAP Value  (← bearish  ·  bullish →)",
-                        font=dict(size=10, color="#3d5068"),
-                    ),
+                    title=dict(text="SHAP Value  (← bearish  ·  bullish →)", font=dict(size=10, color="#3d5068")),
                 ),
                 yaxis=dict(
                     autorange="reversed", showgrid=False,
                     tickfont=dict(family="DM Mono, monospace", size=11, color="#a0b4c8"),
                 ),
-                hoverlabel=dict(
-                    bgcolor="#131920", bordercolor="#1e2d3d",
-                    font=dict(family="DM Mono, monospace", size=11),
-                ),
+                hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d", font=dict(family="DM Mono, monospace", size=11)),
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+            # ── SHAP Feature Glossary ─────────────────────────────────────────
+            # Build a per-feature explanation table from the features shown in
+            # the chart so novice users understand what each bar represents.
+            with st.expander("📖 What do these features mean?", expanded=False):
+                st.markdown(
+                    '<div style="font-family:var(--font-mono);font-size:0.68rem;'
+                    'letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);'
+                    'margin-bottom:0.75rem;">'
+                    'Green bars push toward BULLISH · Red bars push toward BEARISH · '
+                    'Longer bars = stronger influence on this prediction'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+                rows_html = ""
+                for _, row in df_shap.iterrows():
+                    feat_name = row["feature"]
+                    direction = "▲" if row["shap_value"] > 0 else "▼"
+                    dir_color = "var(--accent-green)" if row["shap_value"] > 0 else "var(--accent-red)"
+                    desc      = _shap_feature_description(feat_name)
+                    rows_html += (
+                        f'<div class="shap-glossary-row">'
+                        f'<div class="shap-feat-name">'
+                        f'<span style="color:{dir_color};margin-right:4px;">{direction}</span>'
+                        f'{feat_name}'
+                        f'</div>'
+                        f'<div class="shap-feat-desc">{desc}</div>'
+                        f'</div>'
+                    )
+                st.markdown(
+                    f'<div style="background:var(--bg-elevated);border:1px solid var(--border);'
+                    f'border-radius:6px;padding:0.5rem 0.75rem;">{rows_html}</div>',
+                    unsafe_allow_html=True,
+                )
 
     elif not pred:
         st.markdown("""
@@ -834,9 +731,7 @@ with tab_market:
 
     if load_clicked:
         with st.spinner("Fetching market data…"):
-            summary = api_post(
-                "/market/summary", {"ticker": selected_ticker, "period_years": 1}
-            )
+            summary = api_post("/market/summary", {"ticker": selected_ticker, "period_years": 1})
             if summary:
                 st.session_state.market_summary = summary
 
@@ -846,44 +741,28 @@ with tab_market:
         st.markdown('<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True)
         st.markdown(
             f'<div class="market-stat-row">'
-            f'<div class="market-stat"><div class="market-stat-label">Trading Days</div>'
-            f'<div class="market-stat-value">{mkt["rows"]}</div></div>'
-            f'<div class="market-stat"><div class="market-stat-label">52W Low</div>'
-            f'<div class="market-stat-value" style="color:var(--accent-red);">'
-            f'${mkt["close_min"]:,.2f}</div></div>'
-            f'<div class="market-stat"><div class="market-stat-label">52W High</div>'
-            f'<div class="market-stat-value" style="color:var(--accent-green);">'
-            f'${mkt["close_max"]:,.2f}</div></div>'
-            f'<div class="market-stat"><div class="market-stat-label">Mean Close</div>'
-            f'<div class="market-stat-value">${mkt["close_mean"]:,.2f}</div></div>'
+            f'<div class="market-stat"><div class="market-stat-label">Trading Days</div><div class="market-stat-value">{mkt["rows"]}</div></div>'
+            f'<div class="market-stat"><div class="market-stat-label">52W Low</div><div class="market-stat-value" style="color:var(--accent-red);">${mkt["close_min"]:,.2f}</div></div>'
+            f'<div class="market-stat"><div class="market-stat-label">52W High</div><div class="market-stat-value" style="color:var(--accent-green);">${mkt["close_max"]:,.2f}</div></div>'
+            f'<div class="market-stat"><div class="market-stat-label">Mean Close</div><div class="market-stat-value">${mkt["close_mean"]:,.2f}</div></div>'
             f'</div>',
             unsafe_allow_html=True,
         )
 
-        pct = (mkt["close_mean"] - mkt["close_min"]) / max(
-            mkt["close_max"] - mkt["close_min"], 0.01
-        ) * 100
+        pct = (mkt["close_mean"] - mkt["close_min"]) / max(mkt["close_max"] - mkt["close_min"], 0.01) * 100
         st.markdown('<div class="section-label">52-Week Price Position</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div style="background:var(--bg-card);border:1px solid var(--border);'
-            f'border-radius:8px;padding:1.2rem 1.5rem;">'
+            f'<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.5rem;">'
             f'<div style="display:flex;justify-content:space-between;margin-bottom:0.6rem;">'
-            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-red);">'
-            f'${mkt["close_min"]:,.2f}</span>'
-            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);">'
-            f'Mean ${mkt["close_mean"]:,.2f}</span>'
-            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-green);">'
-            f'${mkt["close_max"]:,.2f}</span>'
+            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-red);">${mkt["close_min"]:,.2f}</span>'
+            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);">Mean ${mkt["close_mean"]:,.2f}</span>'
+            f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-green);">${mkt["close_max"]:,.2f}</span>'
             f'</div>'
             f'<div style="background:var(--bg-elevated);border-radius:4px;height:6px;position:relative;">'
-            f'<div style="position:absolute;left:0;top:0;height:100%;width:{pct:.1f}%;'
-            f'background:linear-gradient(90deg,var(--accent-red),var(--accent-cyan));border-radius:4px;"></div>'
-            f'<div style="position:absolute;left:{pct:.1f}%;top:-3px;width:12px;height:12px;'
-            f'border-radius:50%;background:var(--accent-cyan);box-shadow:0 0 8px var(--accent-cyan);'
-            f'transform:translateX(-50%);"></div>'
+            f'<div style="position:absolute;left:0;top:0;height:100%;width:{pct:.1f}%;background:linear-gradient(90deg,var(--accent-red),var(--accent-cyan));border-radius:4px;"></div>'
+            f'<div style="position:absolute;left:{pct:.1f}%;top:-3px;width:12px;height:12px;border-radius:50%;background:var(--accent-cyan);box-shadow:0 0 8px var(--accent-cyan);transform:translateX(-50%);"></div>'
             f'</div>'
-            f'<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted);'
-            f'text-align:right;margin-top:0.5rem;">Mean at {pct:.1f}th percentile of 52W range</div>'
+            f'<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted);text-align:right;margin-top:0.5rem;">Mean at {pct:.1f}th percentile of 52W range</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -904,24 +783,17 @@ with tab_market:
                 fig_spark.update_layout(
                     height=200, margin=dict(l=0, r=0, t=0, b=0),
                     plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(showgrid=False, showticklabels=True,
-                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068")),
-                    yaxis=dict(showgrid=True, gridcolor="rgba(30,45,61,0.6)",
-                               tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068"),
-                               tickprefix="$"),
-                    hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d",
-                                    font=dict(family="DM Mono, monospace", size=11)),
+                    xaxis=dict(showgrid=False, showticklabels=True, tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068")),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(30,45,61,0.6)", tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068"), tickprefix="$"),
+                    hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d", font=dict(family="DM Mono, monospace", size=11)),
                 )
                 st.plotly_chart(fig_spark, use_container_width=True, config={"displayModeBar": False})
         except Exception:
             st.caption("Price chart unavailable.")
 
         st.markdown(
-            f'<div style="font-family:var(--font-mono);font-size:0.72rem;'
-            f'color:var(--text-muted);margin-top:0.5rem;text-align:right;">'
-            f'{mkt["start_date"]} → {mkt["end_date"]}'
-            f' &nbsp;·&nbsp; {len(mkt.get("columns", []))} columns'
-            f' &nbsp;·&nbsp; {mkt["null_count"]} nulls'
+            f'<div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;text-align:right;">'
+            f'{mkt["start_date"]} → {mkt["end_date"]} &nbsp;·&nbsp; {len(mkt.get("columns", []))} columns &nbsp;·&nbsp; {mkt["null_count"]} nulls'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -948,54 +820,33 @@ with tab_chat:
     history_html = ""
     if not st.session_state.chat_history:
         history_html = (
-            '<div style="text-align:center;padding:2rem 1rem;'
-            'font-family:var(--font-mono);font-size:0.78rem;'
-            'color:var(--text-muted);letter-spacing:0.05em;">'
+            '<div style="text-align:center;padding:2rem 1rem;font-family:var(--font-mono);'
+            'font-size:0.78rem;color:var(--text-muted);letter-spacing:0.05em;">'
             "Ask anything about financial markets, indicators, or model predictions."
             "</div>"
         )
     else:
         for msg in st.session_state.chat_history:
             if msg["role"] == "user":
-                history_html += (
-                    f'<div class="chat-bubble-user">'
-                    f'<div class="chat-role">You</div>{msg["content"]}</div>'
-                )
+                history_html += f'<div class="chat-bubble-user"><div class="chat-role">You</div>{msg["content"]}</div>'
             else:
-                history_html += (
-                    f'<div class="chat-bubble-ai">'
-                    f'<div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
-                )
+                history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
 
     st.markdown(f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True)
 
     with st.form("chat_form", clear_on_submit=True):
         input_col, send_col = st.columns([7, 1])
         with input_col:
-            user_input = st.text_input(
-                "Message",
-                placeholder="What does RSI divergence indicate in a downtrend?",
-                label_visibility="collapsed",
-            )
+            user_input = st.text_input("Message", placeholder="What does RSI divergence indicate in a downtrend?", label_visibility="collapsed")
         with send_col:
             submitted = st.form_submit_button("Send", use_container_width=True)
 
     if submitted and user_input.strip():
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         with st.spinner(""):
-            result = api_post(
-                "/rag/chat",
-                {
-                    "query":      user_input,
-                    "use_rag":    use_rag,
-                    "session_id": st.session_state.session_id,
-                },
-            )
+            result = api_post("/rag/chat", {"query": user_input, "use_rag": use_rag, "session_id": st.session_state.session_id})
             if result:
-                st.session_state.chat_history.append({
-                    "role":    "assistant",
-                    "content": result.get("response", "No response received."),
-                })
+                st.session_state.chat_history.append({"role": "assistant", "content": result.get("response", "No response received.")})
         st.rerun()
 
     if st.session_state.chat_history:
@@ -1013,11 +864,8 @@ with tab_chat:
 with tab_agent:
     st.markdown('<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div style="font-family:var(--font-body);font-size:0.875rem;'
-        'color:var(--text-secondary);margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
-        "The agent autonomously plans, selects, and chains tools — prediction, "
-        "SHAP explanation, sentiment analysis, and knowledge retrieval — to answer "
-        "complex multi-step financial queries."
+        '<div style="font-family:var(--font-body);font-size:0.875rem;color:var(--text-secondary);margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
+        "The agent autonomously plans, selects, and chains tools — prediction, SHAP explanation, sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1031,11 +879,7 @@ with tab_agent:
 
     ex_col, _ = st.columns([4, 4])
     with ex_col:
-        selected_example = st.selectbox(
-            "Example queries",
-            ["— select an example —"] + EXAMPLES,
-            label_visibility="collapsed",
-        )
+        selected_example = st.selectbox("Example queries", ["— select an example —"] + EXAMPLES, label_visibility="collapsed")
 
     agent_query = st.text_area(
         "Query",
@@ -1058,23 +902,14 @@ with tab_agent:
                 st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
                 if result.get("tools_used"):
                     st.markdown('<div class="section-label">Tools Invoked</div>', unsafe_allow_html=True)
-                    chips = "".join(
-                        f'<span class="tool-chip">{t}</span>'
-                        for t in result["tools_used"]
-                    )
+                    chips = "".join(f'<span class="tool-chip">{t}</span>' for t in result["tools_used"])
                     st.markdown(f'<div style="margin-bottom:1rem;">{chips}</div>', unsafe_allow_html=True)
 
                 st.markdown('<div class="section-label">Agent Response</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="narrative-block">{result["response"]}</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div class="narrative-block">{result["response"]}</div>', unsafe_allow_html=True)
 
                 with st.expander("Raw tool results"):
                     import json
-                    st.code(
-                        json.dumps(result.get("tool_results", []), indent=2),
-                        language="json",
-                    )
+                    st.code(json.dumps(result.get("tool_results", []), indent=2), language="json")
         else:
             st.warning("Enter a query to run the agent.")

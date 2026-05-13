@@ -1,27 +1,15 @@
 """
-FinSight AI — FastAPI Route Handlers (v3 — fixed)
+FinSight AI — FastAPI Route Handlers (v4)
 
-Bugs fixed vs v2
-----------------
-1. ``predict`` endpoint now accepts ``horizon`` from ``PredictionRequest``
-   and passes it through to ``PredictionService.predict()``.
+Changes vs v3
+-------------
+* ``IntelligenceBriefSchema`` import removed — class no longer exists in schemas.
+* The block that built ``intelligence_brief_schema`` from ``resp.intelligence_brief``
+  is removed entirely.
+* ``intelligence_brief=intelligence_brief_schema`` kwarg removed from the
+  ``PredictionResult(...)`` constructor call.
 
-2. ``PredictionResult`` mapping now includes ALL new fields introduced in
-   the v3 service layer:
-   - ``horizon``
-   - ``auto_trained``
-   - ``confidence_degraded``
-   - ``selection_reason``
-   - ``intelligence_brief`` (full ``IntelligenceBriefSchema`` serialization)
-
-3. ``batch_predict`` passes ``horizon`` through.
-
-4. ``model_leaderboard`` endpoint passes ``horizon`` query param.
-
-5. ``IntelligenceBriefSchema`` is correctly built from
-   ``resp.intelligence_brief`` when available.
-
-No logic changes to training, market, RAG, or agent routes.
+All other route logic unchanged.
 """
 
 from __future__ import annotations
@@ -33,7 +21,6 @@ from app.api.schemas import (
     BatchPredictionRequest,
     ChatRequest, ChatResponse as ChatResponseSchema,
     IngestRequest, IngestResponse,
-    IntelligenceBriefSchema,
     LeaderboardEntry, LeaderboardResponse,
     MarketDataRequest, MarketDataSummary,
     NewsItemSchema,
@@ -112,18 +99,16 @@ prediction_router = APIRouter(prefix="/predict", tags=["Predictions"])
 @prediction_router.post("/", response_model=PredictionResult)
 async def predict(request: PredictionRequest) -> PredictionResult:
     """
-    Generate a next-day (or multi-horizon) price direction prediction.
+    Generate a price-direction prediction for the requested ticker and horizon.
 
-    The system selects the best model for the ticker/horizon automatically.
-    If no trained model exists it trains one on demand before returning.
-    The response includes the raw ML signal, SHAP explanation, news
-    intelligence brief, and (when an LLM key is set) the fused signal.
+    The system selects the best trained model automatically.  When no model
+    exists it trains all candidates and picks the highest AUC before returning.
     """
     try:
         svc  = _get_prediction_service()
         resp = svc.predict(
             ticker=request.ticker,
-            horizon=request.horizon,       # ← BUG FIX: was missing in v2
+            horizon=request.horizon,
             use_cache=request.use_cache,
         )
 
@@ -137,11 +122,7 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             fusion_applied    = fused.fusion_applied
             news_sentiment    = fused.news_sentiment
             news_items        = [
-                NewsItemSchema(
-                    title=n.title,
-                    snippet=n.snippet,
-                    url=n.url,
-                )
+                NewsItemSchema(title=n.title, snippet=n.snippet, url=n.url)
                 for n in fused.news_items
             ]
         else:
@@ -153,42 +134,26 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             news_sentiment    = "neutral"
             news_items        = []
 
-        # ── Intelligence brief ────────────────────────────────────────────────
-        # BUG FIX: was never mapped in v2 — completely missing from response
-        intelligence_brief_schema: IntelligenceBriefSchema | None = None
-        brief = resp.intelligence_brief
-        if brief:
-            intelligence_brief_schema = IntelligenceBriefSchema(
-                ticker=brief.ticker,
-                situation_summary=brief.situation_summary,
-                bullish_catalysts=brief.bullish_catalysts,
-                bearish_catalysts=brief.bearish_catalysts,
-                aggregate_sentiment=brief.aggregate_sentiment,
-                sentiment_score=brief.sentiment_score,
-                source_quality_note=brief.source_quality_note,
-                retrieval_success=brief.retrieval_success,
-            )
-
         return PredictionResult(
             # ML signal
             ticker=resp.ticker,
             model_name=resp.model_name,
-            horizon=resp.horizon,                              # ← BUG FIX
+            horizon=resp.horizon,
             prediction=resp.prediction,
             prediction_label="BULLISH" if resp.prediction == 1 else "BEARISH",
             probability=resp.probability,
             p_bullish=resp.p_bullish,
             p_bearish=resp.p_bearish,
             confidence_label=resp.confidence_label,
+            confidence_degraded=resp.confidence_degraded,
+            selection_reason=resp.selection_reason,
             latest_close=resp.latest_close,
             narrative=resp.narrative,
             top_features=[
                 SHAPFeature(**f)
                 for f in resp.shap_explanation.get("top_features", [])
             ],
-            auto_trained=resp.auto_trained,                    # ← BUG FIX
-            confidence_degraded=resp.confidence_degraded,      # ← BUG FIX
-            selection_reason=resp.selection_reason,            # ← BUG FIX
+            auto_trained=resp.auto_trained,
             # Fused signal
             fused_direction=fused_direction,
             fused_confidence=fused_confidence,
@@ -197,8 +162,6 @@ async def predict(request: PredictionRequest) -> PredictionResult:
             fusion_applied=fusion_applied,
             news_sentiment=news_sentiment,
             news_items=news_items,
-            # Intelligence brief                               # ← BUG FIX
-            intelligence_brief=intelligence_brief_schema,
         )
 
     except ModelNotFoundError as e:
@@ -217,25 +180,22 @@ async def predict(request: PredictionRequest) -> PredictionResult:
 async def batch_predict(request: BatchPredictionRequest) -> dict:
     """Batch predictions for multiple tickers at the same horizon."""
     svc     = _get_prediction_service()
-    results = svc.batch_predict(
-        tickers=request.tickers,
-        horizon=request.horizon,           # ← BUG FIX: was missing in v2
-    )
+    results = svc.batch_predict(tickers=request.tickers, horizon=request.horizon)
     return {
         ticker: (
             {
-                "prediction":           "BULLISH" if r.prediction == 1 else "BEARISH",
-                "probability":          r.probability,
-                "p_bullish":            r.p_bullish,
-                "p_bearish":            r.p_bearish,
-                "confidence":           r.confidence_label,
-                "confidence_degraded":  r.confidence_degraded,
-                "selection_reason":     r.selection_reason,
-                "model_selected":       r.model_name,
-                "horizon":              r.horizon,
-                "auto_trained":         r.auto_trained,
-                "fused_direction":  r.fused_signal.final_direction if r.fused_signal else "N/A",
-                "fusion_applied":   r.fused_signal.fusion_applied if r.fused_signal else False,
+                "prediction":          "BULLISH" if r.prediction == 1 else "BEARISH",
+                "probability":         r.probability,
+                "p_bullish":           r.p_bullish,
+                "p_bearish":           r.p_bearish,
+                "confidence":          r.confidence_label,
+                "confidence_degraded": r.confidence_degraded,
+                "selection_reason":    r.selection_reason,
+                "model_selected":      r.model_name,
+                "horizon":             r.horizon,
+                "auto_trained":        r.auto_trained,
+                "fused_direction":     r.fused_signal.final_direction if r.fused_signal else "N/A",
+                "fusion_applied":      r.fused_signal.fusion_applied  if r.fused_signal else False,
             }
             if not isinstance(r, str)
             else {"error": r}
@@ -249,15 +209,10 @@ async def model_leaderboard(
     ticker: str,
     horizon: str = Query(default="1d", description="Prediction horizon"),
 ) -> LeaderboardResponse:
-    """
-    Return the model performance leaderboard for a given ticker and horizon.
-
-    The ``horizon`` query parameter defaults to '1d'.  Pass '7d', '1m', or
-    '6m' to inspect leaderboards for other horizons independently.
-    """
+    """Return the model performance leaderboard for a ticker and horizon."""
     ticker   = ticker.upper().strip()
     selector = _get_selector()
-    board    = selector.leaderboard(ticker, horizon=horizon)    # ← BUG FIX
+    board    = selector.leaderboard(ticker, horizon=horizon)
     sel      = selector.select(ticker, horizon=horizon)
 
     return LeaderboardResponse(
@@ -277,9 +232,7 @@ training_router = APIRouter(prefix="/train", tags=["Training"])
 
 @training_router.post("/", response_model=TrainResponse)
 async def train_model(request: TrainRequest) -> TrainResponse:
-    """
-    Train a model for a given ticker / model / horizon and persist the artifact.
-    """
+    """Train a model for a given ticker / model / horizon and persist the artifact."""
     try:
         raw_df     = ingest_market_data(request.ticker, period_years=request.period_years)
         engineer   = FeatureEngineer()
@@ -289,8 +242,7 @@ async def train_model(request: TrainRequest) -> TrainResponse:
         trainer   = _get_trainer()
         _, result = trainer.train(
             model_name=request.model_name,
-            X=X,
-            y=y,
+            X=X, y=y,
             ticker=request.ticker,
             horizon=request.horizon,
             run_hpo=request.run_hpo,

@@ -1,20 +1,13 @@
 """
-FinSight AI — API Schemas (v4 — fixed)
+FinSight AI — API Schemas (v5)
 
-Bug fixes vs v3
----------------
-* ``PredictionResult`` gains two missing fields that ``routes.py`` now
-  populates but v3 schemas lacked:
-    - ``confidence_degraded: bool``  — True when model was below MIN_AUC
-                                       or selected because no artifact existed.
-    - ``selection_reason: str``      — REASON_* constant from ModelSelector.
+Changes vs v4
+-------------
+* ``IntelligenceBriefSchema`` class removed entirely.
+* ``intelligence_brief`` field removed from ``PredictionResult``.
+* Import of ``IntelligenceBriefSchema`` removed everywhere.
 
-  Without these declarations FastAPI raises a validation error when the
-  route handler tries to return them, causing a 500 on every prediction.
-
-* ``IntelligenceBriefSchema`` is already declared in v3 and unchanged here.
-
-All other contracts are identical to v3.
+All other contracts unchanged.
 """
 
 from __future__ import annotations
@@ -44,8 +37,7 @@ class PredictionRequest(BaseModel):
     """
     Single-ticker prediction request.
 
-    ``model_name`` is intentionally absent — the system selects the
-    best-performing model per ticker/horizon automatically.
+    ``model_name`` is absent — the system auto-selects the best model.
     ``horizon`` selects the prediction window: '1d' (default), '7d', '1m', '6m'.
     """
     ticker:    str  = Field(..., min_length=1, max_length=10, examples=["AAPL"])
@@ -78,83 +70,48 @@ class SHAPFeature(BaseModel):
     feature_value: float
 
 
-class IntelligenceBriefSchema(BaseModel):
-    """Serialized IntelligenceBrief exposed via the prediction API."""
-    ticker:              str
-    situation_summary:   str
-    bullish_catalysts:   list[str] = Field(default_factory=list)
-    bearish_catalysts:   list[str] = Field(default_factory=list)
-    aggregate_sentiment: str   = "neutral"
-    sentiment_score:     float = 0.0
-    source_quality_note: str   = ""
-    retrieval_success:   bool  = True
-
-
 class PredictionResult(BaseModel):
     """
     Full prediction API response.
 
-    ML signal fields
-    ----------------
-    model_name          : Auto-selected model (e.g. 'xgboost').
-    horizon             : Prediction window ('1d', '7d', '1m', '6m').
-    prediction          : 0 = bearish, 1 = bullish (raw ML output).
-    prediction_label    : 'BULLISH' | 'BEARISH'.
-    probability         : P(predicted direction).
-    p_bullish           : Calibrated P(bullish) ∈ [0, 1].
-    p_bearish           : 1 − p_bullish.
-    confidence_label    : 'high' | 'moderate' | 'low' (ML-only).
-    confidence_degraded : True when model was below MIN_AUC or untrained.
-    selection_reason    : Why this model was chosen (REASON_* constant).
-    auto_trained        : True if the model was trained this call.
-    narrative           : SHAP-based plain-English reasoning.
-    top_features        : Top SHAP contributors.
-    latest_close        : Most recent closing price.
+    ML signal
+    ---------
+    model_name, horizon, prediction, prediction_label, probability,
+    p_bullish, p_bearish, confidence_label, confidence_degraded,
+    selection_reason, latest_close, narrative, top_features, auto_trained.
 
-    Fused signal fields
-    -------------------
-    fused_direction     : 'BULLISH' | 'BEARISH' | 'NEUTRAL'.
-    fused_confidence    : 'HIGH' | 'MODERATE' | 'LOW'.
-    fused_probability   : P(bullish) after fusion.
-    fusion_narrative    : LLM synthesis reasoning.
-    fusion_applied      : False when LLM was unavailable.
-    news_sentiment      : Aggregate news sentiment.
-    news_items          : News articles used in fusion.
-
-    Intelligence brief  (new — was missing in v2 routes)
-    -----------------
-    intelligence_brief  : Full news intelligence summary or None.
+    Fused signal
+    ------------
+    fused_direction, fused_confidence, fused_probability, fusion_narrative,
+    fusion_applied, news_sentiment, news_items.
     """
     model_config = {"protected_namespaces": ()}
 
     # ── ML signal ─────────────────────────────────────────────────────────────
-    ticker:               str
-    model_name:           str
-    horizon:              str  = "1d"
-    prediction:           int
-    prediction_label:     str
-    probability:          float
-    p_bullish:            float
-    p_bearish:            float
-    confidence_label:     str
-    confidence_degraded:  bool  = False       # ← BUG FIX: was missing in v3
-    selection_reason:     str   = "leaderboard"  # ← BUG FIX: was missing in v3
-    latest_close:         float
-    narrative:            str
-    top_features:         list[SHAPFeature]
-    auto_trained:         bool  = False
+    ticker:              str
+    model_name:          str
+    horizon:             str   = "1d"
+    prediction:          int
+    prediction_label:    str
+    probability:         float
+    p_bullish:           float
+    p_bearish:           float
+    confidence_label:    str
+    confidence_degraded: bool  = False
+    selection_reason:    str   = "leaderboard"
+    latest_close:        float
+    narrative:           str
+    top_features:        list[SHAPFeature]
+    auto_trained:        bool  = False
 
     # ── Fused signal ──────────────────────────────────────────────────────────
-    fused_direction:      str   = "UNKNOWN"
-    fused_confidence:     str   = "LOW"
-    fused_probability:    float = 0.5
-    fusion_narrative:     str   = ""
-    fusion_applied:       bool  = False
-    news_sentiment:       str   = "neutral"
-    news_items:           list[NewsItemSchema] = Field(default_factory=list)
-
-    # ── Intelligence brief ────────────────────────────────────────────────────
-    intelligence_brief:   Optional[IntelligenceBriefSchema] = None
+    fused_direction:     str   = "UNKNOWN"
+    fused_confidence:    str   = "LOW"
+    fused_probability:   float = 0.5
+    fusion_narrative:    str   = ""
+    fusion_applied:      bool  = False
+    news_sentiment:      str   = "neutral"
+    news_items:          list[NewsItemSchema] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_probabilities(self) -> "PredictionResult":

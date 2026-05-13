@@ -1,36 +1,23 @@
 """
-FinSight AI — Automatic Model Selection Service (v3)
+FinSight AI — Automatic Model Selection Service (v4)
 
-Bug fixed
----------
-v2 returned ``FALLBACK_MODEL = "xgboost"`` silently when the leaderboard
-was empty (no trained artifacts for the ticker/horizon).  This masked the
-"no model exists" condition — the caller had no way to distinguish between
-"xgboost was genuinely the best model" and "xgboost was picked because
-nothing else existed."
+Change vs v3
+------------
+When no trained artifacts exist for a ticker/horizon (REASON_NO_ARTIFACTS),
+the system previously fell back silently to a single hardcoded model
+(DEFAULT_TRAINING_MODEL = "xgboost").
 
-Fix
----
-``select()`` now returns a ``SelectionResult`` named-tuple that carries:
+Fix: ``select()`` still returns a ``SelectionResult`` immediately (it cannot
+train inline — that is the trainer's responsibility).  The *caller*
+(``PredictionService``) is now responsible for iterating over
+``ALL_TRAINING_MODELS`` when it receives ``REASON_NO_ARTIFACTS``, training
+every model, and then re-running ``select()`` to pick the best one by AUC.
 
-  model_name       : str   — the model to use
-  reason           : str   — one of REASON_* constants
-  auc              : float — 0.0 when no artifacts exist
-  from_leaderboard : bool  — True only when MIN_AUC was satisfied
+This file exports ``ALL_TRAINING_MODELS`` so the caller has a single source
+of truth for which models to train.
 
-``PredictionService`` inspects ``result.reason`` and logs accordingly:
-- REASON_NO_ARTIFACTS    → WARNING, proceeds to auto-train from scratch
-- REASON_BELOW_THRESHOLD → WARNING, proceeds but flags low confidence
-- REASON_LEADERBOARD     → INFO, standard path
-
-``DEFAULT_TRAINING_MODEL`` replaces the old ``FALLBACK_MODEL`` constant and
-is referenced by name so a single change cascades everywhere.
-
-Backward compat
----------------
-``select_name()`` shim returns just the model-name string for callers that
-don't need the full SelectionResult (scripts, tests, CLI).
-``FALLBACK_MODEL`` alias kept for any external import that references it.
+All other behaviour (leaderboard, REASON_BELOW_THRESHOLD, SelectionResult)
+is unchanged.
 """
 
 from __future__ import annotations
@@ -48,21 +35,24 @@ logger = get_logger("model_selector")
 
 MIN_AUC: float = 0.52
 
-# What the system trains when no artifact exists — explicit policy, not a silent default.
-DEFAULT_TRAINING_MODEL: str = "xgboost"
-FALLBACK_MODEL: str = DEFAULT_TRAINING_MODEL  # backward-compat alias
-
-_PREFERENCE_ORDER: list[str] = [
+# All models trained when no artifact exists.  Order also acts as tiebreak.
+ALL_TRAINING_MODELS: list[str] = [
     "xgboost",
     "lightgbm",
     "random_forest",
     "logistic_regression",
 ]
 
-# Selection reason constants consumed by PredictionService for branching logic
-REASON_LEADERBOARD     = "leaderboard"          # normal best-AUC pick (passed MIN_AUC)
-REASON_BELOW_THRESHOLD = "best_below_threshold" # best available, but under MIN_AUC
-REASON_NO_ARTIFACTS    = "no_artifacts_default" # nothing trained yet for ticker/horizon
+# Kept for backward compat; callers that only need a single name can import this.
+DEFAULT_TRAINING_MODEL: str = ALL_TRAINING_MODELS[0]
+FALLBACK_MODEL: str = DEFAULT_TRAINING_MODEL
+
+_PREFERENCE_ORDER: list[str] = ALL_TRAINING_MODELS   # same list, aliased for clarity
+
+# Selection reason constants
+REASON_LEADERBOARD     = "leaderboard"
+REASON_BELOW_THRESHOLD = "best_below_threshold"
+REASON_NO_ARTIFACTS    = "no_artifacts_default"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,14 +63,15 @@ class SelectionResult(NamedTuple):
     """
     Structured output from ``ModelSelector.select()``.
 
-    Always returned — never None, never raises.  Callers branch on ``reason``
-    to handle the three distinct cases explicitly rather than guessing from
-    the returned model name alone.
+    model_name       : Model registry key to use.
+    reason           : One of REASON_* constants.
+    auc              : Best known AUC, 0.0 when no artifacts exist.
+    from_leaderboard : True only when at least one artifact passed MIN_AUC.
     """
-    model_name:       str    # model registry key to pass to trainer
-    reason:           str    # REASON_* constant above
-    auc:              float  # best known AUC; 0.0 when no artifacts exist
-    from_leaderboard: bool   # True only when MIN_AUC was satisfied
+    model_name:       str
+    reason:           str
+    auc:              float
+    from_leaderboard: bool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,9 +82,10 @@ class ModelSelector:
     """
     Stateless leaderboard-based model selector with multi-horizon support.
 
-    Scans persisted ``*_meta.json`` training-result files from ``MODELS_DIR``
-    and returns a ``SelectionResult`` so every caller knows *why* a model
-    was chosen, not just which model.
+    When no artifacts exist, ``select()`` returns REASON_NO_ARTIFACTS with
+    the first model in ALL_TRAINING_MODELS.  The caller (PredictionService)
+    is responsible for iterating ALL_TRAINING_MODELS, training each one, and
+    calling ``select()`` again to obtain the best result.
     """
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
@@ -103,29 +95,19 @@ class ModelSelector:
 
     def select(self, ticker: str, horizon: str = "1d") -> SelectionResult:
         """
-        Select the best available model for *ticker* / *horizon*.
+        Select the best available trained model for *ticker* / *horizon*.
 
-        Three distinct cases, all explicit:
-
-        1. **Leaderboard hit** — at least one artifact passes MIN_AUC.
-           Logs at INFO.  Returns best model by AUC.
-
-        2. **Below-threshold fallback** — artifacts exist but none pass MIN_AUC.
-           Logs at WARNING.  Returns best available so prediction can proceed,
-           but caller should flag confidence as degraded.
-
-        3. **No artifacts** — nothing trained yet for this ticker/horizon.
-           Logs at WARNING with actionable message.  Returns
-           ``DEFAULT_TRAINING_MODEL`` so ``load_or_train()`` knows what to train.
+        Three cases:
+        1. Leaderboard hit  — artifact(s) pass MIN_AUC → return best by AUC.
+        2. Below-threshold  — artifact(s) exist but all < MIN_AUC → return best.
+        3. No artifacts     — return REASON_NO_ARTIFACTS so the caller trains all models.
         """
         eligible, all_entries = self._scan_leaderboard(ticker.upper(), horizon)
 
-        # ── Case 1: At least one model passes MIN_AUC ─────────────────────────
         if eligible:
             best_name, best_auc = eligible[0]
             logger.info(
-                "[%s/%s] Model selected via leaderboard: %s "
-                "(AUC=%.4f, %d candidate(s))",
+                "[%s/%s] Model selected: %s (AUC=%.4f, candidates=%d)",
                 ticker, horizon, best_name, best_auc, len(eligible),
             )
             return SelectionResult(
@@ -135,14 +117,11 @@ class ModelSelector:
                 from_leaderboard=True,
             )
 
-        # ── Case 2: Artifacts exist but all below MIN_AUC ────────────────────
         if all_entries:
             best_name, best_auc = all_entries[0]
             logger.warning(
                 "[%s/%s] No model meets MIN_AUC %.2f. "
-                "Best available: %s (AUC=%.4f). "
-                "Consider retraining with more data or HPO. "
-                "Proceeding with degraded confidence.",
+                "Best available: %s (AUC=%.4f). Proceeding with degraded confidence.",
                 ticker, horizon, MIN_AUC, best_name, best_auc,
             )
             return SelectionResult(
@@ -152,27 +131,22 @@ class ModelSelector:
                 from_leaderboard=False,
             )
 
-        # ── Case 3: No artifacts at all ───────────────────────────────────────
+        # No artifacts at all — caller must train all models first
         logger.warning(
-            "[%s/%s] No trained model artifacts found. "
-            "System will auto-train '%s' from scratch. "
-            "First prediction for this ticker/horizon will take longer.",
-            ticker, horizon, DEFAULT_TRAINING_MODEL,
+            "[%s/%s] No trained artifacts found. "
+            "Caller should train all models in ALL_TRAINING_MODELS=%s, "
+            "then call select() again.",
+            ticker, horizon, ALL_TRAINING_MODELS,
         )
         return SelectionResult(
-            model_name=DEFAULT_TRAINING_MODEL,
+            model_name=ALL_TRAINING_MODELS[0],
             reason=REASON_NO_ARTIFACTS,
             auc=0.0,
             from_leaderboard=False,
         )
 
     def select_name(self, ticker: str, horizon: str = "1d") -> str:
-        """
-        Convenience shim that returns only the model name string.
-
-        Prefer ``select()`` when the caller needs to branch on the selection
-        reason.  Use this for CLI scripts and simple test assertions.
-        """
+        """Convenience shim — returns just the model name string."""
         return self.select(ticker, horizon).model_name
 
     def leaderboard(self, ticker: str, horizon: str = "1d") -> list[dict]:
@@ -200,15 +174,8 @@ class ModelSelector:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _scan_leaderboard(
-        self, ticker: str, horizon: str
+        self, ticker: str, horizon: str,
     ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """
-        Scan meta files and return two sorted lists:
-          eligible    — models whose AUC >= MIN_AUC, sorted desc
-          all_entries — every model found, sorted desc
-
-        Scans in _PREFERENCE_ORDER so tiebreaks at equal AUC are deterministic.
-        """
         eligible:    list[tuple[str, float]] = []
         all_entries: list[tuple[str, float]] = []
 
@@ -222,7 +189,7 @@ class ModelSelector:
                 eligible.append((model_name, auc))
             else:
                 logger.debug(
-                    "[%s/%s/%s] AUC %.4f < MIN_AUC %.2f — not eligible",
+                    "[%s/%s/%s] AUC %.4f < MIN_AUC %.2f",
                     ticker, model_name, horizon, auc, MIN_AUC,
                 )
 
@@ -230,9 +197,7 @@ class ModelSelector:
         all_entries.sort(key=lambda x: x[1], reverse=True)
         return eligible, all_entries
 
-    def _load_meta(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> Optional[dict]:
+    def _load_meta(self, ticker: str, model_name: str, horizon: str) -> Optional[dict]:
         meta_path = self._model_dir / f"{ticker}_{model_name}_{horizon}_meta.json"
         if not meta_path.exists():
             return None
@@ -242,7 +207,3 @@ class ModelSelector:
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", meta_path.name, exc)
             return None
-
-    def _score(self, meta: dict) -> float:
-        """Composite score hook — override to go beyond raw AUC."""
-        return meta.get("mean_roc_auc", 0.0)

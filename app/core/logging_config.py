@@ -12,6 +12,7 @@ from configs.settings import settings
 
 LOGURU_AVAILABLE = find_spec("loguru") is not None
 
+
 def setup_logging(
     level: str = "INFO",
     log_file: Optional[str] = None,

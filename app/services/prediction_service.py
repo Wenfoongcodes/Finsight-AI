@@ -1,22 +1,20 @@
 """
-FinSight AI — Prediction Service (v3 — fixed)
+FinSight AI — Prediction Service (v5)
 
-Bug fixed vs v3
----------------
-``selector.select()`` now returns a ``SelectionResult`` named-tuple, not a
-bare string.  This version consumes it correctly:
+Changes vs v4
+-------------
+* ``IntelligenceBrief`` import removed.
+* ``intelligence_brief`` field removed from ``PredictionResponse``.
+* The line ``response.intelligence_brief = getattr(fused, "intelligence_brief", None)``
+  removed — ``FusedSignal`` no longer carries that field.
 
-  - Extracts ``.model_name`` to pass to the trainer.
-  - Inspects ``.reason`` to log at the right level and set
-    ``confidence_degraded`` on the response when the model was selected
-    despite being below MIN_AUC or because no artifacts existed.
-
-No other logic changes vs v3.
+All other logic (multi-model training on no-artifacts, SHAP, narrative,
+batch predict) is unchanged.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from app.core.exceptions import PredictionError
@@ -27,19 +25,19 @@ from app.ml.feature_engineering import FeatureEngineer, FeatureSelector, HORIZON
 from app.ml.training.trainer import ModelTrainer
 from app.services.model_selector import (
     ModelSelector,
+    ALL_TRAINING_MODELS,
     REASON_NO_ARTIFACTS,
     REASON_BELOW_THRESHOLD,
     REASON_LEADERBOARD,
 )
 from app.services.signal_fusion import FusedSignal, SignalFusionService
-from app.services.news_intelligence import IntelligenceBrief
 from configs.settings import settings
 
 logger = get_logger("prediction_service")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Response
+# Response dataclass
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -51,21 +49,20 @@ class PredictionResponse:
     ------
     ticker              : Stock ticker symbol.
     model_name          : Auto-selected model name.
-    horizon             : Prediction horizon ('1d', '7d', '1m', '6m').
-    selection_reason    : Why this model was selected (REASON_* constant).
-    confidence_degraded : True when model was below MIN_AUC or untrained.
+    horizon             : '1d' | '7d' | '1m' | '6m'.
+    selection_reason    : REASON_* constant from ModelSelector.
+    confidence_degraded : True when no artifact existed or AUC < MIN_AUC.
     prediction          : 0 = bearish, 1 = bullish.
     probability         : P(predicted direction).
     p_bullish           : Calibrated P(bullish).
     p_bearish           : 1 - p_bullish.
-    confidence_label    : 'high' | 'moderate' | 'low' (ML-only).
+    confidence_label    : 'high' | 'moderate' | 'low'.
     shap_explanation    : SHAP local explanation dict.
-    narrative           : Plain-English SHAP narrative.
-    latest_close        : Most recent closing price.
+    narrative           : Plain-English summary (no raw feature names).
+    latest_close        : Most recent close price.
     feature_snapshot    : Top-20 feature values at inference time.
-    fused_signal        : FusedSignal from news + LLM (or None).
-    intelligence_brief  : Raw IntelligenceBrief from news retrieval (or None).
-    auto_trained        : True if the model was trained automatically this call.
+    fused_signal        : FusedSignal (None when fusion was skipped).
+    auto_trained        : True when any training occurred this call.
     """
     ticker:              str
     model_name:          str
@@ -82,8 +79,7 @@ class PredictionResponse:
     latest_close:        float
     feature_snapshot:    dict
     fused_signal:        Optional[FusedSignal] = None
-    intelligence_brief:  Optional[IntelligenceBrief] = None
-    auto_trained:        bool = False
+    auto_trained:        bool                  = False
 
 
 def _confidence_label(p_bullish: float) -> str:
@@ -102,7 +98,7 @@ def _confidence_label(p_bullish: float) -> str:
 class PredictionService:
     """
     End-to-end prediction pipeline:
-      ModelSelector → ModelTrainer.load_or_train → SHAP → SignalFusion
+      ModelSelector → (train all models if needed) → best model → SHAP → SignalFusion
     """
 
     def __init__(self) -> None:
@@ -110,8 +106,6 @@ class PredictionService:
         self.engineer       = FeatureEngineer()
         self.selector       = ModelSelector()
         self.fusion_service = SignalFusionService()
-
-    # ── Main entry point ──────────────────────────────────────────────────────
 
     def predict(
         self,
@@ -122,33 +116,24 @@ class PredictionService:
         apply_feature_selection: bool = False,
     ) -> PredictionResponse:
         """
-        Run the full prediction pipeline for ticker/horizon.
+        Run the full prediction pipeline for *ticker* / *horizon*.
 
-        Args:
-            ticker:                  Stock ticker symbol (case-insensitive).
-            horizon:                 '1d' | '7d' | '1m' | '6m'.
-            use_cache:               Use cached market data parquet.
-            run_fusion:              Run news + LLM signal fusion.
-            apply_feature_selection: Run FeatureSelector before inference.
-
-        Returns:
-            PredictionResponse.
+        When no artifacts exist the service trains all models in
+        ALL_TRAINING_MODELS before selecting the best one by AUC.
 
         Raises:
-            PredictionError: On any unrecoverable pipeline failure.
+            PredictionError: On any unrecoverable failure.
         """
         ticker  = ticker.upper().strip()
         horizon = horizon.strip()
 
         if horizon not in HORIZONS:
             raise PredictionError(
-                f"Invalid horizon '{horizon}'. Valid options: {list(HORIZONS.keys())}"
+                f"Invalid horizon '{horizon}'. Valid: {list(HORIZONS.keys())}"
             )
 
         try:
-            logger.info(
-                "Prediction pipeline started: ticker=%s horizon=%s", ticker, horizon
-            )
+            logger.info("Prediction pipeline: ticker=%s horizon=%s", ticker, horizon)
 
             # ── 1. Ingest ─────────────────────────────────────────────────────
             raw_df = ingest_market_data(ticker, use_cache=use_cache)
@@ -166,19 +151,55 @@ class PredictionService:
                     ticker, horizon, X.shape[1],
                 )
 
-            # ── 4. Model selection — explicit reason handling ─────────────────
-            sel = self.selector.select(ticker, horizon=horizon)
+            # ── 4. Model selection ────────────────────────────────────────────
+            sel          = self.selector.select(ticker, horizon=horizon)
+            auto_trained = False
 
-            # Log at the right level per selection case
             if sel.reason == REASON_NO_ARTIFACTS:
                 logger.warning(
-                    "[%s/%s] No existing artifacts — will auto-train '%s'.",
-                    ticker, horizon, sel.model_name,
+                    "[%s/%s] No artifacts — training all %d models: %s",
+                    ticker, horizon, len(ALL_TRAINING_MODELS), ALL_TRAINING_MODELS,
                 )
+                best_result = None
+                for model_name in ALL_TRAINING_MODELS:
+                    try:
+                        _, train_result = self.trainer.train(
+                            model_name=model_name,
+                            X=X, y=y,
+                            ticker=ticker,
+                            horizon=horizon,
+                            trigger_reason="no_artifacts_train_all",
+                        )
+                        logger.info(
+                            "[%s/%s] Trained %s: AUC=%.4f",
+                            ticker, horizon, model_name, train_result.mean_roc_auc,
+                        )
+                        if (
+                            best_result is None
+                            or train_result.mean_roc_auc > best_result.mean_roc_auc
+                        ):
+                            best_result = train_result
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s/%s] Training %s failed (skipping): %s",
+                            ticker, horizon, model_name, exc,
+                        )
+
+                if best_result is None:
+                    raise PredictionError(
+                        f"All model training attempts failed for {ticker}/{horizon}."
+                    )
+
+                auto_trained = True
+                sel = self.selector.select(ticker, horizon=horizon)
+                logger.info(
+                    "[%s/%s] Post-training selection: %s (AUC=%.4f, reason=%s)",
+                    ticker, horizon, sel.model_name, sel.auc, sel.reason,
+                )
+
             elif sel.reason == REASON_BELOW_THRESHOLD:
                 logger.warning(
-                    "[%s/%s] Using '%s' despite AUC=%.4f < MIN_AUC. "
-                    "Confidence degraded.",
+                    "[%s/%s] Using '%s' (AUC=%.4f < MIN_AUC). Confidence degraded.",
                     ticker, horizon, sel.model_name, sel.auc,
                 )
             else:
@@ -189,27 +210,23 @@ class PredictionService:
 
             confidence_degraded = sel.reason != REASON_LEADERBOARD
 
-            # ── 5. Load or auto-train ─────────────────────────────────────────
-            model, feature_columns, train_result = self.trainer.load_or_train(
+            # ── 5. Load or retrain on artifact issues ─────────────────────────
+            model, feature_columns, train_result_incr = self.trainer.load_or_train(
                 ticker=ticker,
                 model_name=sel.model_name,
-                X=X,
-                y=y,
+                X=X, y=y,
                 horizon=horizon,
             )
-            auto_trained = train_result is not None
-
-            if auto_trained:
+            if train_result_incr is not None:
+                auto_trained = True
                 logger.info(
-                    "[%s/%s] Auto-training complete in %.1fs: "
-                    "AUC=%.3f trigger='%s'",
+                    "[%s/%s] Incremental retrain: AUC=%.3f trigger='%s'",
                     ticker, horizon,
-                    train_result.training_duration_s,
-                    train_result.mean_roc_auc,
-                    train_result.trigger_reason,
+                    train_result_incr.mean_roc_auc,
+                    train_result_incr.trigger_reason,
                 )
 
-            # ── 6. Align feature columns ──────────────────────────────────────
+            # ── 6. Align features ─────────────────────────────────────────────
             missing = set(feature_columns) - set(X.columns)
             if missing:
                 raise PredictionError(
@@ -225,7 +242,7 @@ class PredictionService:
             p_bearish = round(1.0 - p_bullish, 4)
             prob      = p_bullish if pred == 1 else p_bearish
 
-            # ── 8. SHAP explanation ───────────────────────────────────────────
+            # ── 8. SHAP ───────────────────────────────────────────────────────
             explainer = SHAPExplainer(model, feature_columns)
             shap_exp  = explainer.local_explanation(X_latest)
 
@@ -237,7 +254,7 @@ class PredictionService:
                 authoritative_p_bullish=p_bullish,
             )
 
-            # ── 10. Feature snapshot (top 20 for display) ─────────────────────
+            # ── 10. Feature snapshot ──────────────────────────────────────────
             snapshot = {
                 col: round(float(X_latest.iloc[0][col]), 4)
                 for col in feature_columns[:20]
@@ -261,20 +278,16 @@ class PredictionService:
                 latest_close=round(latest_close, 4),
                 feature_snapshot=snapshot,
                 fused_signal=None,
-                intelligence_brief=None,
                 auto_trained=auto_trained,
             )
 
-            # ── 11. Signal fusion (best-effort — never blocks ML result) ──────
+            # ── 11. Signal fusion (best-effort — never blocks) ────────────────
             if run_fusion and settings.OPENAI_API_KEY:
                 try:
                     fused = self.fusion_service.fuse(ticker, response)
-                    response.fused_signal       = fused
-                    response.intelligence_brief = getattr(
-                        fused, "intelligence_brief", None
-                    )
+                    response.fused_signal = fused
                     logger.info(
-                        "[%s/%s] Fusion: ML=%s → fused=%s (applied=%s)",
+                        "[%s/%s] Fusion: %s → %s (applied=%s)",
                         ticker, horizon,
                         "BULLISH" if pred else "BEARISH",
                         fused.final_direction,
@@ -282,12 +295,11 @@ class PredictionService:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "[%s/%s] Signal fusion skipped (non-fatal): %s",
-                        ticker, horizon, exc,
+                        "[%s/%s] Signal fusion skipped: %s", ticker, horizon, exc
                     )
             else:
                 logger.info(
-                    "[%s/%s] Fusion skipped (run_fusion=%s, api_key_set=%s)",
+                    "[%s/%s] Fusion skipped (run_fusion=%s, api_key=%s)",
                     ticker, horizon, run_fusion, bool(settings.OPENAI_API_KEY),
                 )
 
@@ -296,11 +308,8 @@ class PredictionService:
                 "(p_bull=%.3f conf=%s model=%s reason=%s auto_trained=%s)",
                 ticker, horizon,
                 "BULLISH" if pred else "BEARISH",
-                p_bullish,
-                response.confidence_label,
-                sel.model_name,
-                sel.reason,
-                auto_trained,
+                p_bullish, response.confidence_label,
+                sel.model_name, sel.reason, auto_trained,
             )
             return response
 
@@ -310,8 +319,6 @@ class PredictionService:
             raise PredictionError(
                 f"Prediction pipeline failed for {ticker}/{horizon}: {exc}"
             ) from exc
-
-    # ── Batch ─────────────────────────────────────────────────────────────────
 
     def batch_predict(
         self,
