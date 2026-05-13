@@ -39,9 +39,9 @@ from configs.settings import settings
 logger = get_logger("signal_fusion")
 
 _PROVIDER_MODEL_MAP: dict[str, str] = {
-    "groq":   "llama3-70b-8192",
+    "groq": "llama3-70b-8192",
     "ollama": "llama3",
-    "azure":  "gpt-4o-mini",
+    "azure": "gpt-4o-mini",
 }
 
 # ── Fusion system prompt ──────────────────────────────────────────────────────
@@ -73,6 +73,7 @@ Return ONLY valid JSON with no markdown, no code fences, no prose:
 # FusedSignal
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class FusedSignal:
     """
@@ -90,20 +91,22 @@ class FusedSignal:
     fusion_applied      : True when the LLM was actually used
     news_sentiment      : Aggregate sentiment label from news
     """
-    final_direction:     str
-    final_confidence:    str
-    fusion_probability:  float
+
+    final_direction: str
+    final_confidence: str
+    fusion_probability: float
     synthesis_narrative: str
-    news_items:          list[NewsItem] = field(default_factory=list)
-    ml_direction:        str   = ""
-    ml_probability:      float = 0.5
-    fusion_applied:      bool  = True
-    news_sentiment:      str   = "neutral"
+    news_items: list[NewsItem] = field(default_factory=list)
+    ml_direction: str = ""
+    ml_probability: float = 0.5
+    fusion_applied: bool = True
+    news_sentiment: str = "neutral"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Service
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SignalFusionService:
     """
@@ -124,7 +127,7 @@ class SignalFusionService:
         llm_client=None,
         intelligence_service: Optional[FinancialIntelligenceService] = None,
     ) -> None:
-        self._llm       = llm_client
+        self._llm = llm_client
         self._intel_svc = intelligence_service or FinancialIntelligenceService()
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -137,7 +140,7 @@ class SignalFusionService:
         rule-based signal on LLM failure, or an ML-only signal if news
         retrieval also fails.
         """
-        ml_dir  = "BULLISH" if prediction_response.prediction == 1 else "BEARISH"
+        ml_dir = "BULLISH" if prediction_response.prediction == 1 else "BEARISH"
         ml_prob = prediction_response.p_bullish
         ml_conf = prediction_response.confidence_label.upper()
 
@@ -160,37 +163,55 @@ class SignalFusionService:
             logger.info("[%s] No news retrieved — returning ML-only signal.", ticker)
             return ml_only
 
-        news_items        = brief.top_news
-        agg_sentiment     = brief.aggregate_sentiment
-        agg_score         = brief.sentiment_score
+        news_items = brief.top_news
+        agg_sentiment = brief.aggregate_sentiment
+        agg_score = brief.sentiment_score
 
-        ml_only.news_items     = news_items
+        ml_only.news_items = news_items
         ml_only.news_sentiment = agg_sentiment
 
         # ── Step 2: LLM synthesis ─────────────────────────────────────────────
         try:
             fused = self._llm_fuse(
-                ticker, prediction_response,
-                ml_dir, ml_conf,
-                news_items, agg_sentiment, agg_score,
+                ticker,
+                prediction_response,
+                ml_dir,
+                ml_conf,
+                news_items,
+                agg_sentiment,
+                agg_score,
             )
             logger.info(
                 "[%s] Fusion: %s → %s (applied=%s)",
-                ticker, ml_dir, fused.final_direction, fused.fusion_applied,
+                ticker,
+                ml_dir,
+                fused.final_direction,
+                fused.fusion_applied,
             )
             return fused
 
         except LLMError as exc:
-            logger.warning("[%s] LLM fusion failed: %s — rule-based fallback.", ticker, exc)
+            logger.warning(
+                "[%s] LLM fusion failed: %s — rule-based fallback.", ticker, exc
+            )
         except ValueError as exc:
-            logger.warning("[%s] LLM parse failed: %s — rule-based fallback.", ticker, exc)
+            logger.warning(
+                "[%s] LLM parse failed: %s — rule-based fallback.", ticker, exc
+            )
         except Exception as exc:
-            logger.warning("[%s] LLM fusion error: %s — rule-based fallback.", ticker, exc)
+            logger.warning(
+                "[%s] LLM fusion error: %s — rule-based fallback.", ticker, exc
+            )
 
         # ── Step 3: Rule-based fallback ───────────────────────────────────────
         return self._rule_based_fusion(
-            ticker, ml_dir, ml_conf, ml_prob,
-            news_items, agg_sentiment, agg_score,
+            ticker,
+            ml_dir,
+            ml_conf,
+            ml_prob,
+            news_items,
+            agg_sentiment,
+            agg_score,
         )
 
     # ── LLM fusion ────────────────────────────────────────────────────────────
@@ -223,7 +244,7 @@ class SignalFusionService:
         )
 
         news_str = "\n".join(
-            f"  [{i+1}] {n.title} | sentiment={n.sentiment} "
+            f"  [{i + 1}] {n.title} | sentiment={n.sentiment} "
             f"| weight={n.final_weight:.2f} | source={n.domain}"
             f"\n        {n.snippet[:500].strip()}"
             for i, n in enumerate(news_items[:6])
@@ -243,7 +264,7 @@ class SignalFusionService:
 
         messages = [
             {"role": "system", "content": _FUSION_SYSTEM},
-            {"role": "user",   "content": user_msg},
+            {"role": "user", "content": user_msg},
         ]
 
         model = self._resolve_model()
@@ -252,7 +273,9 @@ class SignalFusionService:
         raw, _ = llm.chat(messages, model=model, temperature=0.0, max_tokens=600)
 
         if not raw or not raw.strip():
-            raise ValueError(f"LLM returned empty response for {ticker} (model={model}).")
+            raise ValueError(
+                f"LLM returned empty response for {ticker} (model={model})."
+            )
 
         data = self._parse(raw)
 
@@ -294,18 +317,18 @@ class SignalFusionService:
 
         if abs(agg_score) >= strong_threshold:
             news_bullish = agg_sentiment == "positive"
-            ml_bullish   = ml_dir == "BULLISH"
+            ml_bullish = ml_dir == "BULLISH"
 
             if news_bullish == ml_bullish:
-                final_dir  = ml_dir
+                final_dir = ml_dir
                 final_prob = ml_prob
                 confidence = "MODERATE"
             else:
-                final_dir  = "NEUTRAL"
+                final_dir = "NEUTRAL"
                 final_prob = 0.5
                 confidence = "LOW"
         else:
-            final_dir  = ml_dir
+            final_dir = ml_dir
             final_prob = ml_prob
             confidence = ml_conf
 
@@ -332,14 +355,16 @@ class SignalFusionService:
 
     def _resolve_model(self) -> str:
         configured = settings.LLM_MODEL
-        base_url   = (settings.LLM_BASE_URL or "").lower().strip()
+        base_url = (settings.LLM_BASE_URL or "").lower().strip()
         if "gpt" not in configured.lower():
             return configured
         for provider_key, default_model in _PROVIDER_MODEL_MAP.items():
             if provider_key in base_url:
                 logger.debug(
                     "Provider '%s' detected — remapping '%s' → '%s'",
-                    provider_key, configured, default_model,
+                    provider_key,
+                    configured,
+                    default_model,
                 )
                 return default_model
         return configured
@@ -356,24 +381,24 @@ class SignalFusionService:
         text = text.replace("```", "").strip()
 
         start = text.find("{")
-        end   = text.rfind("}")
+        end = text.rfind("}")
 
         if start == -1 or end == -1 or end <= start:
             raise ValueError(
                 f"No JSON object in LLM response. First 300 chars: {text[:300]!r}"
             )
 
-        candidate = text[start: end + 1]
+        candidate = text[start : end + 1]
         try:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Malformed JSON from LLM: {exc}. "
-                f"Candidate: {candidate[:300]!r}"
+                f"Malformed JSON from LLM: {exc}. Candidate: {candidate[:300]!r}"
             ) from exc
 
     def _get_llm(self):
         from app.rag.llm_chat import OpenAIClient
+
         if self._llm is None:
             self._llm = OpenAIClient()
         return self._llm

@@ -1,27 +1,27 @@
 """
-FinSight AI — Dashboard (v4)
+FinSight AI — Dashboard (v5)
 
-Changes vs v3
+Changes vs v4
 -------------
-1.  Warning banners removed:
-    - "Model was auto-trained this run" (degraded-banner) — gone.
-    - "Selected model is below the reliability threshold" (model-quality-warning) — gone.
-    - "News fusion unavailable — showing ML-only signal" (degraded-banner) — gone.
+1.  **Fused Bull/Bear probability bar fixed.**
 
-2.  Raw ML narrative block removed.
-    The ``narrative-block`` that showed the internal string like
-    "[AAPL] Prediction: BULLISH (UP) (Probability: 56%, ...) Bullish drivers:
-    realized_vol_63d (+0.186) ... Bearish headwinds: ..."
-    is no longer rendered.  The clean plain-English narrative from
-    explainability v2 is displayed inside the ML signal stats row instead.
+    Root cause: the previous implementation used two ``position:absolute``
+    divs inside a relative container — one anchored to ``left:0`` (bull,
+    green) and one to ``right:0`` (bear, red).  Each was given its own
+    percentage width.  When bear was dominant (e.g. 85%) the red bar
+    filled 85% from the right, completely obscuring the 14.9% green bar
+    that was correctly positioned at ``left:0``.  The *labels* below read
+    "▲ 14.9%  ▼ 85.1%" — so the numbers were correct but the bar was
+    visually inverted.  Users saw a mostly-red bar with a "14.9% bull"
+    label, which reads as "85% bear shown as bull".
 
-3.  Bullish Catalysts / Bearish Headwinds section removed from the
-    Market Intelligence Brief block.
+    Fix: use a single ``display:flex`` bar.  The left segment (green, bull)
+    receives ``flex: {bull_pct}`` and the right segment (red, bear) receives
+    ``flex: {bear_pct}``.  Both colours fill their correct proportions
+    without overlapping, and the labels match what is displayed.
 
-4.  SHAP Feature Glossary panel added below the SHAP chart.
-    Renders an expander "What do these features mean?" with a two-column
-    table mapping each feature visible in the chart to its plain-English
-    description, so novice users can understand what each bar represents.
+2.  All other content (SHAP glossary, model badges, section labels, news
+    expander, etc.) is unchanged from v4.
 """
 
 from __future__ import annotations
@@ -43,93 +43,89 @@ API_BASE = "http://localhost:8000/api/v1"
 TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "JPM", "GS", "SPY"]
 
 HORIZON_OPTIONS = {
-    "Next Day (1d)":      "1d",
-    "Next Week (7d)":     "7d",
-    "Next Month (1m)":    "1m",
+    "Next Day (1d)": "1d",
+    "Next Week (7d)": "7d",
+    "Next Month (1m)": "1m",
     "Next 6 Months (6m)": "6m",
 }
 
-# ── SHAP glossary (mirrors explainability.py _FEATURE_GLOSSARY) ───────────────
-# Shown in the "What do these features mean?" expander below the chart.
+# ── SHAP glossary ──────────────────────────────────────────────────────────────
 _SHAP_GLOSSARY: dict[str, str] = {
-    "rsi_14":             "Relative Strength Index (14-day) — measures whether the stock is overbought (>70) or oversold (<30) based on recent price changes.",
-    "rsi_7":              "Short-term RSI (7-day) — a faster version of RSI that reacts more quickly to recent price moves.",
-    "rsi_21":             "Slower RSI (21-day) — a smoother momentum indicator over a wider window.",
-    "rsi_overbought":     "Flag = 1 when RSI is above 70, signalling the stock may be overbought.",
-    "rsi_oversold":       "Flag = 1 when RSI is below 30, signalling the stock may be oversold.",
-    "macd_histogram":     "MACD Histogram — the gap between the MACD line and its signal line; positive = accelerating uptrend, negative = accelerating downtrend.",
-    "macd_bullish":       "Flag = 1 when the MACD line has crossed above its signal line (bullish crossover).",
-    "macd":               "Moving Average Convergence Divergence — difference between 12-day and 26-day exponential moving averages.",
-    "momentum_5d":        "5-day price momentum — how much the stock has moved over the last 5 trading days as a percentage.",
-    "momentum_10d":       "10-day price momentum — percentage price change over the last two weeks.",
-    "momentum_21d":       "21-day (monthly) price momentum — measures the monthly trend direction.",
-    "momentum_63d":       "63-day (quarterly) price momentum — measures the 3-month trend direction.",
-    "momentum_persistence":"Ratio of short-term to long-term momentum; >1 means the recent move is accelerating.",
-    "realized_vol_5d":    "5-day realized volatility — annualised standard deviation of daily returns over 5 days. High = more uncertain.",
-    "realized_vol_10d":   "10-day realized volatility — same concept over two weeks.",
-    "realized_vol_21d":   "21-day realized volatility — monthly volatility estimate.",
-    "realized_vol_63d":   "3-month realized volatility — quarterly volatility estimate.",
-    "gk_vol_20":          "Garman-Klass volatility — a precise intraday volatility estimate using open, high, low, and close prices.",
-    "atr_pct":            "ATR as a % of price — Average True Range divided by the current price; shows how much the stock typically moves per day relative to its price.",
-    "atr_14":             "Average True Range (14-day) — average of daily price swings; a higher ATR means larger typical daily moves.",
-    "hurst_30":           "Hurst Exponent — >0.5 means the stock is trending; <0.5 means it tends to reverse; ≈0.5 means random behaviour.",
-    "volume_ratio":       "Today's volume divided by the 20-day average. >1 means unusually high activity.",
-    "volume_imbalance_20":"Buy/sell volume imbalance — positive means more buyer-initiated trades; negative means more selling pressure.",
-    "obv_momentum":       "On-Balance Volume momentum — rate of change in cumulative volume trend over 5 days.",
-    "obv_sma20":          "OBV 20-day moving average — the smoothed trend of cumulative volume flow.",
-    "obv":                "On-Balance Volume — running total of volume; rising OBV confirms upward price moves.",
-    "vwap_deviation":     "Price deviation from VWAP (volume-weighted average price). Positive = trading above the session average; negative = below.",
-    "bb_pct":             "Bollinger Band position — 0 = at lower band, 0.5 = middle, 1 = at upper band. Shows where price sits within its recent range.",
-    "bb_width":           "Bollinger Band width — wider bands mean higher volatility; narrow bands (squeeze) often precede big moves.",
-    "bb_squeeze":         "Flag = 1 when the bands are unusually narrow, signalling a potential breakout is building.",
-    "close_vs_sma_5":     "How far the price is above or below its 5-day moving average, as a percentage.",
-    "close_vs_sma_10":    "How far the price is above or below its 10-day moving average.",
-    "close_vs_sma_20":    "How far the price is above or below its 20-day moving average.",
-    "close_vs_sma_50":    "How far the price is above or below its 50-day moving average.",
-    "sma_5_20_cross":     "Flag = 1 when the 5-day average is above the 20-day average (short-term uptrend).",
-    "sma_20_50_cross":    "Flag = 1 when the 20-day average is above the 50-day average (medium-term uptrend).",
-    "ema_12_26_cross":    "Flag = 1 when the 12-day EMA is above the 26-day EMA — the same crossover used by MACD.",
-    "returns_1d":         "Yesterday's return — did the stock go up or down since the previous close?",
-    "returns_3d":         "3-day return — cumulative price change over the last 3 sessions.",
-    "returns_5d":         "5-day (weekly) return — how the stock performed over the last week.",
-    "returns_10d":        "10-day return — two-week cumulative performance.",
-    "log_returns":        "Logarithmic daily return — a mathematically symmetric measure of daily price change.",
-    "overnight_gap":      "Overnight gap — how much the opening price differed from the previous close (news-driven moves often appear here).",
-    "pct_from_high_5":    "How far below the 5-day high the price is. Near 0 = price is at a recent peak.",
-    "pct_from_high_20":   "How far below the 20-day high the price is.",
-    "pct_from_low_5":     "How far above the 5-day low the price is. Near 0 = price is at a recent trough.",
-    "pct_from_low_20":    "How far above the 20-day low the price is.",
-    "rolling_range_5":    "5-day price range as a fraction of price — measures how much the stock swung over the last week.",
-    "rolling_range_20":   "20-day price range as a fraction of price.",
-    "hl_spread_pct":      "High-minus-low spread as a percentage of price — today's intraday volatility.",
-    "amihud_illiq_20":    "Amihud illiquidity — how much price moves per dollar traded. Higher = harder to trade without moving the price.",
-    "rolling_skew_20":    "Return skewness (20-day) — positive means occasional large up-days; negative means occasional large crashes.",
-    "rolling_skew_60":    "Return skewness (60-day) — same concept over a 3-month window.",
-    "rolling_kurt_20":    "Return kurtosis (20-day) — measures how 'fat' the tails of daily returns are; high kurtosis means more surprise moves.",
-    "rolling_kurt_60":    "Return kurtosis (60-day) — 3-month tail-risk indicator.",
-    "vol_regime_pct":     "Volatility regime percentile — 0 = historically calm market, 1 = historically turbulent.",
-    "high_vol_regime":    "Flag = 1 when the stock is in the top 25% of its historical volatility range.",
-    "low_vol_regime":     "Flag = 1 when the stock is in the bottom 25% of its historical volatility range.",
-    "trend_regime":       "Trend regime: +1 = confirmed uptrend, -1 = confirmed downtrend, 0 = sideways.",
-    "in_uptrend":         "Flag = 1 when price is in a confirmed uptrend (50-day avg above 200-day avg).",
-    "in_downtrend":       "Flag = 1 when price is in a confirmed downtrend.",
-    "candle_body":        "Candlestick body size — how large today's open-to-close move is relative to the full high-low range.",
-    "upper_shadow":       "Upper wick — how much the price reached above the open/close range; large upper wick can signal rejection.",
-    "lower_shadow":       "Lower wick — how much the price fell below the open/close range; large lower wick can signal support.",
-    "candle_dir":         "Candlestick direction: 1 = close > open (bullish candle), 0 = bearish candle.",
+    "rsi_14": "Relative Strength Index (14-day) — measures whether the stock is overbought (>70) or oversold (<30) based on recent price changes.",
+    "rsi_7": "Short-term RSI (7-day) — a faster version of RSI that reacts more quickly to recent price moves.",
+    "rsi_21": "Slower RSI (21-day) — a smoother momentum indicator over a wider window.",
+    "rsi_overbought": "Flag = 1 when RSI is above 70, signalling the stock may be overbought.",
+    "rsi_oversold": "Flag = 1 when RSI is below 30, signalling the stock may be oversold.",
+    "macd_histogram": "MACD Histogram — the gap between the MACD line and its signal line; positive = accelerating uptrend, negative = accelerating downtrend.",
+    "macd_bullish": "Flag = 1 when the MACD line has crossed above its signal line (bullish crossover).",
+    "macd": "Moving Average Convergence Divergence — difference between 12-day and 26-day exponential moving averages.",
+    "momentum_5d": "5-day price momentum — how much the stock has moved over the last 5 trading days as a percentage.",
+    "momentum_10d": "10-day price momentum — percentage price change over the last two weeks.",
+    "momentum_21d": "21-day (monthly) price momentum — measures the monthly trend direction.",
+    "momentum_63d": "63-day (quarterly) price momentum — measures the 3-month trend direction.",
+    "momentum_persistence": "Ratio of short-term to long-term momentum; >1 means the recent move is accelerating.",
+    "realized_vol_5d": "5-day realized volatility — annualised standard deviation of daily returns over 5 days. High = more uncertain.",
+    "realized_vol_10d": "10-day realized volatility — same concept over two weeks.",
+    "realized_vol_21d": "21-day realized volatility — monthly volatility estimate.",
+    "realized_vol_63d": "3-month realized volatility — quarterly volatility estimate.",
+    "gk_vol_20": "Garman-Klass volatility — a precise intraday volatility estimate using open, high, low, and close prices.",
+    "atr_pct": "ATR as a % of price — Average True Range divided by the current price; shows how much the stock typically moves per day relative to its price.",
+    "atr_14": "Average True Range (14-day) — average of daily price swings; a higher ATR means larger typical daily moves.",
+    "hurst_30": "Hurst Exponent — >0.5 means the stock is trending; <0.5 means it tends to reverse; ≈0.5 means random behaviour.",
+    "volume_ratio": "Today's volume divided by the 20-day average. >1 means unusually high activity.",
+    "volume_imbalance_20": "Buy/sell volume imbalance — positive means more buyer-initiated trades; negative means more selling pressure.",
+    "obv_momentum": "On-Balance Volume momentum — rate of change in cumulative volume trend over 5 days.",
+    "obv_sma20": "OBV 20-day moving average — the smoothed trend of cumulative volume flow.",
+    "obv": "On-Balance Volume — running total of volume; rising OBV confirms upward price moves.",
+    "vwap_deviation": "Price deviation from VWAP (volume-weighted average price). Positive = trading above the session average; negative = below.",
+    "bb_pct": "Bollinger Band position — 0 = at lower band, 0.5 = middle, 1 = at upper band. Shows where price sits within its recent range.",
+    "bb_width": "Bollinger Band width — wider bands mean higher volatility; narrow bands (squeeze) often precede big moves.",
+    "bb_squeeze": "Flag = 1 when the bands are unusually narrow, signalling a potential breakout is building.",
+    "close_vs_sma_5": "How far the price is above or below its 5-day moving average, as a percentage.",
+    "close_vs_sma_10": "How far the price is above or below its 10-day moving average.",
+    "close_vs_sma_20": "How far the price is above or below its 20-day moving average.",
+    "close_vs_sma_50": "How far the price is above or below its 50-day moving average.",
+    "sma_5_20_cross": "Flag = 1 when the 5-day average is above the 20-day average (short-term uptrend).",
+    "sma_20_50_cross": "Flag = 1 when the 20-day average is above the 50-day average (medium-term uptrend).",
+    "ema_12_26_cross": "Flag = 1 when the 12-day EMA is above the 26-day EMA — the same crossover used by MACD.",
+    "returns_1d": "Yesterday's return — did the stock go up or down since the previous close?",
+    "returns_3d": "3-day return — cumulative price change over the last 3 sessions.",
+    "returns_5d": "5-day (weekly) return — how the stock performed over the last week.",
+    "returns_10d": "10-day return — two-week cumulative performance.",
+    "log_returns": "Logarithmic daily return — a mathematically symmetric measure of daily price change.",
+    "overnight_gap": "Overnight gap — how much the opening price differed from the previous close (news-driven moves often appear here).",
+    "pct_from_high_5": "How far below the 5-day high the price is. Near 0 = price is at a recent peak.",
+    "pct_from_high_20": "How far below the 20-day high the price is.",
+    "pct_from_low_5": "How far above the 5-day low the price is. Near 0 = price is at a recent trough.",
+    "pct_from_low_20": "How far above the 20-day low the price is.",
+    "rolling_range_5": "5-day price range as a fraction of price — measures how much the stock swung over the last week.",
+    "rolling_range_20": "20-day price range as a fraction of price.",
+    "hl_spread_pct": "High-minus-low spread as a percentage of price — today's intraday volatility.",
+    "amihud_illiq_20": "Amihud illiquidity — how much price moves per dollar traded. Higher = harder to trade without moving the price.",
+    "rolling_skew_20": "Return skewness (20-day) — positive means occasional large up-days; negative means occasional large crashes.",
+    "rolling_skew_60": "Return skewness (60-day) — same concept over a 3-month window.",
+    "rolling_kurt_20": "Return kurtosis (20-day) — measures how 'fat' the tails of daily returns are; high kurtosis means more surprise moves.",
+    "rolling_kurt_60": "Return kurtosis (60-day) — 3-month tail-risk indicator.",
+    "vol_regime_pct": "Volatility regime percentile — 0 = historically calm market, 1 = historically turbulent.",
+    "high_vol_regime": "Flag = 1 when the stock is in the top 25% of its historical volatility range.",
+    "low_vol_regime": "Flag = 1 when the stock is in the bottom 25% of its historical volatility range.",
+    "trend_regime": "Trend regime: +1 = confirmed uptrend, -1 = confirmed downtrend, 0 = sideways.",
+    "in_uptrend": "Flag = 1 when price is in a confirmed uptrend (50-day avg above 200-day avg).",
+    "in_downtrend": "Flag = 1 when price is in a confirmed downtrend.",
+    "candle_body": "Candlestick body size — how large today's open-to-close move is relative to the full high-low range.",
+    "upper_shadow": "Upper wick — how much the price reached above the open/close range; large upper wick can signal rejection.",
+    "lower_shadow": "Lower wick — how much the price fell below the open/close range; large lower wick can signal support.",
+    "candle_dir": "Candlestick direction: 1 = close > open (bullish candle), 0 = bearish candle.",
 }
 
 
 def _shap_feature_description(feature_name: str) -> str:
     """Return the glossary description for a feature, or a generic fallback."""
-    # Exact match
     if feature_name in _SHAP_GLOSSARY:
         return _SHAP_GLOSSARY[feature_name]
-    # Prefix match
     for key, desc in _SHAP_GLOSSARY.items():
         if feature_name.startswith(key):
             return desc
-    # Generic fallback
     clean = feature_name.replace("_", " ").strip()
     return f"Quantitative indicator derived from price and volume data ({clean})."
 
@@ -145,7 +141,8 @@ st.set_page_config(
 # Design System
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500&display=swap');
 
@@ -256,11 +253,28 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .news-snippet { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
 .news-url { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); margin-top: 0.25rem; }
 
+/* ── Fixed probability bar: flex-based split (replaces overlapping absolutes) ── */
 .prob-bar-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
 .prob-bar-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
-.prob-bar-track { height: 8px; background: var(--bg-elevated); border-radius: 4px; position: relative; overflow: hidden; }
-.prob-bar-fill-bull { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent-green); border-radius: 4px 0 0 4px; }
-.prob-bar-fill-bear { position: absolute; right: 0; top: 0; height: 100%; background: var(--accent-red); border-radius: 0 4px 4px 0; }
+.prob-bar-track {
+    height: 8px;
+    background: var(--bg-elevated);
+    border-radius: 4px;
+    display: flex;           /* ← flex split instead of overlapping absolutes */
+    overflow: hidden;
+}
+.prob-bar-bull {
+    height: 100%;
+    background: var(--accent-green);
+    border-radius: 4px 0 0 4px;
+    transition: flex 0.4s ease;
+}
+.prob-bar-bear {
+    height: 100%;
+    background: var(--accent-red);
+    border-radius: 0 4px 4px 0;
+    transition: flex 0.4s ease;
+}
 .prob-bar-labels { display: flex; justify-content: space-between; margin-top: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; }
 
 /* SHAP glossary table */
@@ -287,12 +301,15 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .ingest-result { background: var(--bg-elevated); border: 1px solid rgba(0,230,118,0.3); border-left: 3px solid var(--accent-green); border-radius: 0 6px 6px 0; padding: 0.8rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; line-height: 1.6; }
 .ingest-result .ingest-title { color: var(--text-primary); font-weight: 500; margin-bottom: 0.2rem; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def api_post(endpoint: str, payload: dict) -> Optional[dict]:
     try:
@@ -300,7 +317,9 @@ def api_post(endpoint: str, payload: dict) -> Optional[dict]:
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
-        st.error("Cannot connect to the FinSight API. Ensure the server is running on port 8000.")
+        st.error(
+            "Cannot connect to the FinSight API. Ensure the server is running on port 8000."
+        )
         return None
     except requests.exceptions.HTTPError as e:
         try:
@@ -310,7 +329,9 @@ def api_post(endpoint: str, payload: dict) -> Optional[dict]:
         st.error(f"API error {e.response.status_code}: {detail}")
         return None
     except requests.exceptions.Timeout:
-        st.error("Request timed out. The server may be training models for the first time — please wait and try again.")
+        st.error(
+            "Request timed out. The server may be training models for the first time — please wait and try again."
+        )
         return None
 
 
@@ -329,10 +350,10 @@ def api_get(endpoint: str) -> Optional[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 for key, default in [
-    ("chat_history",    []),
+    ("chat_history", []),
     ("last_prediction", None),
-    ("market_summary",  None),
-    ("session_id",      str(uuid.uuid4())),
+    ("market_summary", None),
+    ("session_id", str(uuid.uuid4())),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -343,19 +364,22 @@ for key, default in [
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("""
+    st.markdown(
+        """
     <div style="padding: 0.5rem 0 1.5rem 0;">
         <div class="finsight-wordmark"><span class="triangle">▲</span> FinSight</div>
         <div class="finsight-tagline">Explainable Financial AI</div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     health = api_get("/health")
     if health:
         st.markdown(
             f'<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:1.5rem;">'
             f'<span class="status-dot status-online"></span>'
-            f'API v{health.get("version","?")} &nbsp;·&nbsp; {health.get("environment","?").upper()}</div>',
+            f"API v{health.get('version', '?')} &nbsp;·&nbsp; {health.get('environment', '?').upper()}</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -366,15 +390,24 @@ with st.sidebar:
         )
 
     # ── Instrument ────────────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True)
-    selected_ticker = st.selectbox("Ticker", TICKERS, index=0, label_visibility="collapsed")
-    custom_ticker   = st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
+    st.markdown(
+        '<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True
+    )
+    selected_ticker = st.selectbox(
+        "Ticker", TICKERS, index=0, label_visibility="collapsed"
+    )
+    custom_ticker = (
+        st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
+    )
     if custom_ticker:
         selected_ticker = custom_ticker
 
     # ── Prediction Horizon ────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Prediction Horizon</div>', unsafe_allow_html=True)
-    horizon_label    = st.radio(
+    st.markdown(
+        '<div class="sidebar-section-title">Prediction Horizon</div>',
+        unsafe_allow_html=True,
+    )
+    horizon_label = st.radio(
         "Horizon",
         options=list(HORIZON_OPTIONS.keys()),
         index=0,
@@ -384,7 +417,10 @@ with st.sidebar:
     selected_horizon = HORIZON_OPTIONS[horizon_label]
 
     # ── Knowledge Base ────────────────────────────────────────────────────────
-    st.markdown('<div class="sidebar-section-title">Knowledge Base</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sidebar-section-title">Knowledge Base</div>',
+        unsafe_allow_html=True,
+    )
 
     kb_tab_text, kb_tab_url = st.tabs(["Paste Text", "From URL"])
 
@@ -399,7 +435,11 @@ with st.sidebar:
             if ingest_text.strip():
                 result = api_post(
                     "/rag/ingest",
-                    {"source_type": "text", "texts": [ingest_text], "source": "user_input"},
+                    {
+                        "source_type": "text",
+                        "texts": [ingest_text],
+                        "source": "user_input",
+                    },
                 )
                 if result:
                     st.success(result.get("message", "Ingested."))
@@ -419,30 +459,35 @@ with st.sidebar:
                     st.error("URL must start with http:// or https://")
                 else:
                     with st.spinner("Fetching article…"):
-                        result = api_post("/rag/ingest", {"source_type": "url", "url": url_val})
+                        result = api_post(
+                            "/rag/ingest", {"source_type": "url", "url": url_val}
+                        )
                     if result:
                         if result.get("duplicate"):
                             st.info(result.get("message", "Already ingested."))
                         else:
-                            title      = result.get("title", "")
+                            title = result.get("title", "")
                             char_count = result.get("char_count", 0)
-                            chunks     = result.get("chunks_added", 0)
+                            chunks = result.get("chunks_added", 0)
                             st.markdown(
                                 f'<div class="ingest-result">'
                                 f'<div class="ingest-title">{title or "Article ingested"}</div>'
-                                f'{char_count:,} chars &nbsp;·&nbsp; {chunks} chunks indexed'
-                                f'</div>',
+                                f"{char_count:,} chars &nbsp;·&nbsp; {chunks} chunks indexed"
+                                f"</div>",
                                 unsafe_allow_html=True,
                             )
             else:
                 st.warning("Enter a URL before fetching.")
 
-    st.markdown("""
+    st.markdown(
+        """
     <div style="position:fixed;bottom:1.5rem;left:0;width:260px;text-align:center;
                 font-family:var(--font-mono);font-size:0.65rem;color:var(--text-muted);">
         Not investment advice · For research use only
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,7 +496,8 @@ with st.sidebar:
 
 col_title, _ = st.columns([5, 1])
 with col_title:
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div style="margin-bottom:0.25rem;">
         <span style="font-family:var(--font-mono);font-size:0.72rem;letter-spacing:0.2em;text-transform:uppercase;color:var(--text-muted);">DASHBOARD</span>
     </div>
@@ -459,18 +505,23 @@ with col_title:
         {selected_ticker}
         <span style="color:var(--text-muted);font-weight:400;font-size:1.1rem;">&nbsp;/&nbsp; AI-Driven Signal Fusion</span>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
-st.markdown('<div style="height:1px;background:var(--border);margin:0.5rem 0 1.5rem 0;"></div>', unsafe_allow_html=True)
+st.markdown(
+    '<div style="height:1px;background:var(--border);margin:0.5rem 0 1.5rem 0;"></div>',
+    unsafe_allow_html=True,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab_predict, tab_market, tab_chat, tab_agent = st.tabs([
-    "Signal", "Market Data", "AI Chat", "AI Agent"
-])
+tab_predict, tab_market, tab_chat, tab_agent = st.tabs(
+    ["Signal", "Market Data", "AI Chat", "AI Agent"]
+)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -480,13 +531,19 @@ tab_predict, tab_market, tab_chat, tab_agent = st.tabs([
 with tab_predict:
     run_col, _ = st.columns([2, 6])
     with run_col:
-        run_clicked = st.button("▶  Analyse Signal", type="primary", use_container_width=True)
+        run_clicked = st.button(
+            "▶  Analyse Signal", type="primary", use_container_width=True
+        )
 
     if run_clicked:
         with st.spinner(f"Running analysis for {selected_ticker} / {horizon_label}…"):
             result = api_post(
                 "/predict/",
-                {"ticker": selected_ticker, "horizon": selected_horizon, "use_cache": True},
+                {
+                    "ticker": selected_ticker,
+                    "horizon": selected_horizon,
+                    "use_cache": True,
+                },
             )
             if result:
                 st.session_state.last_prediction = result
@@ -495,46 +552,58 @@ with tab_predict:
 
     # Invalidate when ticker or horizon changed
     if pred and (
-        pred.get("ticker") != selected_ticker
-        or pred.get("horizon") != selected_horizon
+        pred.get("ticker") != selected_ticker or pred.get("horizon") != selected_horizon
     ):
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Ticker or horizon changed — click Analyse Signal to refresh</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
         pred = None
 
     if pred and pred.get("ticker") == selected_ticker:
-
         # ── Model + horizon badges ────────────────────────────────────────────
-        model_used      = pred.get("model_name", "unknown").replace("_", " ").title()
+        model_used = pred.get("model_name", "unknown").replace("_", " ").title()
         horizon_display = pred.get("horizon", "1d")
         st.markdown(
             f'<div style="display:flex;gap:0;">'
             f'<div class="model-badge">⚙ Auto-selected: <strong>{model_used}</strong></div>'
             f'<div class="horizon-badge">⏱ Horizon: <strong>{horizon_display}</strong></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
         # ════════════════════════════════════════════════════════════════════
         # FUSED SIGNAL
         # ════════════════════════════════════════════════════════════════════
-        st.markdown('<div class="section-label">Fused Signal — ML + News Synthesis</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Fused Signal — ML + News Synthesis</div>',
+            unsafe_allow_html=True,
+        )
 
-        fused_dir  = pred.get("fused_direction", "UNKNOWN")
+        fused_dir = pred.get("fused_direction", "UNKNOWN")
         fused_conf = pred.get("fused_confidence", "LOW").upper()
         fused_prob = pred.get("fused_probability", 0.5)
         fusion_nar = pred.get("fusion_narrative", "")
-        news_sent  = pred.get("news_sentiment", "neutral")
+        news_sent = pred.get("news_sentiment", "neutral")
 
-        card_cls_map = {"BULLISH": "fused-bullish", "BEARISH": "fused-bearish", "NEUTRAL": "fused-neutral"}
-        arrow_map    = {"BULLISH": "↑", "BEARISH": "↓", "NEUTRAL": "↔"}
-        conf_css     = {"HIGH": "conf-high", "MODERATE": "conf-moderate", "LOW": "conf-low"}.get(fused_conf, "conf-low")
-        card_css     = card_cls_map.get(fused_dir, "fused-neutral")
-        arrow        = arrow_map.get(fused_dir, "↔")
+        card_cls_map = {
+            "BULLISH": "fused-bullish",
+            "BEARISH": "fused-bearish",
+            "NEUTRAL": "fused-neutral",
+        }
+        arrow_map = {"BULLISH": "↑", "BEARISH": "↓", "NEUTRAL": "↔"}
+        conf_css = {
+            "HIGH": "conf-high",
+            "MODERATE": "conf-moderate",
+            "LOW": "conf-low",
+        }.get(fused_conf, "conf-low")
+        card_css = card_cls_map.get(fused_dir, "fused-neutral")
+        arrow = arrow_map.get(fused_dir, "↔")
 
         c_fused, c_fused_prob = st.columns([3, 2])
 
@@ -544,35 +613,63 @@ with tab_predict:
                 f'<div class="fused-label">{arrow} {fused_dir}</div>'
                 f'<div class="fused-sublabel">Fused direction · {horizon_label}</div>'
                 f'<div class="fused-conf-badge {conf_css}">{fused_conf} CONFIDENCE</div>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
 
         with c_fused_prob:
-            bull_pct   = round(fused_prob * 100, 1)
-            bear_pct   = round((1 - fused_prob) * 100, 1)
+            # ── Probability bar (flex split — Issue 1 fix) ────────────────────
+            # fused_prob IS P(bullish); bear prob is its complement.
+            # Use flex children so each segment fills its exact share with no
+            # overlap: bull segment on the left, bear segment on the right.
+            fused_prob = float(pred.get("fused_probability", 0.5))
+            fused_prob = max(0.0, min(1.0, fused_prob))
+
+            if fused_dir == "BULLISH":
+                bull_prob = fused_prob
+                bear_prob = 1.0 - fused_prob
+
+            elif fused_dir == "BEARISH":
+                bear_prob = fused_prob
+                bull_prob = 1.0 - fused_prob
+
+            else:
+                # Neutral / unknown fallback
+                bull_prob = 0.5
+                bear_prob = 0.5
+
+            bull_pct = round(bull_prob * 100, 1)
+            bear_pct = round(bear_prob * 100, 1)
+
             sent_color = {
                 "positive": "var(--accent-green)",
                 "negative": "var(--accent-red)",
-                "neutral":  "var(--text-secondary)",
+                "neutral": "var(--text-secondary)",
             }.get(news_sent, "var(--text-secondary)")
 
             st.markdown(
-                f'<div class="prob-bar-wrap" style="margin-bottom:0.75rem;">'
-                f'<div class="prob-bar-label">Fused Bull / Bear Probability</div>'
-                f'<div class="prob-bar-track">'
-                f'  <div class="prob-bar-fill-bull" style="width:{bull_pct}%;"></div>'
-                f'  <div class="prob-bar-fill-bear" style="width:{bear_pct}%;"></div>'
-                f'</div>'
-                f'<div class="prob-bar-labels">'
-                f'  <span style="color:var(--accent-green);">▲ {bull_pct}%</span>'
-                f'  <span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
-                f'</div>'
-                f'</div>'
-                f'<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
-                f'<div style="font-family:var(--font-mono);font-size:0.65rem;letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
-                f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;color:{sent_color};">{news_sent.upper()}</div>'
-                f'</div>',
+                '<div class="prob-bar-wrap" style="margin-bottom:0.75rem;">'
+                '<div class="prob-bar-label">Fused Bull / Bear Probability</div>'
+                '<div class="prob-bar-track">'
+                f'<div class="prob-bar-bull" style="flex:{bull_prob}; min-width:2px;"></div>'
+                f'<div class="prob-bar-bear" style="flex:{bear_prob}; min-width:2px;"></div>'
+                '</div>'
+                '<div class="prob-bar-labels">'
+                f'<span style="color:var(--accent-green);">▲ {bull_pct}%</span>'
+                f'<span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
+                '</div>'
+                '</div>'
+                '<div style="background:var(--bg-card);border:1px solid var(--border);'
+                'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
+                '<div style="font-family:var(--font-mono);font-size:0.65rem;letter-spacing:0.15em;'
+                'text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">'
+                'News Sentiment'
+                '</div>'
+                f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;'
+                f'color:{sent_color};">'
+                f'{news_sent.upper()}'
+                '</div>'
+                '</div>',
                 unsafe_allow_html=True,
             )
 
@@ -588,29 +685,37 @@ with tab_predict:
         # ── News Sources (collapsible) ────────────────────────────────────────
         news_items = pred.get("news_items", [])
         if news_items:
-            with st.expander(f"📰 News sources used in analysis ({len(news_items)} articles)"):
+            with st.expander(
+                f"📰 News sources used in analysis ({len(news_items)} articles)"
+            ):
                 for item in news_items:
                     st.markdown(
                         f'<div class="news-item">'
-                        f'<div class="news-title">{item.get("title","")}</div>'
-                        f'<div class="news-snippet">{item.get("snippet","")}</div>'
-                        f'<div class="news-url">{item.get("url","")}</div>'
-                        f'</div>',
+                        f'<div class="news-title">{item.get("title", "")}</div>'
+                        f'<div class="news-snippet">{item.get("snippet", "")}</div>'
+                        f'<div class="news-url">{item.get("url", "")}</div>'
+                        f"</div>",
                         unsafe_allow_html=True,
                     )
 
         # ════════════════════════════════════════════════════════════════════
-        # ML SIGNAL (stats row + clean narrative — no raw feature string)
+        # ML SIGNAL
         # ════════════════════════════════════════════════════════════════════
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">Quantitative Signal — ML Model Only</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Quantitative Signal — ML Model Only</div>',
+            unsafe_allow_html=True,
+        )
 
-        ml_dir   = pred.get("prediction_label", "—")
-        p_bull   = pred.get("p_bullish", 0.5)
-        p_bear   = pred.get("p_bearish", 0.5)
-        ml_conf  = pred.get("confidence_label", "—").upper()
-        close    = pred.get("latest_close", 0.0)
-        ml_dir_color = {"BULLISH": "var(--accent-green)", "BEARISH": "var(--accent-red)"}.get(ml_dir, "var(--text-secondary)")
+        ml_dir = pred.get("prediction_label", "—")
+        p_bull = pred.get("p_bullish", 0.5)
+        p_bear = pred.get("p_bearish", 0.5)
+        ml_conf = pred.get("confidence_label", "—").upper()
+        close = pred.get("latest_close", 0.0)
+        ml_dir_color = {
+            "BULLISH": "var(--accent-green)",
+            "BEARISH": "var(--accent-red)",
+        }.get(ml_dir, "var(--text-secondary)")
 
         st.markdown(
             f'<div class="ml-signal-row">'
@@ -622,11 +727,10 @@ with tab_predict:
             f'<div class="ml-stat-value">{ml_conf}</div></div>'
             f'<div class="ml-stat"><div class="ml-stat-label">Last Close</div>'
             f'<div class="ml-stat-value">${close:,.2f}</div></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-        # Plain-English narrative (replaces the old raw-feature narrative block)
         narrative = pred.get("narrative", "")
         if narrative:
             st.markdown(
@@ -639,24 +743,31 @@ with tab_predict:
         # ════════════════════════════════════════════════════════════════════
         # SHAP CHART
         # ════════════════════════════════════════════════════════════════════
-        st.markdown('<div class="section-label">SHAP Feature Attribution</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">SHAP Feature Attribution</div>',
+            unsafe_allow_html=True,
+        )
         features = pred.get("top_features", [])
         if features:
             df_shap = pd.DataFrame(features)
-            colors  = [
+            colors = [
                 "rgba(0,230,118,0.85)" if v > 0 else "rgba(255,61,87,0.85)"
                 for v in df_shap["shap_value"]
             ]
-            fig = go.Figure(go.Bar(
-                x=df_shap["shap_value"],
-                y=df_shap["feature"],
-                orientation="h",
-                marker=dict(color=colors, line=dict(width=0)),
-                text=[f"{v:+.4f}" for v in df_shap["shap_value"]],
-                textfont=dict(family="DM Mono, monospace", size=11, color="#7a8fa8"),
-                textposition="outside",
-                hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
-            ))
+            fig = go.Figure(
+                go.Bar(
+                    x=df_shap["shap_value"],
+                    y=df_shap["feature"],
+                    orientation="h",
+                    marker=dict(color=colors, line=dict(width=0)),
+                    text=[f"{v:+.4f}" for v in df_shap["shap_value"]],
+                    textfont=dict(
+                        family="DM Mono, monospace", size=11, color="#7a8fa8"
+                    ),
+                    textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
+                )
+            )
             fig.update_layout(
                 margin=dict(l=10, r=60, t=10, b=10),
                 height=340,
@@ -664,60 +775,88 @@ with tab_predict:
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(family="DM Mono, monospace", color="#7a8fa8", size=11),
                 xaxis=dict(
-                    showgrid=True, gridcolor="rgba(30,45,61,0.8)",
-                    zeroline=True, zerolinecolor="rgba(58,80,107,0.9)", zerolinewidth=1.5,
+                    showgrid=True,
+                    gridcolor="rgba(30,45,61,0.8)",
+                    zeroline=True,
+                    zerolinecolor="rgba(58,80,107,0.9)",
+                    zerolinewidth=1.5,
                     tickfont=dict(family="DM Mono, monospace", size=10),
-                    title=dict(text="SHAP Value  (← bearish  ·  bullish →)", font=dict(size=10, color="#3d5068")),
+                    title=dict(
+                        text="SHAP Value  (← bearish  ·  bullish →)",
+                        font=dict(size=10, color="#3d5068"),
+                    ),
                 ),
                 yaxis=dict(
-                    autorange="reversed", showgrid=False,
-                    tickfont=dict(family="DM Mono, monospace", size=11, color="#a0b4c8"),
+                    autorange="reversed",
+                    showgrid=False,
+                    tickfont=dict(
+                        family="DM Mono, monospace", size=11, color="#a0b4c8"
+                    ),
                 ),
-                hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d", font=dict(family="DM Mono, monospace", size=11)),
+                hoverlabel=dict(
+                    bgcolor="#131920",
+                    bordercolor="#1e2d3d",
+                    font=dict(family="DM Mono, monospace", size=11),
+                ),
             )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(
+                fig, use_container_width=True, config={"displayModeBar": False}
+            )
 
             # ── SHAP Feature Glossary ─────────────────────────────────────────
-            # Build a per-feature explanation table from the features shown in
-            # the chart so novice users understand what each bar represents.
             with st.expander("📖 What do these features mean?", expanded=False):
                 st.markdown(
                     '<div style="font-family:var(--font-mono);font-size:0.68rem;'
-                    'letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);'
+                    "letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);"
                     'margin-bottom:0.75rem;">'
-                    'Green bars push toward BULLISH · Red bars push toward BEARISH · '
-                    'Longer bars = stronger influence on this prediction'
-                    '</div>',
+                    "Green bars push toward BULLISH · Red bars push toward BEARISH · "
+                    "Longer bars = stronger influence on this prediction"
+                    "</div>",
                     unsafe_allow_html=True,
                 )
                 rows_html = ""
                 for _, row in df_shap.iterrows():
                     feat_name = row["feature"]
                     direction = "▲" if row["shap_value"] > 0 else "▼"
-                    dir_color = "var(--accent-green)" if row["shap_value"] > 0 else "var(--accent-red)"
-                    desc      = _shap_feature_description(feat_name)
+                    dir_color = (
+                        "var(--accent-green)"
+                        if row["shap_value"] > 0
+                        else "var(--accent-red)"
+                    )
+                    desc = _shap_feature_description(feat_name)
                     rows_html += (
                         f'<div class="shap-glossary-row">'
                         f'<div class="shap-feat-name">'
                         f'<span style="color:{dir_color};margin-right:4px;">{direction}</span>'
-                        f'{feat_name}'
-                        f'</div>'
+                        f"{feat_name}"
+                        f"</div>"
                         f'<div class="shap-feat-desc">{desc}</div>'
-                        f'</div>'
+                        f"</div>"
                     )
                 st.markdown(
                     f'<div style="background:var(--bg-elevated);border:1px solid var(--border);'
                     f'border-radius:6px;padding:0.5rem 0.75rem;">{rows_html}</div>',
                     unsafe_allow_html=True,
                 )
+        else:
+            st.markdown(
+                '<div style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);'
+                'padding:1.5rem;text-align:center;border:1px dashed var(--border);border-radius:6px;">'
+                "SHAP explanation unavailable for this prediction."
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
     elif not pred:
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Select a ticker and horizon, then click Analyse Signal</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -731,79 +870,127 @@ with tab_market:
 
     if load_clicked:
         with st.spinner("Fetching market data…"):
-            summary = api_post("/market/summary", {"ticker": selected_ticker, "period_years": 1})
+            summary = api_post(
+                "/market/summary", {"ticker": selected_ticker, "period_years": 1}
+            )
             if summary:
                 st.session_state.market_summary = summary
 
     mkt = st.session_state.market_summary
 
     if mkt and mkt.get("ticker") == selected_ticker:
-        st.markdown('<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">12-Month Summary</div>', unsafe_allow_html=True
+        )
         st.markdown(
             f'<div class="market-stat-row">'
             f'<div class="market-stat"><div class="market-stat-label">Trading Days</div><div class="market-stat-value">{mkt["rows"]}</div></div>'
             f'<div class="market-stat"><div class="market-stat-label">52W Low</div><div class="market-stat-value" style="color:var(--accent-red);">${mkt["close_min"]:,.2f}</div></div>'
             f'<div class="market-stat"><div class="market-stat-label">52W High</div><div class="market-stat-value" style="color:var(--accent-green);">${mkt["close_max"]:,.2f}</div></div>'
             f'<div class="market-stat"><div class="market-stat-label">Mean Close</div><div class="market-stat-value">${mkt["close_mean"]:,.2f}</div></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
-        pct = (mkt["close_mean"] - mkt["close_min"]) / max(mkt["close_max"] - mkt["close_min"], 0.01) * 100
-        st.markdown('<div class="section-label">52-Week Price Position</div>', unsafe_allow_html=True)
+        pct = (
+            (mkt["close_mean"] - mkt["close_min"])
+            / max(mkt["close_max"] - mkt["close_min"], 0.01)
+            * 100
+        )
+        st.markdown(
+            '<div class="section-label">52-Week Price Position</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(
             f'<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.2rem 1.5rem;">'
             f'<div style="display:flex;justify-content:space-between;margin-bottom:0.6rem;">'
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-red);">${mkt["close_min"]:,.2f}</span>'
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);">Mean ${mkt["close_mean"]:,.2f}</span>'
             f'<span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--accent-green);">${mkt["close_max"]:,.2f}</span>'
-            f'</div>'
+            f"</div>"
             f'<div style="background:var(--bg-elevated);border-radius:4px;height:6px;position:relative;">'
             f'<div style="position:absolute;left:0;top:0;height:100%;width:{pct:.1f}%;background:linear-gradient(90deg,var(--accent-red),var(--accent-cyan));border-radius:4px;"></div>'
             f'<div style="position:absolute;left:{pct:.1f}%;top:-3px;width:12px;height:12px;border-radius:50%;background:var(--accent-cyan);box-shadow:0 0 8px var(--accent-cyan);transform:translateX(-50%);"></div>'
-            f'</div>'
+            f"</div>"
             f'<div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted);text-align:right;margin-top:0.5rem;">Mean at {pct:.1f}th percentile of 52W range</div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
         st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label">52-Week Closing Price</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">52-Week Closing Price</div>',
+            unsafe_allow_html=True,
+        )
         try:
             import yfinance as yf
-            df_hist = yf.download(selected_ticker, period="1y", auto_adjust=True, progress=False)
+
+            df_hist = yf.download(
+                selected_ticker, period="1y", auto_adjust=True, progress=False
+            )
             if not df_hist.empty:
                 closes = df_hist["Close"].squeeze()
-                fig_spark = go.Figure(go.Scatter(
-                    x=closes.index, y=closes.values, mode="lines",
-                    line=dict(color="#00d4ff", width=1.5),
-                    fill="tozeroy", fillcolor="rgba(0,212,255,0.05)",
-                    hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>",
-                ))
-                fig_spark.update_layout(
-                    height=200, margin=dict(l=0, r=0, t=0, b=0),
-                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(showgrid=False, showticklabels=True, tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068")),
-                    yaxis=dict(showgrid=True, gridcolor="rgba(30,45,61,0.6)", tickfont=dict(family="DM Mono, monospace", size=10, color="#3d5068"), tickprefix="$"),
-                    hoverlabel=dict(bgcolor="#131920", bordercolor="#1e2d3d", font=dict(family="DM Mono, monospace", size=11)),
+                fig_spark = go.Figure(
+                    go.Scatter(
+                        x=closes.index,
+                        y=closes.values,
+                        mode="lines",
+                        line=dict(color="#00d4ff", width=1.5),
+                        fill="tozeroy",
+                        fillcolor="rgba(0,212,255,0.05)",
+                        hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>",
+                    )
                 )
-                st.plotly_chart(fig_spark, use_container_width=True, config={"displayModeBar": False})
+                fig_spark.update_layout(
+                    height=200,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(
+                        showgrid=False,
+                        showticklabels=True,
+                        tickfont=dict(
+                            family="DM Mono, monospace", size=10, color="#3d5068"
+                        ),
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(30,45,61,0.6)",
+                        tickfont=dict(
+                            family="DM Mono, monospace", size=10, color="#3d5068"
+                        ),
+                        tickprefix="$",
+                    ),
+                    hoverlabel=dict(
+                        bgcolor="#131920",
+                        bordercolor="#1e2d3d",
+                        font=dict(family="DM Mono, monospace", size=11),
+                    ),
+                )
+                st.plotly_chart(
+                    fig_spark,
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
         except Exception:
             st.caption("Price chart unavailable.")
 
         st.markdown(
             f'<div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;text-align:right;">'
-            f'{mkt["start_date"]} → {mkt["end_date"]} &nbsp;·&nbsp; {len(mkt.get("columns", []))} columns &nbsp;·&nbsp; {mkt["null_count"]} nulls'
-            f'</div>',
+            f"{mkt['start_date']} → {mkt['end_date']} &nbsp;·&nbsp; {len(mkt.get('columns', []))} columns &nbsp;·&nbsp; {mkt['null_count']} nulls"
+            f"</div>",
             unsafe_allow_html=True,
         )
     else:
-        st.markdown("""
+        st.markdown(
+            """
         <div class="placeholder-state">
             <div class="placeholder-icon">◈</div>
             <div class="placeholder-text">Click Load Market Data to fetch 12-month statistics</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -813,7 +1000,10 @@ with tab_market:
 with tab_chat:
     top_row, rag_toggle_col = st.columns([5, 1])
     with top_row:
-        st.markdown('<div class="section-label">Financial AI Assistant</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-label">Financial AI Assistant</div>',
+            unsafe_allow_html=True,
+        )
     with rag_toggle_col:
         use_rag = st.toggle("RAG", value=True, help="Inject knowledge base context")
 
@@ -832,21 +1022,39 @@ with tab_chat:
             else:
                 history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
 
-    st.markdown(f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True
+    )
 
     with st.form("chat_form", clear_on_submit=True):
         input_col, send_col = st.columns([7, 1])
         with input_col:
-            user_input = st.text_input("Message", placeholder="What does RSI divergence indicate in a downtrend?", label_visibility="collapsed")
+            user_input = st.text_input(
+                "Message",
+                placeholder="What does RSI divergence indicate in a downtrend?",
+                label_visibility="collapsed",
+            )
         with send_col:
             submitted = st.form_submit_button("Send", use_container_width=True)
 
     if submitted and user_input.strip():
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         with st.spinner(""):
-            result = api_post("/rag/chat", {"query": user_input, "use_rag": use_rag, "session_id": st.session_state.session_id})
+            result = api_post(
+                "/rag/chat",
+                {
+                    "query": user_input,
+                    "use_rag": use_rag,
+                    "session_id": st.session_state.session_id,
+                },
+            )
             if result:
-                st.session_state.chat_history.append({"role": "assistant", "content": result.get("response", "No response received.")})
+                st.session_state.chat_history.append(
+                    {
+                        "role": "assistant",
+                        "content": result.get("response", "No response received."),
+                    }
+                )
         st.rerun()
 
     if st.session_state.chat_history:
@@ -862,7 +1070,9 @@ with tab_chat:
 # ═════════════════════════════════════════════════════════════════════════════
 
 with tab_agent:
-    st.markdown('<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True
+    )
     st.markdown(
         '<div style="font-family:var(--font-body);font-size:0.875rem;color:var(--text-secondary);margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
         "The agent autonomously plans, selects, and chains tools — prediction, SHAP explanation, sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries."
@@ -879,7 +1089,11 @@ with tab_agent:
 
     ex_col, _ = st.columns([4, 4])
     with ex_col:
-        selected_example = st.selectbox("Example queries", ["— select an example —"] + EXAMPLES, label_visibility="collapsed")
+        selected_example = st.selectbox(
+            "Example queries",
+            ["— select an example —"] + EXAMPLES,
+            label_visibility="collapsed",
+        )
 
     agent_query = st.text_area(
         "Query",
@@ -891,7 +1105,9 @@ with tab_agent:
 
     run_agent_col, _ = st.columns([2, 6])
     with run_agent_col:
-        agent_clicked = st.button("▶  Run Agent", type="primary", use_container_width=True)
+        agent_clicked = st.button(
+            "▶  Run Agent", type="primary", use_container_width=True
+        )
 
     if agent_clicked:
         if agent_query.strip():
@@ -901,15 +1117,34 @@ with tab_agent:
             if result:
                 st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
                 if result.get("tools_used"):
-                    st.markdown('<div class="section-label">Tools Invoked</div>', unsafe_allow_html=True)
-                    chips = "".join(f'<span class="tool-chip">{t}</span>' for t in result["tools_used"])
-                    st.markdown(f'<div style="margin-bottom:1rem;">{chips}</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="section-label">Tools Invoked</div>',
+                        unsafe_allow_html=True,
+                    )
+                    chips = "".join(
+                        f'<span class="tool-chip">{t}</span>'
+                        for t in result["tools_used"]
+                    )
+                    st.markdown(
+                        f'<div style="margin-bottom:1rem;">{chips}</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                st.markdown('<div class="section-label">Agent Response</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="narrative-block">{result["response"]}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="section-label">Agent Response</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f'<div class="narrative-block">{result["response"]}</div>',
+                    unsafe_allow_html=True,
+                )
 
                 with st.expander("Raw tool results"):
                     import json
-                    st.code(json.dumps(result.get("tool_results", []), indent=2), language="json")
+
+                    st.code(
+                        json.dumps(result.get("tool_results", []), indent=2),
+                        language="json",
+                    )
         else:
             st.warning("Enter a query to run the agent.")

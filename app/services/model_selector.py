@@ -47,17 +47,18 @@ ALL_TRAINING_MODELS: list[str] = [
 DEFAULT_TRAINING_MODEL: str = ALL_TRAINING_MODELS[0]
 FALLBACK_MODEL: str = DEFAULT_TRAINING_MODEL
 
-_PREFERENCE_ORDER: list[str] = ALL_TRAINING_MODELS   # same list, aliased for clarity
+_PREFERENCE_ORDER: list[str] = ALL_TRAINING_MODELS  # same list, aliased for clarity
 
 # Selection reason constants
-REASON_LEADERBOARD     = "leaderboard"
+REASON_LEADERBOARD = "leaderboard"
 REASON_BELOW_THRESHOLD = "best_below_threshold"
-REASON_NO_ARTIFACTS    = "no_artifacts_default"
+REASON_NO_ARTIFACTS = "no_artifacts_default"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SelectionResult
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class SelectionResult(NamedTuple):
     """
@@ -68,15 +69,17 @@ class SelectionResult(NamedTuple):
     auc              : Best known AUC, 0.0 when no artifacts exist.
     from_leaderboard : True only when at least one artifact passed MIN_AUC.
     """
-    model_name:       str
-    reason:           str
-    auc:              float
+
+    model_name: str
+    reason: str
+    auc: float
     from_leaderboard: bool
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Selector
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class ModelSelector:
     """
@@ -108,7 +111,11 @@ class ModelSelector:
             best_name, best_auc = eligible[0]
             logger.info(
                 "[%s/%s] Model selected: %s (AUC=%.4f, candidates=%d)",
-                ticker, horizon, best_name, best_auc, len(eligible),
+                ticker,
+                horizon,
+                best_name,
+                best_auc,
+                len(eligible),
             )
             return SelectionResult(
                 model_name=best_name,
@@ -122,7 +129,11 @@ class ModelSelector:
             logger.warning(
                 "[%s/%s] No model meets MIN_AUC %.2f. "
                 "Best available: %s (AUC=%.4f). Proceeding with degraded confidence.",
-                ticker, horizon, MIN_AUC, best_name, best_auc,
+                ticker,
+                horizon,
+                MIN_AUC,
+                best_name,
+                best_auc,
             )
             return SelectionResult(
                 model_name=best_name,
@@ -136,7 +147,9 @@ class ModelSelector:
             "[%s/%s] No trained artifacts found. "
             "Caller should train all models in ALL_TRAINING_MODELS=%s, "
             "then call select() again.",
-            ticker, horizon, ALL_TRAINING_MODELS,
+            ticker,
+            horizon,
+            ALL_TRAINING_MODELS,
         )
         return SelectionResult(
             model_name=ALL_TRAINING_MODELS[0],
@@ -156,14 +169,16 @@ class ModelSelector:
         for name, _ in all_entries:
             meta = self._load_meta(ticker.upper(), name, horizon)
             if meta:
-                result.append({
-                    "model":      name,
-                    "horizon":    horizon,
-                    "auc":        round(meta.get("mean_roc_auc", 0.0), 4),
-                    "accuracy":   round(meta.get("mean_accuracy", 0.0), 4),
-                    "f1":         round(meta.get("mean_f1", 0.0), 4),
-                    "trained_at": meta.get("trained_at", ""),
-                })
+                result.append(
+                    {
+                        "model": name,
+                        "horizon": horizon,
+                        "auc": round(meta.get("mean_roc_auc", 0.0), 4),
+                        "accuracy": round(meta.get("mean_accuracy", 0.0), 4),
+                        "f1": round(meta.get("mean_f1", 0.0), 4),
+                        "trained_at": meta.get("trained_at", ""),
+                    }
+                )
         return result
 
     def has_any_model(self, ticker: str, horizon: str = "1d") -> bool:
@@ -174,9 +189,11 @@ class ModelSelector:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _scan_leaderboard(
-        self, ticker: str, horizon: str,
+        self,
+        ticker: str,
+        horizon: str,
     ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        eligible:    list[tuple[str, float]] = []
+        eligible: list[tuple[str, float]] = []
         all_entries: list[tuple[str, float]] = []
 
         for model_name in _PREFERENCE_ORDER:
@@ -190,7 +207,11 @@ class ModelSelector:
             else:
                 logger.debug(
                     "[%s/%s/%s] AUC %.4f < MIN_AUC %.2f",
-                    ticker, model_name, horizon, auc, MIN_AUC,
+                    ticker,
+                    model_name,
+                    horizon,
+                    auc,
+                    MIN_AUC,
                 )
 
         eligible.sort(key=lambda x: x[1], reverse=True)
