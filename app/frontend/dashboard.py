@@ -653,23 +653,23 @@ with tab_predict:
                 '<div class="prob-bar-track">'
                 f'<div class="prob-bar-bull" style="flex:{bull_prob}; min-width:2px;"></div>'
                 f'<div class="prob-bar-bear" style="flex:{bear_prob}; min-width:2px;"></div>'
-                '</div>'
+                "</div>"
                 '<div class="prob-bar-labels">'
                 f'<span style="color:var(--accent-green);">▲ {bull_pct}%</span>'
                 f'<span style="color:var(--accent-red);">▼ {bear_pct}%</span>'
-                '</div>'
-                '</div>'
+                "</div>"
+                "</div>"
                 '<div style="background:var(--bg-card);border:1px solid var(--border);'
                 'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
                 '<div style="font-family:var(--font-mono);font-size:0.65rem;letter-spacing:0.15em;'
                 'text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">'
-                'News Sentiment'
-                '</div>'
+                "News Sentiment"
+                "</div>"
                 f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;'
                 f'color:{sent_color};">'
-                f'{news_sent.upper()}'
-                '</div>'
-                '</div>',
+                f"{news_sent.upper()}"
+                "</div>"
+                "</div>",
                 unsafe_allow_html=True,
             )
 

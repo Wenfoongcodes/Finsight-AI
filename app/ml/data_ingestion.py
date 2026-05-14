@@ -1,24 +1,44 @@
 """
-FinSight AI — Phase 2: Data Ingestion Pipeline
-Fetches OHLCV market data from yfinance (free) with optional Alpha Vantage fallback.
-Validates, cleans, and persists raw data to the data/raw directory.
+FinSight AI — Phase 2: Data Ingestion Pipeline (v3)
 
-Cache strategy
---------------
-The previous implementation keyed the parquet cache on ``(ticker, start, end)``
-where ``end`` defaulted to ``date.today()``.  This meant the cache *never* hit
-across a midnight boundary — a fresh parquet was written every calendar day even
-for the same underlying data window, accumulating stale files and wasting disk.
+Changes vs v2
+-------------
+**Cache key no longer includes the ``end`` date.**
 
-The fix: the cache file name still encodes the fetch parameters (for
-reproducibility), but ``_load_from_cache`` now checks the file's *mtime* against
-``settings.CACHE_MAX_AGE_DAYS``.  A file that is younger than the configured
-max-age is returned directly; an older file is deleted and the data is
-re-fetched.  This gives:
+Problem with the previous design
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The cache file name was::
 
-* Intra-day cache hits (no redundant downloads within a trading day).
-* Automatic daily refresh (stale files are replaced, not accumulated).
-* Configurable staleness via ``CACHE_MAX_AGE_DAYS`` env var (default: 1).
+    {TICKER}_{md5(ticker_start_end)[:12]}.parquet
+
+where ``end`` defaulted to ``date.today()``.  This meant:
+
+1. Every calendar day a *new* cache file was written for the same underlying
+   data window (the content changed by at most one row, but the filename
+   changed completely).
+2. Old files were never cleaned up — the raw data directory accumulated one
+   file per trading day per ticker indefinitely.
+3. The mtime-based staleness check in ``_load_from_cache`` was correct but
+   never had a chance to work: the file it checked was always today's file,
+   which was always younger than ``CACHE_MAX_AGE_DAYS``.
+
+Fix
+~~~
+The cache key is now derived from ``(ticker, start)`` only — the start date
+is deterministic given ``(ticker, period_years)`` and does not change within
+a session.  The ``end`` date is no longer encoded in the filename.
+
+Freshness is determined entirely by the file's mtime vs ``CACHE_MAX_AGE_DAYS``
+(default 1 day), exactly as originally intended:
+
+* Same trading day  → cache hit, no network call.
+* Next trading day  → mtime is >1 day old → cache evicted → fresh fetch.
+* Manual override   → pass ``use_cache=False`` to force a re-fetch.
+
+The ``_cache_path`` and ``_cache_key`` helpers are updated accordingly.
+Existing cached files with the old naming scheme are simply not found
+(different hash) and are fetched fresh on first use; they can be deleted
+manually with ``find data/raw -name "*.parquet" -delete``.
 """
 
 from __future__ import annotations
@@ -57,12 +77,12 @@ def validate_ohlcv(df: pd.DataFrame, ticker: str, min_rows: int = MIN_ROWS) -> N
     Validate that a DataFrame conforms to expected OHLCV schema.
 
     Args:
-        df: Raw OHLCV DataFrame.
-        ticker: Ticker symbol for error context.
+        df:       Raw OHLCV DataFrame.
+        ticker:   Ticker symbol for error context.
         min_rows: Minimum acceptable row count.
 
     Raises:
-        DataValidationError: On schema or quality violations.
+        DataValidationError:  On schema or quality violations.
         InsufficientDataError: When row count is too low.
     """
     if df.empty:
@@ -99,13 +119,20 @@ def validate_ohlcv(df: pd.DataFrame, ticker: str, min_rows: int = MIN_ROWS) -> N
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _cache_key(ticker: str, start: str, end: str) -> str:
-    raw = f"{ticker}_{start}_{end}"
+def _cache_key(ticker: str, start: str) -> str:
+    """
+    Derive a short cache key from ticker and start date only.
+
+    The ``end`` date is intentionally excluded so that the same logical data
+    window maps to the same file across calendar days.  Freshness is managed
+    by mtime comparison in ``_load_from_cache``.
+    """
+    raw = f"{ticker}_{start}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
-def _cache_path(ticker: str, start: str, end: str) -> Path:
-    key = _cache_key(ticker, start, end)
+def _cache_path(ticker: str, start: str) -> Path:
+    key = _cache_key(ticker, start)
     return settings.RAW_DATA_DIR / f"{ticker.upper()}_{key}.parquet"
 
 
@@ -117,8 +144,13 @@ def _load_from_cache(
     Return a cached DataFrame if the file exists *and* is younger than
     ``max_age_days`` days.  Stale files are removed so they don't accumulate.
 
+    Because the cache key no longer encodes the ``end`` date, this function
+    is now the *sole* mechanism that determines when a re-fetch occurs.  A
+    file written today will be re-used for the entire trading day; tomorrow
+    it will be considered stale and replaced with fresh data.
+
     Args:
-        path: Path to the parquet cache file.
+        path:         Path to the parquet cache file.
         max_age_days: Maximum acceptable file age in calendar days.
 
     Returns:
@@ -161,8 +193,8 @@ def fetch_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL').
-        start: Start date string 'YYYY-MM-DD'.
-        end: End date string 'YYYY-MM-DD'.
+        start:  Start date string 'YYYY-MM-DD'.
+        end:    End date string 'YYYY-MM-DD'.
 
     Returns:
         DataFrame with DatetimeIndex and OHLCV columns.
@@ -213,23 +245,33 @@ def ingest_market_data(
     Fetches OHLCV data for *ticker* over the specified period, validates it,
     and optionally reads from / writes to a local parquet cache.
 
-    Cache freshness is governed by ``settings.CACHE_MAX_AGE_DAYS`` (default 1).
-    Files older than the configured threshold are evicted automatically.
+    Cache behaviour
+    ---------------
+    The cache file is keyed on ``(ticker, start_date)`` only — the end date
+    is not part of the key.  A cached file younger than
+    ``settings.CACHE_MAX_AGE_DAYS`` (default 1 day) is returned directly;
+    older files are evicted and the data is re-fetched from yfinance.
+
+    This means:
+    * Multiple calls within the same trading day are served from disk.
+    * The next calendar day the cache is transparently refreshed.
+    * No stale files accumulate — each ticker/period combination maps to
+      exactly one parquet file at any given time.
 
     Args:
-        ticker: Stock ticker symbol.
+        ticker:       Stock ticker symbol.
         period_years: Number of years of history to fetch.
-        start_date: Explicit start date (YYYY-MM-DD).
-        end_date: Explicit end date (YYYY-MM-DD); defaults to today.
-        use_cache: Whether to use local parquet cache.
-        min_rows: Minimum acceptable row count.
+        start_date:   Explicit start date (YYYY-MM-DD).
+        end_date:     Explicit end date (YYYY-MM-DD); defaults to today.
+        use_cache:    Whether to use local parquet cache.
+        min_rows:     Minimum acceptable row count.
 
     Returns:
         Validated OHLCV DataFrame with DatetimeIndex.
 
     Raises:
-        DataIngestionError: On fetch failure.
-        DataValidationError: On schema violations.
+        DataIngestionError:   On fetch failure.
+        DataValidationError:  On schema violations.
         InsufficientDataError: On insufficient row count.
     """
     end = end_date or date.today().isoformat()
@@ -237,7 +279,8 @@ def ingest_market_data(
         datetime.strptime(end, "%Y-%m-%d") - timedelta(days=period_years * 365)
     ).strftime("%Y-%m-%d")
 
-    cache_path = _cache_path(ticker, start, end)
+    # Cache key uses only ticker + start — end is excluded by design.
+    cache_path = _cache_path(ticker, start)
 
     if use_cache:
         cached = _load_from_cache(cache_path)
@@ -263,9 +306,9 @@ def ingest_multiple_tickers(
     Ingest data for multiple tickers, skipping failures with a warning.
 
     Args:
-        tickers: List of ticker symbols.
+        tickers:      List of ticker symbols.
         period_years: History length in years.
-        use_cache: Whether to use local parquet cache.
+        use_cache:    Whether to use local parquet cache.
 
     Returns:
         Dict mapping ticker → OHLCV DataFrame (only successful fetches).
@@ -286,7 +329,7 @@ def get_data_summary(df: pd.DataFrame, ticker: str) -> dict:
     Return a lightweight summary dict for ingested data.
 
     Args:
-        df: OHLCV DataFrame.
+        df:     OHLCV DataFrame.
         ticker: Ticker symbol.
 
     Returns:
