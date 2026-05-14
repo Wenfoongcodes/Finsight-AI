@@ -1,26 +1,26 @@
 """
-FinSight AI — Enhanced Training Pipeline (v2)
+FinSight AI — Enhanced Training Pipeline (v3)
 
-Key improvements over v1
-------------------------
-1.  **Multi-horizon support** — ``ModelTrainer.train()`` accepts a
-    ``horizon`` parameter ('1d', '7d', '1m', '6m').  Artifacts are keyed
-    on ``{TICKER}_{model}_{horizon}`` so each horizon has independent
-    model files, metadata, and leaderboard entries.
+Changes vs v2
+-------------
+1.  **sklearn ≥ 1.2 compatibility fix for CalibratedClassifierCV.**
 
-2.  **Automatic training trigger detection** — ``ModelTrainer.load_or_train()``
-    detects missing, corrupted, and feature-incompatible artifacts and
-    triggers a fresh training run automatically.  The caller never needs
-    to handle ``ModelNotFoundError`` manually.
+    The first positional argument of ``CalibratedClassifierCV`` was renamed
+    from ``base_estimator`` to ``estimator`` in sklearn 1.2.  Using the old
+    name raises a ``FutureWarning`` in sklearn 1.4 and a hard ``TypeError``
+    in sklearn 1.6 (the parameter is fully removed).
 
-3.  **Improved calibration** — ``CalibratedClassifierCV`` wraps an *unfitted*
-    estimator (no redundant pre-fit call), matching sklearn's intended API.
+    Since ``requirements/ml.txt`` pins ``scikit-learn==1.5.0``, the warning
+    fires on every training run and will become a breakage on the next pin
+    upgrade.  All four call-sites inside ``train()`` now use the keyword form::
 
-4.  **Structured training audit log** — every training run logs trigger
-    reason, features used, duration, and fold metrics to a structured JSON
-    audit entry alongside the model artifact.
+        CalibratedClassifierCV(estimator=base_estimator, cv=3, method="sigmoid")
 
-5.  **Walk-forward splitter** — unchanged but documented more clearly.
+    No behaviour change — sklearn 1.5 accepts both names, so existing
+    serialised artifacts remain loadable.
+
+All other logic (walk-forward splitter, HPO, artifact naming, multi-horizon
+support, automatic trigger detection) is unchanged from v2.
 """
 
 from __future__ import annotations
@@ -271,7 +271,7 @@ class ModelTrainer:
     ---------------------
     Artifacts are named ``{TICKER}_{model}_{horizon}.pkl`` so each
     prediction horizon has fully independent parameters, features, and
-    metrics.  The leaderboard (ModelSelector) reads per-horizon metadata.
+    metrics.
 
     Automatic recovery
     ------------------
@@ -281,6 +281,12 @@ class ModelTrainer:
     3. Do its feature columns match the current feature set?
 
     If any check fails, it logs the trigger reason and trains a fresh model.
+
+    sklearn compatibility
+    --------------------
+    ``CalibratedClassifierCV`` is called with the ``estimator=`` keyword to
+    maintain compatibility with sklearn ≥ 1.2 where ``base_estimator`` was
+    deprecated, and sklearn ≥ 1.6 where it is removed entirely.
     """
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
@@ -316,7 +322,7 @@ class ModelTrainer:
         run_hpo: bool = False,
         hpo_trials: int = 30,
         calibrate: bool = True,
-    ) -> tuple[Any, list[str], TrainingResult | None]:
+    ) -> tuple[Any, list[str], "TrainingResult | None"]:
         """
         Load an existing model or train a new one automatically.
 
@@ -328,11 +334,9 @@ class ModelTrainer:
         trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
 
         if trigger is None:
-            # Happy path — load existing artifact
             model, feature_columns = self.load_model(ticker, model_name, horizon)
             return model, feature_columns, None
 
-        # Trigger detected — train fresh model
         logger.info(
             "[%s/%s/%s] Training triggered: %s",
             ticker,
@@ -398,7 +402,7 @@ class ModelTrainer:
             )
             return TRIGGER_MISMATCH
 
-        return None  # artifact is valid
+        return None
 
     def train(
         self,
@@ -412,7 +416,7 @@ class ModelTrainer:
         hpo_trials: int = 30,
         calibrate: bool = True,
         trigger_reason: str = TRIGGER_MANUAL,
-    ) -> tuple[Any, TrainingResult]:
+    ) -> tuple[Any, "TrainingResult"]:
         """
         Train with walk-forward validation and persist artifacts.
 
@@ -497,6 +501,8 @@ class ModelTrainer:
             result.compute_aggregates()
 
             # ── Final model ────────────────────────────────────────────────
+            # Use `estimator=` keyword (sklearn >=1.2 API; `base_estimator`
+            # was deprecated in 1.2 and removed in 1.6).
             should_calibrate = calibrate and model_name != "logistic_regression"
 
             if should_calibrate:
@@ -508,7 +514,7 @@ class ModelTrainer:
                 )
                 base_estimator = get_model(model_name, **best_params)
                 final_model = CalibratedClassifierCV(
-                    base_estimator, cv=3, method="sigmoid"
+                    estimator=base_estimator, cv=3, method="sigmoid"
                 )
                 final_model.fit(X, y)
             else:
