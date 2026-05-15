@@ -7,10 +7,23 @@ Design notes
 * All path constants that must exist at runtime are auto-created by the
   ``_ensure_dirs`` model validator so the application never crashes on a
   missing directory regardless of how the container or venv is set up.
+
 * ``LLM_BASE_URL`` is an optional override for the OpenAI client base URL.
   Leave it unset to use the default OpenAI endpoint.  Set it to the Groq,
   Azure, or Ollama endpoint when using an alternative provider — no code
   changes required.
+
+* v2 additions for public / cloud deployment:
+  - ``ALLOWED_ORIGINS``    → now accepts ``"*"`` for fully public APIs, or a
+                             comma-separated list of origins from the env.
+  - ``API_KEY_ENABLED``    → gate the entire API behind a shared secret.
+  - ``API_SECRET_KEY``     → the shared secret (never committed to VCS).
+  - ``RATE_LIMIT_ENABLED`` → toggle in-memory IP rate limiting.
+  - ``RATE_LIMIT_MAX_REQUESTS`` / ``RATE_LIMIT_WINDOW_S`` → tunable limits.
+  - ``FRONTEND_API_BASE``  → the URL the Streamlit dashboard should call;
+                             defaults to localhost for local dev, override
+                             in production to the public API URL.
+  - ``TRUSTED_PROXY_IPS``  → forwarded-for header trust list for Nginx / ALB.
 """
 
 from functools import lru_cache
@@ -88,12 +101,77 @@ class Settings(BaseSettings):
     # ── FastAPI ───────────────────────────────────────────────────────────────
     API_HOST: str = Field(default="0.0.0.0", env="API_HOST")
     API_PORT: int = Field(default=8000, env="API_PORT")
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8501"]
+
+    # Comma-separated list of allowed CORS origins.
+    # Use "*" to allow all origins (fully public API — acceptable when
+    # API_KEY_ENABLED=true adds a separate auth layer).
+    # Example: "https://finsight.yourdomain.com,https://app.yourdomain.com"
+    ALLOWED_ORIGINS_RAW: str = Field(
+        default="http://localhost:3000,http://localhost:8501",
+        env="ALLOWED_ORIGINS",
+    )
+
+    # ── Security — API Key Auth ───────────────────────────────────────────────
+    # Set API_KEY_ENABLED=true and API_SECRET_KEY=<random-secret> to gate
+    # every non-health endpoint behind a shared API key.
+    #
+    # Generate a strong key:
+    #   python -c "import secrets; print(secrets.token_urlsafe(32))"
+    #
+    # Clients must send:  X-API-Key: <key>   (header)
+    # or:                  ?api_key=<key>      (query param — less preferred)
+    API_KEY_ENABLED: bool = Field(default=False, env="API_KEY_ENABLED")
+    API_SECRET_KEY: Optional[str] = Field(default=None, env="API_SECRET_KEY")
+
+    # ── Security — Rate Limiting ──────────────────────────────────────────────
+    # In-memory per-IP token bucket.  Not shared across workers — replace
+    # with a Redis-backed limiter for multi-worker or multi-instance setups.
+    RATE_LIMIT_ENABLED: bool = Field(default=True, env="RATE_LIMIT_ENABLED")
+    RATE_LIMIT_MAX_REQUESTS: int = Field(default=120, env="RATE_LIMIT_MAX_REQUESTS")
+    RATE_LIMIT_WINDOW_S: int = Field(default=60, env="RATE_LIMIT_WINDOW_S")
+
+    # ── Frontend / Dashboard ──────────────────────────────────────────────────
+    # The URL that the Streamlit dashboard should use to reach the API.
+    # Override in production:  FRONTEND_API_BASE=https://api.yourdomain.com/api/v1
+    FRONTEND_API_BASE: str = Field(
+        default="http://localhost:8000/api/v1",
+        env="FRONTEND_API_BASE",
+    )
+
+    # ── Trusted Proxies ───────────────────────────────────────────────────────
+    # Comma-separated list of IPs or CIDR blocks whose X-Forwarded-For headers
+    # should be trusted (Nginx, Traefik, AWS ALB, Cloudflare, etc.).
+    # Leave empty to trust no proxy (direct connections only).
+    TRUSTED_PROXIES_RAW: str = Field(
+        default="127.0.0.1",
+        env="TRUSTED_PROXIES",
+    )
 
     # ── Data cache ────────────────────────────────────────────────────────────
     # Number of days before a cached parquet file is considered stale and
     # re-fetched from the data source.  Default: 1 day.
     CACHE_MAX_AGE_DAYS: int = Field(default=1, env="CACHE_MAX_AGE_DAYS")
+
+    # ── Computed properties (derived from raw env strings) ────────────────────
+
+    @property
+    def ALLOWED_ORIGINS(self) -> List[str]:
+        """
+        Parse ALLOWED_ORIGINS_RAW into a list.
+
+        Supports:
+          - "*"                          → ["*"]
+          - "https://a.com,https://b.com" → ["https://a.com", "https://b.com"]
+        """
+        raw = self.ALLOWED_ORIGINS_RAW.strip()
+        if raw == "*":
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    @property
+    def TRUSTED_PROXIES(self) -> List[str]:
+        """Parse TRUSTED_PROXIES_RAW into a list of IPs / CIDR blocks."""
+        return [p.strip() for p in self.TRUSTED_PROXIES_RAW.split(",") if p.strip()]
 
     @model_validator(mode="after")
     def _ensure_dirs(self) -> "Settings":
@@ -116,6 +194,34 @@ class Settings(BaseSettings):
         ]
         for d in dirs_to_create:
             Path(d).mkdir(parents=True, exist_ok=True)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_insecure_config(self) -> "Settings":
+        """
+        Emit warnings for insecure production configurations.
+
+        Checks are advisory — they do not block startup — so developers can
+        still run the app locally without setting every security variable.
+        """
+        if self.ENVIRONMENT == "production":
+            if not self.API_KEY_ENABLED:
+                import warnings
+
+                warnings.warn(
+                    "ENVIRONMENT=production but API_KEY_ENABLED=false. "
+                    "The API is publicly accessible without authentication. "
+                    "Set API_KEY_ENABLED=true and API_SECRET_KEY to secure it.",
+                    stacklevel=2,
+                )
+            if self.ALLOWED_ORIGINS_RAW == "*" and not self.API_KEY_ENABLED:
+                import warnings
+
+                warnings.warn(
+                    "ALLOWED_ORIGINS=* with API_KEY_ENABLED=false is an open API. "
+                    "This is only safe if all endpoints are intentionally public.",
+                    stacklevel=2,
+                )
         return self
 
     model_config = {

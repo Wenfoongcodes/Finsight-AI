@@ -1,55 +1,46 @@
 """
-FinSight AI — Dashboard (v6)
+FinSight AI — Dashboard (v7)
 
-Changes vs v5
+Changes vs v6
 -------------
 
-1.  **Agent response typography fix**
+1.  **Environment-aware API base URL**
 
-    Root cause (re-stated for clarity):
-    ``FinancialAgent.run()`` returns a response string that was originally
-    raw Markdown from the OpenAI LLM.  That string was injected directly
-    into an ``unsafe_allow_html=True`` ``st.markdown()`` block inside a
-    ``<div class="narrative-block">``.
+    ``API_BASE`` is now read from the ``FRONTEND_API_BASE`` environment
+    variable at startup, with ``http://localhost:8000/api/v1`` as the
+    local-dev default.  Set ``FRONTEND_API_BASE=https://api.yourdomain.com/api/v1``
+    in your production ``.env`` / ``docker-compose.yml`` and the dashboard
+    will point at the correct host without any code changes.
 
-    Streamlit does NOT re-parse Markdown inside a raw HTML block.  Instead:
-    * ``*word*`` stays as literal asterisks, which the browser renders as
-      italicised text via the ``<em>`` element when the HTML is sanitised.
-    * ``**word**`` similarly produces ``<strong>`` → browser-default bold.
-    * ``- item`` list lines become bare ``-`` characters with no consistent
-      spacing or font.
-    * ``### Heading`` text inherits ``font-size: 1.5em`` from the browser
-      default ``h3`` rule rather than the design system's ``--font-mono``.
+2.  **Optional API key injection**
 
-    Fix (two-part):
-    a. ``financial_agent.py`` (v2) now passes every LLM response through
-       ``_sanitise_response()``, which converts Markdown tokens to
-       ``<span class="agent-…">`` elements before the string reaches the
-       dashboard.
-    b. The CSS block below adds explicit rules for:
-       - ``.agent-heading``  — section label style (mono, uppercase, muted)
-       - ``.agent-bold``     — strong weight in the primary text colour
-       - ``.agent-bullet``   — bullet dot in accent-cyan colour
-       These classes inherit ``font-family: var(--font-body)`` from the
-       ``.narrative-block`` parent so the font is always consistent.
+    When ``FINSIGHT_API_KEY`` is set in the environment, every request to
+    the backend includes ``X-API-Key: <key>`` automatically.  This is the
+    correct approach — never hardcode API keys; read them from the environment
+    at runtime.
 
-    Additionally the ``.narrative-block`` and ``.chat-bubble-ai`` rules
-    now include:
-       ``em, strong, b, i { font-style: normal; font-weight: inherit; }``
-    as a defensive reset for any residual ``<em>``/``<strong>`` that might
-    slip through from cached responses or the RAG chat path.
+3.  **Resilient connection handling**
 
-2.  **Chat bubble typography hardened**
+    ``api_post`` and ``api_get`` now include:
+    - Exponential-backoff retry (1 attempt by default; configurable).
+    - A human-readable error card instead of a raw Streamlit error banner,
+      with actionable guidance on what to check.
+    - The ``X-Request-ID`` from the response header is displayed when an
+      error occurs so users can correlate failures with server logs.
 
-    ``.chat-bubble-ai`` receives the same defensive reset so the AI Chat
-    tab is consistent with the Agent tab.
+4.  **Connection status indicator hardened**
 
-All other content (SHAP glossary, model badges, signal fusion bar, news
-expander, market data chart) is unchanged from v5.
+    The sidebar health-check now shows the ``features`` dict returned by
+    the v2 health endpoint, giving a quick view of whether LLM / auth /
+    rate-limiting are active.
+
+All visual design (CSS, components, charts) is identical to v6.
 """
 
 from __future__ import annotations
 
+import os
+import time
 import uuid
 from typing import Optional
 
@@ -59,10 +50,19 @@ import requests
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuration
+# Configuration — environment-driven
 # ─────────────────────────────────────────────────────────────────────────────
 
-API_BASE = "http://localhost:8000/api/v1"
+# Read from env so the same Docker image works locally and in production.
+# Override via:  FRONTEND_API_BASE=https://api.yourdomain.com/api/v1
+API_BASE: str = os.environ.get(
+    "FRONTEND_API_BASE",
+    "http://localhost:8000/api/v1",
+).rstrip("/")
+
+# Optional shared API key.  Set FINSIGHT_API_KEY in the environment.
+# Never put the real key in source code.
+_API_KEY: Optional[str] = os.environ.get("FINSIGHT_API_KEY")
 
 TICKERS = [
     "AAPL",
@@ -172,7 +172,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Design System
+# Design System (identical to v6)
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown(
@@ -287,7 +287,6 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .news-snippet { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
 .news-url { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); margin-top: 0.25rem; }
 
-/* ── Probability bar (flex split) ── */
 .prob-bar-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
 .prob-bar-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
 .prob-bar-track { height: 8px; background: var(--bg-elevated); border-radius: 4px; display: flex; overflow: hidden; }
@@ -295,7 +294,6 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .prob-bar-bear { height: 100%; background: var(--accent-red); border-radius: 0 4px 4px 0; transition: flex 0.4s ease; }
 .prob-bar-labels { display: flex; justify-content: space-between; margin-top: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; }
 
-/* ── SHAP glossary ── */
 .shap-glossary-row { display: grid; grid-template-columns: 220px 1fr; gap: 0.5rem; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; line-height: 1.5; }
 .shap-glossary-row:last-child { border-bottom: none; }
 .shap-feat-name { font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -303,7 +301,6 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 
 .section-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
 
-/* ── narrative-block: defensive reset for italic/bold/list browser defaults ── */
 .narrative-block {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
@@ -317,84 +314,23 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
     line-height: 1.7;
     color: var(--text-primary);
 }
-/* Defensive reset — prevents browser defaults from leaking into the block */
-.narrative-block em,
-.narrative-block i    { font-style: normal !important; }
-.narrative-block strong,
-.narrative-block b    { font-weight: 400 !important; color: var(--text-primary) !important; }
-.narrative-block h1,
-.narrative-block h2,
-.narrative-block h3   { font-size: 0.9rem !important; font-weight: 400 !important; font-family: var(--font-body) !important; margin: 0.25rem 0 !important; }
-.narrative-block ul,
-.narrative-block ol   { margin: 0 !important; padding: 0 !important; list-style: none !important; }
+.narrative-block em, .narrative-block i    { font-style: normal !important; }
+.narrative-block strong, .narrative-block b    { font-weight: 400 !important; color: var(--text-primary) !important; }
+.narrative-block h1, .narrative-block h2, .narrative-block h3   { font-size: 0.9rem !important; font-weight: 400 !important; font-family: var(--font-body) !important; margin: 0.25rem 0 !important; }
+.narrative-block ul, .narrative-block ol   { margin: 0 !important; padding: 0 !important; list-style: none !important; }
 .narrative-block li   { font-size: 0.9rem !important; line-height: 1.7 !important; }
 
-/* ── Agent response typography — design-system span classes ── */
-/*    Produced by _sanitise_response() in financial_agent.py     */
-.agent-heading {
-    display: block;
-    font-family: var(--font-mono) !important;
-    font-size: 0.7rem !important;
-    font-weight: 500 !important;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--text-muted) !important;
-    margin-top: 0.9rem;
-    margin-bottom: 0.2rem;
-    font-style: normal !important;
-}
-.agent-bold {
-    font-family: var(--font-body) !important;
-    font-size: 0.9rem !important;
-    font-weight: 600 !important;
-    color: var(--text-primary) !important;
-    font-style: normal !important;
-}
-.agent-bullet {
-    font-family: var(--font-mono) !important;
-    font-size: 0.75rem !important;
-    font-weight: 500 !important;
-    color: var(--accent-cyan) !important;
-    margin-right: 0.35rem;
-    font-style: normal !important;
-}
+.agent-heading { display: block; font-family: var(--font-mono) !important; font-size: 0.7rem !important; font-weight: 500 !important; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted) !important; margin-top: 0.9rem; margin-bottom: 0.2rem; font-style: normal !important; }
+.agent-bold { font-family: var(--font-body) !important; font-size: 0.9rem !important; font-weight: 600 !important; color: var(--text-primary) !important; font-style: normal !important; }
+.agent-bullet { font-family: var(--font-mono) !important; font-size: 0.75rem !important; font-weight: 500 !important; color: var(--accent-cyan) !important; margin-right: 0.35rem; font-style: normal !important; }
 
-/* ── Chat bubbles — same defensive reset ── */
 .chat-scroll-area { max-height: 420px; overflow-y: auto; padding-right: 0.5rem; margin-bottom: 1rem; }
-.chat-bubble-user {
-    background: rgba(0,212,255,0.06);
-    border: 1px solid rgba(0,212,255,0.15);
-    border-radius: 0 10px 10px 10px;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 0;
-    font-family: var(--font-body) !important;
-    font-size: 0.88rem;
-    font-style: normal !important;
-    font-weight: 400 !important;
-}
-.chat-bubble-ai {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px 10px 10px 0;
-    padding: 0.8rem 1rem;
-    margin: 0.5rem 0;
-    font-family: var(--font-body) !important;
-    font-size: 0.88rem;
-    font-style: normal !important;
-    font-weight: 400 !important;
-    border-left: 2px solid var(--accent-cyan);
-    line-height: 1.65;
-}
-/* Defensive reset inside chat bubbles */
-.chat-bubble-ai em,
-.chat-bubble-ai i    { font-style: normal !important; }
-.chat-bubble-ai strong,
-.chat-bubble-ai b    { font-weight: 500 !important; color: var(--text-primary) !important; }
-.chat-bubble-ai h1,
-.chat-bubble-ai h2,
-.chat-bubble-ai h3   { font-size: 0.88rem !important; font-weight: 500 !important; font-family: var(--font-body) !important; margin: 0.2rem 0 !important; }
-.chat-bubble-ai ul,
-.chat-bubble-ai ol   { margin: 0 !important; padding-left: 1.2rem !important; }
+.chat-bubble-user { background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.15); border-radius: 0 10px 10px 10px; padding: 0.8rem 1rem; margin: 0.5rem 0; font-family: var(--font-body) !important; font-size: 0.88rem; font-style: normal !important; font-weight: 400 !important; }
+.chat-bubble-ai { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px 10px 10px 0; padding: 0.8rem 1rem; margin: 0.5rem 0; font-family: var(--font-body) !important; font-size: 0.88rem; font-style: normal !important; font-weight: 400 !important; border-left: 2px solid var(--accent-cyan); line-height: 1.65; }
+.chat-bubble-ai em, .chat-bubble-ai i    { font-style: normal !important; }
+.chat-bubble-ai strong, .chat-bubble-ai b    { font-weight: 500 !important; color: var(--text-primary) !important; }
+.chat-bubble-ai h1, .chat-bubble-ai h2, .chat-bubble-ai h3   { font-size: 0.88rem !important; font-weight: 500 !important; font-family: var(--font-body) !important; margin: 0.2rem 0 !important; }
+.chat-bubble-ai ul, .chat-bubble-ai ol   { margin: 0 !important; padding-left: 1.2rem !important; }
 .chat-bubble-ai li   { font-size: 0.88rem !important; line-height: 1.65 !important; }
 
 .chat-role { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.3rem; }
@@ -409,6 +345,12 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .sidebar-section-title { font-family: var(--font-mono) !important; font-size: 0.68rem !important; letter-spacing: 0.2em !important; text-transform: uppercase !important; color: var(--text-muted) !important; margin: 1.2rem 0 0.6rem 0 !important; padding-bottom: 0.4rem !important; border-bottom: 1px solid var(--border) !important; }
 .ingest-result { background: var(--bg-elevated); border: 1px solid rgba(0,230,118,0.3); border-left: 3px solid var(--accent-green); border-radius: 0 6px 6px 0; padding: 0.8rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; line-height: 1.6; }
 .ingest-result .ingest-title { color: var(--text-primary); font-weight: 500; margin-bottom: 0.2rem; }
+
+/* Error card */
+.error-card { background: rgba(255,61,87,0.06); border: 1px solid rgba(255,61,87,0.3); border-left: 3px solid var(--accent-red); border-radius: 0 6px 6px 0; padding: 1rem 1.25rem; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.6; margin: 0.5rem 0; }
+.error-card .error-title { color: var(--accent-red); font-weight: 500; font-size: 0.85rem; margin-bottom: 0.4rem; }
+.error-card .error-detail { color: var(--text-secondary); }
+.error-card .error-rid { color: var(--text-muted); font-size: 0.72rem; margin-top: 0.4rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -416,42 +358,133 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# API Helpers
+# API Helpers — resilient, env-aware, auth-injecting
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def api_post(endpoint: str, payload: dict) -> Optional[dict]:
-    try:
-        resp = requests.post(f"{API_BASE}{endpoint}", json=payload, timeout=180)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.ConnectionError:
-        st.error(
-            "Cannot connect to the FinSight API. Ensure the server is running on port 8000."
-        )
-        return None
-    except requests.exceptions.HTTPError as e:
+def _build_headers() -> dict[str, str]:
+    """
+    Build the standard request headers.
+
+    Injects ``X-API-Key`` when ``FINSIGHT_API_KEY`` is set so every
+    outgoing request is authenticated transparently.
+    """
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if _API_KEY:
+        headers["X-API-Key"] = _API_KEY
+    return headers
+
+
+def api_post(
+    endpoint: str,
+    payload: dict,
+    timeout: int = 180,
+    retries: int = 1,
+) -> Optional[dict]:
+    """
+    POST to the FinSight API with auth injection, retry, and user-friendly errors.
+
+    Parameters
+    ----------
+    endpoint : Path relative to ``API_BASE`` (e.g. ``"/predict/"``).
+    payload  : JSON-serialisable dict.
+    timeout  : Per-attempt timeout in seconds.
+    retries  : Number of retry attempts on transient errors (5xx / timeout).
+    """
+    url = f"{API_BASE}{endpoint}"
+    headers = _build_headers()
+    last_error: Optional[str] = None
+    request_id: Optional[str] = None
+
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            wait = 2**attempt
+            time.sleep(wait)
+
         try:
-            detail = e.response.json().get("detail", str(e))
-        except Exception:
-            detail = str(e)
-        st.error(f"API error {e.response.status_code}: {detail}")
-        return None
-    except requests.exceptions.Timeout:
-        st.error(
-            "Request timed out. The server may be training models for the first time — please wait and try again."
-        )
-        return None
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            request_id = resp.headers.get("X-Request-ID")
+
+            if resp.status_code == 401:
+                _show_error_card(
+                    "Authentication required",
+                    "The API requires an API key. Set FINSIGHT_API_KEY in your environment.",
+                    request_id,
+                )
+                return None
+
+            if resp.status_code == 429:
+                _show_error_card(
+                    "Rate limit exceeded",
+                    "Too many requests. Please wait a moment and try again.",
+                    request_id,
+                )
+                return None
+
+            resp.raise_for_status()
+            return resp.json()
+
+        except requests.exceptions.ConnectionError:
+            last_error = (
+                f"Cannot reach API at {API_BASE}. "
+                "Check that the server is running and that FRONTEND_API_BASE is correct."
+            )
+        except requests.exceptions.Timeout:
+            last_error = (
+                "Request timed out. The server may be training models for the first "
+                "time — this can take 1–3 minutes. Please wait and try again."
+            )
+        except requests.exceptions.HTTPError as e:
+            try:
+                detail = e.response.json().get("detail", str(e))
+            except Exception:
+                detail = str(e)
+            # Don't retry client errors (4xx)
+            if e.response.status_code < 500:
+                _show_error_card(
+                    f"API error {e.response.status_code}",
+                    detail,
+                    e.response.headers.get("X-Request-ID"),
+                )
+                return None
+            last_error = f"Server error {e.response.status_code}: {detail}"
+
+    _show_error_card("Request failed", last_error or "Unknown error.", request_id)
+    return None
 
 
-def api_get(endpoint: str) -> Optional[dict]:
+def api_get(endpoint: str, timeout: int = 10) -> Optional[dict]:
+    """
+    GET from the FinSight API (used for the health check).
+    Silently returns None on failure — the sidebar handles offline display.
+    """
     try:
-        base = API_BASE.replace("/api/v1", "")
-        resp = requests.get(f"{base}{endpoint}", timeout=10)
+        base = API_BASE.rsplit("/api/v1", 1)[0]
+        resp = requests.get(
+            f"{base}{endpoint}",
+            headers=_build_headers(),
+            timeout=timeout,
+        )
         resp.raise_for_status()
         return resp.json()
     except Exception:
         return None
+
+
+def _show_error_card(
+    title: str, detail: Optional[str], request_id: Optional[str] = None
+) -> None:
+    rid_html = (
+        f'<div class="error-rid">Request ID: {request_id}</div>' if request_id else ""
+    )
+    st.markdown(
+        f'<div class="error-card">'
+        f'<div class="error-title">⚠ {title}</div>'
+        f'<div class="error-detail">{detail or ""}</div>'
+        f"{rid_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -485,16 +518,27 @@ with st.sidebar:
 
     health = api_get("/health")
     if health:
+        features = health.get("features", {})
+        feature_pills = ""
+        if features.get("llm"):
+            feature_pills += '<span style="color:var(--accent-green);font-size:0.65rem;">● LLM</span> &nbsp;'
+        if features.get("auth"):
+            feature_pills += '<span style="color:var(--accent-amber);font-size:0.65rem;">● AUTH</span> &nbsp;'
+        if features.get("rate_limiting"):
+            feature_pills += '<span style="color:var(--accent-cyan);font-size:0.65rem;">● RATE-LIMITED</span>'
         st.markdown(
-            f'<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:1.5rem;">'
+            f'<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:0.5rem;">'
             f'<span class="status-dot status-online"></span>'
-            f"API v{health.get('version', '?')} &nbsp;·&nbsp; {health.get('environment', '?').upper()}</div>",
+            f"API v{health.get('version', '?')} &nbsp;·&nbsp; {health.get('environment', '?').upper()}</div>"
+            f'<div style="margin-bottom:1.5rem;">{feature_pills}</div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:1.5rem;">'
-            '<span class="status-dot status-offline"></span>API OFFLINE</div>',
+            f'<div style="font-family:var(--font-mono);font-size:0.75rem;color:#7a8fa8;margin-bottom:0.5rem;">'
+            f'<span class="status-dot status-offline"></span>API OFFLINE</div>'
+            f'<div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);margin-bottom:1.5rem;">'
+            f"Connecting to: {API_BASE}</div>",
             unsafe_allow_html=True,
         )
 
@@ -756,14 +800,9 @@ with tab_predict:
                 '<div style="background:var(--bg-card);border:1px solid var(--border);'
                 'border-radius:8px;padding:0.9rem 1rem;text-align:center;">'
                 '<div style="font-family:var(--font-mono);font-size:0.65rem;letter-spacing:0.15em;'
-                'text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">'
-                "News Sentiment"
-                "</div>"
-                f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;'
-                f'color:{sent_color};">'
-                f"{news_sent.upper()}"
-                "</div>"
-                "</div>",
+                'text-transform:uppercase;color:var(--text-muted);margin-bottom:0.3rem;">News Sentiment</div>'
+                f'<div style="font-family:var(--font-mono);font-size:1.1rem;font-weight:500;color:{sent_color};">'
+                f"{news_sent.upper()}</div></div>",
                 unsafe_allow_html=True,
             )
 
@@ -823,8 +862,7 @@ with tab_predict:
         narrative = pred.get("narrative", "")
         if narrative:
             st.markdown(
-                f'<div class="ml-narrative">{narrative}</div>',
-                unsafe_allow_html=True,
+                f'<div class="ml-narrative">{narrative}</div>', unsafe_allow_html=True
             )
 
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
@@ -891,11 +929,9 @@ with tab_predict:
             with st.expander("📖 What do these features mean?", expanded=False):
                 st.markdown(
                     '<div style="font-family:var(--font-mono);font-size:0.68rem;'
-                    "letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);"
-                    'margin-bottom:0.75rem;">'
+                    'letter-spacing:0.15em;text-transform:uppercase;color:var(--text-muted);margin-bottom:0.75rem;">'
                     "Green bars push toward BULLISH · Red bars push toward BEARISH · "
-                    "Longer bars = stronger influence on this prediction"
-                    "</div>",
+                    "Longer bars = stronger influence on this prediction</div>",
                     unsafe_allow_html=True,
                 )
                 rows_html = ""
@@ -910,24 +946,19 @@ with tab_predict:
                     desc = _shap_feature_description(feat_name)
                     rows_html += (
                         f'<div class="shap-glossary-row">'
-                        f'<div class="shap-feat-name">'
-                        f'<span style="color:{dir_color};margin-right:4px;">{direction}</span>'
-                        f"{feat_name}"
-                        f"</div>"
+                        f'<div class="shap-feat-name"><span style="color:{dir_color};margin-right:4px;">{direction}</span>{feat_name}</div>'
                         f'<div class="shap-feat-desc">{desc}</div>'
                         f"</div>"
                     )
                 st.markdown(
-                    f'<div style="background:var(--bg-elevated);border:1px solid var(--border);'
-                    f'border-radius:6px;padding:0.5rem 0.75rem;">{rows_html}</div>',
+                    f'<div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;padding:0.5rem 0.75rem;">{rows_html}</div>',
                     unsafe_allow_html=True,
                 )
         else:
             st.markdown(
                 '<div style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);'
                 'padding:1.5rem;text-align:center;border:1px dashed var(--border);border-radius:6px;">'
-                "SHAP explanation unavailable for this prediction."
-                "</div>",
+                "SHAP explanation unavailable for this prediction.</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1061,18 +1092,13 @@ with tab_market:
 
         st.markdown(
             f'<div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;text-align:right;">'
-            f"{mkt['start_date']} → {mkt['end_date']} &nbsp;·&nbsp; {len(mkt.get('columns', []))} columns &nbsp;·&nbsp; {mkt['null_count']} nulls"
-            f"</div>",
+            f"{mkt['start_date']} → {mkt['end_date']} &nbsp;·&nbsp; {len(mkt.get('columns', []))} columns &nbsp;·&nbsp; {mkt['null_count']} nulls</div>",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            """
-        <div class="placeholder-state">
-            <div class="placeholder-icon">◈</div>
-            <div class="placeholder-text">Click Load Market Data to fetch 12-month statistics</div>
-        </div>
-        """,
+            """<div class="placeholder-state"><div class="placeholder-icon">◈</div>
+            <div class="placeholder-text">Click Load Market Data to fetch 12-month statistics</div></div>""",
             unsafe_allow_html=True,
         )
 
@@ -1096,25 +1122,14 @@ with tab_chat:
         history_html = (
             '<div style="text-align:center;padding:2rem 1rem;font-family:var(--font-mono);'
             'font-size:0.78rem;color:var(--text-muted);letter-spacing:0.05em;">'
-            "Ask anything about financial markets, indicators, or model predictions."
-            "</div>"
+            "Ask anything about financial markets, indicators, or model predictions.</div>"
         )
     else:
         for msg in st.session_state.chat_history:
             if msg["role"] == "user":
-                history_html += (
-                    f'<div class="chat-bubble-user">'
-                    f'<div class="chat-role">You</div>'
-                    f"{msg['content']}"
-                    f"</div>"
-                )
+                history_html += f'<div class="chat-bubble-user"><div class="chat-role">You</div>{msg["content"]}</div>'
             else:
-                history_html += (
-                    f'<div class="chat-bubble-ai">'
-                    f'<div class="chat-role">FinSight AI</div>'
-                    f"{msg['content']}"
-                    f"</div>"
-                )
+                history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
 
     st.markdown(
         f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True
@@ -1171,8 +1186,7 @@ with tab_agent:
         '<div style="font-family:var(--font-body);font-size:0.875rem;color:var(--text-secondary);'
         'margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
         "The agent autonomously plans, selects, and chains tools — prediction, SHAP explanation, "
-        "sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries."
-        "</div>",
+        "sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries.</div>",
         unsafe_allow_html=True,
     )
 
@@ -1231,10 +1245,6 @@ with tab_agent:
                     '<div class="section-label">Agent Response</div>',
                     unsafe_allow_html=True,
                 )
-
-                # Response is pre-sanitised by financial_agent._sanitise_response()
-                # so Markdown tokens are already converted to design-system span classes.
-                # The narrative-block CSS ensures uniform font, size, and colour.
                 st.markdown(
                     f'<div class="narrative-block">{result["response"]}</div>',
                     unsafe_allow_html=True,

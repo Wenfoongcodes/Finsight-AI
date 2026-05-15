@@ -1,6 +1,36 @@
 """
-FinSight AI — Phase 7: FastAPI Application Entry Point
-Configures middleware, exception handlers, and mounts all routers.
+FinSight AI — FastAPI Application Entry Point (v2)
+
+Changes vs v1
+-------------
+
+1.  **Public deployment readiness**
+
+    ``ALLOWED_ORIGINS`` is now read from ``settings.ALLOWED_ORIGINS`` which
+    parses the ``ALLOWED_ORIGINS`` environment variable at startup.  Set it to
+    ``"*"`` for a fully open API or to a comma-separated list of production
+    domain(s).
+
+2.  **Security middleware added**
+
+    ``SecurityMiddleware`` from ``app.core.security`` is registered before the
+    CORS middleware.  It provides:
+    - Optional API-key authentication (``API_KEY_ENABLED=true``).
+    - Per-IP in-memory rate limiting (``RATE_LIMIT_ENABLED=true``).
+    - ``X-Request-ID`` header on every response.
+    - Hardened security response headers.
+
+3.  **Startup validation**
+
+    The lifespan handler now validates critical configuration at boot and
+    logs clear, actionable warnings rather than failing silently later during
+    the first request.
+
+4.  **Request logging middleware**
+
+    Every request is logged at INFO level with method, path, status, duration,
+    and request ID so production logs are immediately useful without an APM
+    tool.
 """
 
 from __future__ import annotations
@@ -27,9 +57,54 @@ from app.core.exceptions import (
     ModelNotFoundError,
 )
 from app.core.logging_config import get_logger, setup_logging
+from app.core.security import SecurityMiddleware
 from configs.settings import settings
 
 logger = get_logger("app")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup validation helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _validate_startup_config() -> None:
+    """
+    Emit structured warnings for missing or insecure configuration at boot.
+
+    Does NOT raise — the application can start in a degraded state (e.g.
+    LLM features unavailable) and return informative errors at request time.
+    """
+    warnings: list[str] = []
+
+    if not settings.OPENAI_API_KEY:
+        warnings.append(
+            "OPENAI_API_KEY is not set — RAG chat, agent, and signal fusion "
+            "features will be unavailable."
+        )
+
+    if settings.API_KEY_ENABLED and not settings.API_SECRET_KEY:
+        warnings.append(
+            "API_KEY_ENABLED=true but API_SECRET_KEY is not set — "
+            "all authenticated requests will be rejected with 401."
+        )
+
+    if settings.ENVIRONMENT == "production":
+        if not settings.API_KEY_ENABLED:
+            warnings.append(
+                "Running in PRODUCTION without API key auth. "
+                "Set API_KEY_ENABLED=true and API_SECRET_KEY to secure the API."
+            )
+        if settings.DEBUG:
+            warnings.append(
+                "DEBUG=true in PRODUCTION — disable before deploying publicly."
+            )
+
+    for w in warnings:
+        logger.warning("[startup] %s", w)
+
+    if not warnings:
+        logger.info("[startup] Configuration validation passed.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,12 +116,21 @@ logger = get_logger("app")
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
     setup_logging(level="DEBUG" if settings.DEBUG else "INFO", log_file="finsight.log")
+
     logger.info(
-        "FinSight AI starting up | env=%s | debug=%s",
+        "FinSight AI starting | env=%s | debug=%s | auth=%s | rate_limit=%s | "
+        "cors_origins=%s",
         settings.ENVIRONMENT,
         settings.DEBUG,
+        settings.API_KEY_ENABLED,
+        settings.RATE_LIMIT_ENABLED,
+        settings.ALLOWED_ORIGINS,
     )
+
+    _validate_startup_config()
+
     yield
+
     logger.info("FinSight AI shutting down.")
 
 
@@ -67,24 +151,46 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
+        # In production, disable interactive docs if you want to lock down the API
+        # docs_url=None if settings.ENVIRONMENT == "production" else "/docs",
     )
 
+    # ── Security middleware (first — before CORS so auth runs on all requests) ──
+    app.add_middleware(SecurityMiddleware)
+
     # ── CORS ──────────────────────────────────────────────────────────────────
+    # ``settings.ALLOWED_ORIGINS`` is a Python list parsed from the
+    # ``ALLOWED_ORIGINS`` env var (comma-separated, or "*").
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID", "X-Process-Time"],
     )
 
-    # ── Request Timing Middleware ─────────────────────────────────────────────
+    # ── Request timing + structured access log ────────────────────────────────
     @app.middleware("http")
-    async def add_process_time(request: Request, call_next):
+    async def access_log_middleware(request: Request, call_next):
         start = time.perf_counter()
         response = await call_next(request)
         elapsed = time.perf_counter() - start
-        response.headers["X-Process-Time"] = f"{elapsed:.4f}s"
+
+        # Attach timing header
+        elapsed_str = f"{elapsed:.4f}s"
+        response.headers["X-Process-Time"] = elapsed_str
+
+        # Structured access log — useful for log aggregation (Loki, CloudWatch)
+        request_id = getattr(request.state, "request_id", "-")
+        logger.info(
+            "%s %s %s | dur=%s | rid=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_str,
+            request_id,
+        )
         return response
 
     # ── Exception Handlers ────────────────────────────────────────────────────
@@ -126,11 +232,17 @@ def create_app() -> FastAPI:
 
     # ── Health Check ──────────────────────────────────────────────────────────
     @app.get("/health", tags=["System"])
-    async def health_check():
+    async def health_check(request: Request):
         return {
             "status": "ok",
             "version": settings.VERSION,
             "environment": settings.ENVIRONMENT,
+            "request_id": getattr(request.state, "request_id", None),
+            "features": {
+                "llm": bool(settings.OPENAI_API_KEY),
+                "auth": settings.API_KEY_ENABLED,
+                "rate_limiting": settings.RATE_LIMIT_ENABLED,
+            },
         }
 
     # ── Routers ───────────────────────────────────────────────────────────────
@@ -151,9 +263,11 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.DEBUG,
         log_level="debug" if settings.DEBUG else "info",
+        # These are important for production: set workers > 1 via env/CLI
+        # workers=1 here because reload=True is incompatible with workers>1
     )

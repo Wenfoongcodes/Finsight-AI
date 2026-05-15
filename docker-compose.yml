@@ -1,15 +1,84 @@
 version: "3.9"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FinSight AI — Production Docker Compose
+#
+# Services
+# --------
+#   nginx     — TLS termination + reverse proxy (ports 80 / 443 exposed)
+#   api       — FastAPI backend (internal port 8000, not exposed directly)
+#   dashboard — Streamlit frontend (internal port 8501, proxied via nginx)
+#
+# Deployment
+# ----------
+# 1. Copy .env.example → .env and fill in your secrets.
+# 2. Place your TLS cert at docker/nginx/certs/fullchain.pem
+#    and private key at docker/nginx/certs/privkey.pem.
+#    (Let's Encrypt / Certbot output, or a self-signed cert for testing.)
+# 3. docker-compose up --build -d
+#
+# Local / development (no TLS)
+# ----------------------------
+# Run without the nginx service:
+#   docker-compose up api dashboard
+# Then access:
+#   API:       http://localhost:8000
+#   Dashboard: http://localhost:8501
+#
+# Environment variables used by this file
+# ----------------------------------------
+# OPENAI_API_KEY        — required for LLM features
+# API_KEY_ENABLED       — "true" to gate the API behind X-API-Key auth
+# API_SECRET_KEY        — the shared API key (generate with: python -c
+#                         "import secrets; print(secrets.token_urlsafe(32))")
+# ALLOWED_ORIGINS       — comma-separated CORS origins, or "*"
+# RATE_LIMIT_ENABLED    — "true" to enable per-IP rate limiting
+# FRONTEND_API_BASE     — URL the dashboard uses to reach the API
+#                         (e.g. https://api.yourdomain.com/api/v1)
+# FINSIGHT_API_KEY      — same value as API_SECRET_KEY; injected into
+#                         the dashboard so it can authenticate its requests
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
 
-  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  # ── Nginx Reverse Proxy ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: finsight_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_started
+    restart: unless-stopped
+    profiles:
+      # Only starts when you explicitly include the "production" profile:
+      #   docker-compose --profile production up
+      # Omit to run api + dashboard directly (local dev).
+      - production
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile
       target: runtime
     container_name: finsight_api
+    # In production the API is NOT exposed directly — traffic flows through
+    # nginx.  For local dev without nginx, remove the 'profiles' key from
+    # the nginx service and map the port here.
+    expose:
+      - "8000"
     ports:
+      # Expose directly for local development (no nginx).
+      # Remove / comment out in production behind nginx.
       - "8000:8000"
     env_file:
       - .env
@@ -17,8 +86,10 @@ services:
       - ENVIRONMENT=production
       - API_HOST=0.0.0.0
       - API_PORT=8000
+      # Override ALLOWED_ORIGINS in .env to restrict CORS to your domain(s).
+      # Example: ALLOWED_ORIGINS=https://finsight.yourdomain.com
     volumes:
-      # Persist data and model artifacts across container restarts
+      # Persist model artifacts and logs across restarts
       - finsight_data:/app/data
       - finsight_logs:/app/logs
     healthcheck:
@@ -29,7 +100,7 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # ── Streamlit Frontend ───────────────────────────────────────────────────────
+  # ── Streamlit Frontend ────────────────────────────────────────────────────
   dashboard:
     build:
       context: .
@@ -41,12 +112,23 @@ services:
         --server.port=8501
         --server.address=0.0.0.0
         --server.headless=true
+        --server.enableCORS=false
+        --server.enableXsrfProtection=false
+    expose:
+      - "8501"
     ports:
+      # Expose directly for local development (no nginx).
       - "8501:8501"
     env_file:
       - .env
     environment:
-      - API_BASE=http://api:8000/api/v1
+      # The dashboard reads FRONTEND_API_BASE to know where the API lives.
+      # In a Docker network the services communicate by service name.
+      # For production behind nginx, override this in .env with your public URL:
+      #   FRONTEND_API_BASE=https://api.yourdomain.com/api/v1
+      - FRONTEND_API_BASE=${FRONTEND_API_BASE:-http://api:8000/api/v1}
+      # Forward the API key so the dashboard can authenticate its requests.
+      - FINSIGHT_API_KEY=${API_SECRET_KEY:-}
     depends_on:
       api:
         condition: service_healthy
@@ -56,4 +138,6 @@ volumes:
   finsight_data:
     driver: local
   finsight_logs:
+    driver: local
+  nginx_logs:
     driver: local
