@@ -1,42 +1,36 @@
 """
-FinSight AI — Phase 6: Explainable AI Layer (v3)
+FinSight AI — Explainable AI Layer (v4)
 
-Changes vs v2
+Changes vs v3
 -------------
-``SHAPExplainer.__init__()`` now accepts an optional ``X_background``
-parameter (a DataFrame of the full training/inference feature matrix).
 
-Why this matters
-----------------
-Previously, ``_build_explainer()`` was called lazily from inside
-``compute_shap_values(X)`` — where ``X`` was whatever was passed to
-``compute_shap_values``.  When called from ``local_explanation(X_instance)``
-(a 1-row DataFrame), the explainer was initialised with a 1-row background:
+1.  **Deterministic output formatting (Req 2)**
 
-    KernelExplainer(predict_fn, shap.sample(X_background, min(100, 1)))
-                                                            ^^^^^^^^^
-                                                            always 1
+    All numeric values in ``local_explanation()`` and ``generate_narrative()``
+    now use helpers from ``app.core.formatting``:
 
-A 1-row KernelExplainer background produces all-zero SHAP values because
-there is no variance to attribute — every perturbation of the input looks
-identical to the single background sample.  The result is ``top_features``
-is empty and the SHAP chart renders nothing.
+    - SHAP values              → ``round_shap()``   (4 d.p.)
+    - Feature values snapshot  → ``round_shap()``   (4 d.p., same scale)
+    - Probabilities (raw)      → ``round_prob()``   (4 d.p.)
+    - Probability display      → ``fmt_prob()``     ("72.3%")
 
-Fix: ``SHAPExplainer`` is constructed with the full feature matrix
-(``X_background=X_aligned``) by the caller (``PredictionService``).
-``_build_explainer`` now uses this stored background for both
-``KernelExplainer`` and as the dataset passed to ``TreeExplainer``.
-For ``TreeExplainer`` the background is passed as the ``data`` argument
-so expected_value is computed over the real data distribution (improves
-the accuracy of the SHAP baseline for CalibratedClassifierCV models).
+    The ``generate_narrative()`` method no longer builds its own f-string
+    template.  It delegates entirely to the canonical
+    ``build_prediction_narrative()`` helper in ``app.core.formatting``, which
+    is the single implementation shared with any future caller.
 
-Backward compatibility
-----------------------
-``X_background`` defaults to ``None``.  When ``None``, ``_build_explainer``
-falls back to using the data passed into ``compute_shap_values``, preserving
-the previous behaviour for any callers that do not supply a background.
+2.  **Confidence threshold de-duplication (Req 2)**
 
-All other logic (SHAP/LIME, narrative, confidence thresholds) is unchanged.
+    The private constants ``_CONFIDENCE_HIGH_DELTA`` and
+    ``_CONFIDENCE_MODERATE_DELTA`` are removed.  ``generate_narrative()``
+    now calls the single ``confidence_label()`` function from
+    ``app.core.formatting``, which owns the thresholds.
+
+    Previously ``prediction_service.py`` had its own identical copy of the
+    threshold logic.  Both callers now use the same function.
+
+All SHAP/LIME explainer logic and the ``_build_explainer`` background-data
+fix introduced in v3 are unchanged.
 """
 
 from __future__ import annotations
@@ -47,13 +41,15 @@ import numpy as np
 import pandas as pd
 
 from app.core.exceptions import ExplainabilityError
+from app.core.formatting import (
+    build_prediction_narrative,
+    confidence_label,
+    round_prob,
+    round_shap,
+)
 from app.core.logging_config import get_logger
 
 logger = get_logger("explainability")
-
-# ── Shared confidence thresholds (must match prediction_service._confidence_label) ──
-_CONFIDENCE_HIGH_DELTA = 0.15
-_CONFIDENCE_MODERATE_DELTA = 0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,9 +79,6 @@ class SHAPExplainer:
                              to anchor the expected_value baseline.  When ``None``,
                              the data passed to ``compute_shap_values`` is used as
                              the fallback background (legacy behaviour).
-
-        Raises:
-            ImportError: If shap is not installed.
         """
         try:
             import shap
@@ -105,9 +98,8 @@ class SHAPExplainer:
         Unwrap composite estimators to reach the raw base model.
 
         Priority:
-        1. sklearn Pipeline  → unwrap via ``named_steps['clf']``
-        2. CalibratedClassifierCV → unwrap via
-           ``.calibrated_classifiers_[0].estimator``
+        1. sklearn Pipeline  → ``named_steps['clf']``
+        2. CalibratedClassifierCV → ``.calibrated_classifiers_[0].estimator``
         """
         clf = self.model
 
@@ -130,12 +122,8 @@ class SHAPExplainer:
         Lazy-initialise the SHAP explainer.
 
         Background priority:
-        1. ``self.X_background`` (full matrix supplied at construction) — preferred.
-        2. ``X_fallback``        (data passed to ``compute_shap_values``) — legacy.
-
-        Using the full matrix as background ensures KernelExplainer has a
-        meaningful distribution and TreeExplainer's expected_value is computed
-        over the real data distribution rather than a single inference row.
+        1. ``self.X_background`` (full matrix supplied at construction).
+        2. ``X_fallback``        (data passed to ``compute_shap_values``).
         """
         if self._explainer is not None:
             return
@@ -149,8 +137,6 @@ class SHAPExplainer:
                 kw in model_type
                 for kw in ["xgb", "lgbm", "randomforest", "gradientboosting"]
             ):
-                # Pass background data so TreeExplainer computes expected_value
-                # over the real distribution (improves calibration-aware baseline).
                 self._explainer = self._shap.TreeExplainer(clf, data=background)
                 logger.info("Using TreeExplainer for %s", type(clf).__name__)
             else:
@@ -226,15 +212,19 @@ class SHAPExplainer:
 
         Returns:
             DataFrame with ``'feature'`` and ``'mean_abs_shap'`` columns.
+            ``mean_abs_shap`` values are rounded via ``round_shap()``.
         """
         shap_values = self.compute_shap_values(X)
         mean_abs = np.abs(shap_values).mean(axis=0)
-        return (
+        df = (
             pd.DataFrame({"feature": self.feature_columns, "mean_abs_shap": mean_abs})
             .sort_values("mean_abs_shap", ascending=False)
             .head(top_n)
             .reset_index(drop=True)
         )
+        # Apply canonical rounding
+        df["mean_abs_shap"] = df["mean_abs_shap"].map(round_shap)
+        return df
 
     def local_explanation(
         self,
@@ -244,10 +234,16 @@ class SHAPExplainer:
         """
         Local SHAP explanation for a single prediction instance.
 
-        The ``prediction_probability`` and ``predicted_class`` fields returned
-        here are computed from the raw (uncalibrated) SHAP values.  They are
-        **not** used in ``generate_narrative()`` — the authoritative calibrated
-        values from ``PredictionService`` override them.
+        All numeric values use canonical rounding:
+        - ``base_value``              → ``round_prob()``  (4 d.p.)
+        - ``prediction_probability``  → ``round_prob()``  (4 d.p.)
+        - ``shap_value``              → ``round_shap()``  (4 d.p.)
+        - ``feature_value``           → ``round_shap()``  (4 d.p.)
+
+        The ``prediction_probability`` and ``predicted_class`` fields are
+        SHAP-internal (uncalibrated) and are NOT used in
+        ``generate_narrative()`` — the authoritative calibrated values from
+        ``PredictionService`` override them.
 
         Args:
             X_instance: Single-row DataFrame (1 × n_features).
@@ -268,7 +264,7 @@ class SHAPExplainer:
             base_value = float(ev)
 
         shap_row = shap_values[0]
-        pred_prob = float(np.clip(base_value + shap_row.sum(), 0.0, 1.0))
+        pred_prob_raw = float(np.clip(base_value + shap_row.sum(), 0.0, 1.0))
 
         feature_shap = sorted(
             zip(self.feature_columns, shap_row.tolist()),
@@ -277,19 +273,19 @@ class SHAPExplainer:
         )
 
         return {
-            "base_value": round(base_value, 4),
-            "prediction_probability": round(
-                pred_prob, 4
+            "base_value": round_prob(base_value),
+            "prediction_probability": round_prob(
+                pred_prob_raw
             ),  # SHAP-internal, uncalibrated
             "predicted_class": int(
-                pred_prob >= 0.5
+                pred_prob_raw >= 0.5
             ),  # SHAP-internal, do NOT use for display
             "top_features": [
                 {
                     "feature": f,
-                    "shap_value": round(v, 4),
+                    "shap_value": round_shap(v),
                     "direction": "bullish" if v > 0 else "bearish",
-                    "feature_value": round(float(X_instance.iloc[0][f]), 4),
+                    "feature_value": round_shap(float(X_instance.iloc[0][f])),
                 }
                 for f, v in feature_shap[:top_n]
             ],
@@ -304,6 +300,9 @@ class SHAPExplainer:
     ) -> str:
         """
         Convert a local SHAP explanation to a plain-English narrative.
+
+        Delegates entirely to ``build_prediction_narrative()`` from
+        ``app.core.formatting`` — the canonical, single implementation.
 
         The ``direction`` and ``probability`` in the narrative are derived from
         the **authoritative calibrated model outputs** supplied by
@@ -320,26 +319,21 @@ class SHAPExplainer:
         Returns:
             Human-readable prediction reasoning string.
         """
-        if authoritative_prediction is not None:
-            pred = authoritative_prediction
-        else:
-            pred = local_exp["predicted_class"]
-
-        if authoritative_p_bullish is not None:
-            p_bull = authoritative_p_bullish
-        else:
-            p_bull = local_exp["prediction_probability"]
+        pred = (
+            authoritative_prediction
+            if authoritative_prediction is not None
+            else local_exp["predicted_class"]
+        )
+        p_bull = (
+            authoritative_p_bullish
+            if authoritative_p_bullish is not None
+            else local_exp["prediction_probability"]
+        )
 
         direction = "BULLISH (UP)" if pred == 1 else "BEARISH (DOWN)"
+        # Probability shown is the probability of the predicted direction
         prob = p_bull if pred == 1 else (1.0 - p_bull)
-
-        delta = abs(p_bull - 0.5)
-        if delta > _CONFIDENCE_HIGH_DELTA:
-            confidence = "high"
-        elif delta > _CONFIDENCE_MODERATE_DELTA:
-            confidence = "moderate"
-        else:
-            confidence = "low"
+        conf = confidence_label(p_bull)  # single shared implementation
 
         bullish_features = [
             f for f in local_exp["top_features"] if f["direction"] == "bullish"
@@ -348,25 +342,14 @@ class SHAPExplainer:
             f for f in local_exp["top_features"] if f["direction"] == "bearish"
         ][:3]
 
-        parts = [
-            f"{'[' + ticker + '] ' if ticker else ''}"
-            f"Prediction: {direction} "
-            f"(Probability: {prob:.1%}, Confidence: {confidence})\n"
-        ]
-
-        if bullish_features:
-            bull_str = ", ".join(
-                f"{f['feature']} (+{f['shap_value']:.3f})" for f in bullish_features
-            )
-            parts.append(f"Bullish drivers: {bull_str}.")
-
-        if bearish_features:
-            bear_str = ", ".join(
-                f"{f['feature']} ({f['shap_value']:.3f})" for f in bearish_features
-            )
-            parts.append(f"Bearish headwinds: {bear_str}.")
-
-        return " ".join(parts)
+        return build_prediction_narrative(
+            ticker=ticker,
+            direction=direction,
+            prob=prob,
+            confidence=conf,
+            bullish_features=bullish_features,
+            bearish_features=bearish_features,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -410,15 +393,15 @@ class LIMEExplainer:
         """
         Generate LIME local explanation for a single instance.
 
+        Probabilities are rounded via ``round_prob()`` for consistency
+        with the SHAP explainer output schema.
+
         Args:
             X_instance:   Single-row feature DataFrame.
             num_features: Number of features to include.
 
         Returns:
             Dict with feature_contributions and prediction probabilities.
-
-        Raises:
-            ExplainabilityError: If explainer not initialized or fails.
         """
         if self._explainer is None:
             raise ExplainabilityError("Call .fit(X_train) before explain_instance().")
@@ -431,11 +414,11 @@ class LIMEExplainer:
             probs = exp.predict_proba
             return {
                 "prediction_probabilities": {
-                    "bearish": round(float(probs[0]), 4),
-                    "bullish": round(float(probs[1]), 4),
+                    "bearish": round_prob(float(probs[0])),
+                    "bullish": round_prob(float(probs[1])),
                 },
                 "feature_contributions": [
-                    {"feature": feat, "weight": round(weight, 4)}
+                    {"feature": feat, "weight": round_shap(weight)}
                     for feat, weight in exp.as_list()
                 ],
             }

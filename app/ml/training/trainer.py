@@ -1,26 +1,29 @@
 """
-FinSight AI — Enhanced Training Pipeline (v3)
+FinSight AI — Enhanced Training Pipeline (v4)
 
-Changes vs v2
+Changes vs v3
 -------------
-1.  **sklearn ≥ 1.2 compatibility fix for CalibratedClassifierCV.**
 
-    The first positional argument of ``CalibratedClassifierCV`` was renamed
-    from ``base_estimator`` to ``estimator`` in sklearn 1.2.  Using the old
-    name raises a ``FutureWarning`` in sklearn 1.4 and a hard ``TypeError``
-    in sklearn 1.6 (the parameter is fully removed).
+1.  **Deterministic output formatting (Req 2)**
 
-    Since ``requirements/ml.txt`` pins ``scikit-learn==1.5.0``, the warning
-    fires on every training run and will become a breakage on the next pin
-    upgrade.  All four call-sites inside ``train()`` now use the keyword form::
+    All numeric fields produced by ``TrainingResult.to_dict()`` and
+    ``TrainingResult.compute_aggregates()`` now use helpers from
+    ``app.core.formatting``:
 
-        CalibratedClassifierCV(estimator=base_estimator, cv=3, method="sigmoid")
+    - Metrics (AUC, accuracy, F1, MAE, RMSE) → ``round_metric()``  (4 d.p.)
+    - Duration (seconds)                      → ``round()`` with ``DURATION_DECIMAL_PLACES``
+    - Timestamps                              → ``utc_now_iso()``
 
-    No behaviour change — sklearn 1.5 accepts both names, so existing
-    serialised artifacts remain loadable.
+    Inline ``round(..., 4)`` calls are eliminated so a single constant
+    controls precision everywhere.
 
-All other logic (walk-forward splitter, HPO, artifact naming, multi-horizon
-support, automatic trigger detection) is unchanged from v2.
+2.  **Logging precision aligned with ``to_dict()`` (Req 2)**
+
+    ``logger.info`` calls inside the walk-forward loop previously used
+    ``:.3f``.  They now use ``:.4f`` to match the canonical 4-decimal
+    metric precision so log output is consistent with leaderboard JSON.
+
+All walk-forward, HPO, calibration, and artifact logic is unchanged from v3.
 """
 
 from __future__ import annotations
@@ -29,7 +32,6 @@ import json
 import pickle
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,6 +47,11 @@ from sklearn.metrics import (
 )
 
 from app.core.exceptions import ModelNotFoundError, ModelTrainingError
+from app.core.formatting import (
+    DURATION_DECIMAL_PLACES,
+    round_metric,
+    utc_now_iso,
+)
 from app.core.logging_config import get_logger
 from app.ml.models.model_factory import get_model
 from configs.settings import settings
@@ -78,6 +85,11 @@ class FoldResult:
 
 @dataclass
 class TrainingResult:
+    """
+    All float metric fields use ``round_metric()`` (4 d.p.) for consistency
+    with leaderboard JSON and log output.
+    """
+
     model_name: str
     ticker: str
     horizon: str
@@ -95,15 +107,30 @@ class TrainingResult:
     training_duration_s: float = 0.0
 
     def compute_aggregates(self) -> None:
+        """Compute mean metrics with canonical precision."""
         if not self.fold_results:
             return
-        self.mean_accuracy = float(np.mean([f.accuracy for f in self.fold_results]))
-        self.mean_f1 = float(np.mean([f.f1 for f in self.fold_results]))
-        self.mean_roc_auc = float(np.mean([f.roc_auc for f in self.fold_results]))
-        self.mean_mae = float(np.mean([f.mae for f in self.fold_results]))
-        self.mean_rmse = float(np.mean([f.rmse for f in self.fold_results]))
+        self.mean_accuracy = round_metric(
+            float(np.mean([f.accuracy for f in self.fold_results]))
+        )
+        self.mean_f1 = round_metric(float(np.mean([f.f1 for f in self.fold_results])))
+        self.mean_roc_auc = round_metric(
+            float(np.mean([f.roc_auc for f in self.fold_results]))
+        )
+        self.mean_mae = round_metric(float(np.mean([f.mae for f in self.fold_results])))
+        self.mean_rmse = round_metric(
+            float(np.mean([f.rmse for f in self.fold_results]))
+        )
 
     def to_dict(self) -> dict:
+        """
+        Serialise to a JSON-safe dict.
+
+        All float values use canonical precision:
+        - Metrics          → round_metric() = 4 d.p.
+        - Duration         → DURATION_DECIMAL_PLACES = 2 d.p.
+        - Timestamp        → utc_now_iso() format (stored in ``trained_at``)
+        """
         return {
             "model_name": self.model_name,
             "ticker": self.ticker,
@@ -111,12 +138,14 @@ class TrainingResult:
             "trained_at": self.trained_at,
             "n_features": self.n_features,
             "trigger_reason": self.trigger_reason,
-            "mean_accuracy": round(self.mean_accuracy, 4),
-            "mean_f1": round(self.mean_f1, 4),
-            "mean_roc_auc": round(self.mean_roc_auc, 4),
-            "mean_mae": round(self.mean_mae, 4),
-            "mean_rmse": round(self.mean_rmse, 4),
-            "training_duration_s": round(self.training_duration_s, 2),
+            "mean_accuracy": round_metric(self.mean_accuracy),
+            "mean_f1": round_metric(self.mean_f1),
+            "mean_roc_auc": round_metric(self.mean_roc_auc),
+            "mean_mae": round_metric(self.mean_mae),
+            "mean_rmse": round_metric(self.mean_rmse),
+            "training_duration_s": round(
+                self.training_duration_s, DURATION_DECIMAL_PLACES
+            ),
             "best_params": self.best_params,
             "n_folds": len(self.fold_results),
             "feature_columns": self.feature_columns,
@@ -172,14 +201,15 @@ def compute_metrics(
     y_pred: np.ndarray,
     y_prob: np.ndarray,
 ) -> dict:
+    """All returned values are rounded via ``round_metric()``."""
     return {
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
-        "roc_auc": float(
-            roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else 0.5
+        "accuracy": round_metric(float(accuracy_score(y_true, y_pred))),
+        "f1": round_metric(float(f1_score(y_true, y_pred, zero_division=0))),
+        "roc_auc": round_metric(
+            float(roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else 0.5)
         ),
-        "mae": float(mean_absolute_error(y_true, y_prob)),
-        "rmse": float(np.sqrt(mean_squared_error(y_true, y_prob))),
+        "mae": round_metric(float(mean_absolute_error(y_true, y_prob))),
+        "rmse": round_metric(float(np.sqrt(mean_squared_error(y_true, y_prob)))),
     }
 
 
@@ -275,18 +305,12 @@ class ModelTrainer:
 
     Automatic recovery
     ------------------
-    ``load_or_train()`` checks:
-    1. Does the artifact file exist?
-    2. Is it unpicklable without error?
-    3. Do its feature columns match the current feature set?
-
-    If any check fails, it logs the trigger reason and trains a fresh model.
+    ``load_or_train()`` checks artifact existence, integrity, and feature
+    column alignment; triggers a fresh training run on any failure.
 
     sklearn compatibility
     --------------------
-    ``CalibratedClassifierCV`` is called with the ``estimator=`` keyword to
-    maintain compatibility with sklearn ≥ 1.2 where ``base_estimator`` was
-    deprecated, and sklearn ≥ 1.6 where it is removed entirely.
+    ``CalibratedClassifierCV`` uses ``estimator=`` keyword (sklearn ≥ 1.2).
     """
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
@@ -323,14 +347,6 @@ class ModelTrainer:
         hpo_trials: int = 30,
         calibrate: bool = True,
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
-        """
-        Load an existing model or train a new one automatically.
-
-        Returns:
-            (model, feature_columns, training_result_or_None)
-
-        ``training_result`` is None when an existing artifact is reused.
-        """
         trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
 
         if trigger is None:
@@ -365,10 +381,6 @@ class ModelTrainer:
         horizon: str,
         current_feature_cols: list[str],
     ) -> Optional[str]:
-        """
-        Inspect the artifact and return a trigger reason string, or None
-        if the artifact is valid and compatible.
-        """
         path = self._model_path(ticker, model_name, horizon)
 
         if not path.exists():
@@ -420,20 +432,8 @@ class ModelTrainer:
         """
         Train with walk-forward validation and persist artifacts.
 
-        Args:
-            model_name:     Registry model key.
-            X:              Feature matrix (time-sorted).
-            y:              Binary target series.
-            ticker:         Ticker symbol.
-            horizon:        Prediction horizon ('1d', '7d', '1m', '6m').
-            hyperparams:    Fixed hyperparameters; takes priority over HPO.
-            run_hpo:        Run Optuna when no fixed params supplied.
-            hpo_trials:     HPO trial count.
-            calibrate:      Apply cross-validated Platt scaling.
-            trigger_reason: Audit log label for why training was triggered.
-
-        Returns:
-            (final_model, TrainingResult)
+        Timestamps use ``utc_now_iso()`` for consistency with the rest of
+        the pipeline.  All metric values are rounded via ``round_metric()``.
         """
         try:
             t_start = time.perf_counter()
@@ -458,7 +458,7 @@ class ModelTrainer:
                 model_name=model_name,
                 ticker=ticker,
                 horizon=horizon,
-                trained_at=datetime.utcnow().isoformat(),
+                trained_at=utc_now_iso(),  # canonical UTC ISO-8601
                 n_features=X.shape[1],
                 trigger_reason=trigger_reason,
                 best_params=best_params,
@@ -486,8 +486,9 @@ class ModelTrainer:
                     )
                 )
 
+                # Logging at 4 d.p. — consistent with to_dict() output
                 logger.info(
-                    "[%s/%s/%s] Fold %d/%d — Acc=%.3f F1=%.3f AUC=%.3f",
+                    "[%s/%s/%s] Fold %d/%d — Acc=%.4f F1=%.4f AUC=%.4f",
                     ticker,
                     model_name,
                     horizon,
@@ -501,8 +502,6 @@ class ModelTrainer:
             result.compute_aggregates()
 
             # ── Final model ────────────────────────────────────────────────
-            # Use `estimator=` keyword (sklearn >=1.2 API; `base_estimator`
-            # was deprecated in 1.2 and removed in 1.6).
             should_calibrate = calibrate and model_name != "logistic_regression"
 
             if should_calibrate:
@@ -521,12 +520,14 @@ class ModelTrainer:
                 final_model = get_model(model_name, **best_params)
                 final_model.fit(X, y)
 
-            result.training_duration_s = time.perf_counter() - t_start
+            result.training_duration_s = round(
+                time.perf_counter() - t_start, DURATION_DECIMAL_PLACES
+            )
             self._save_artifacts(final_model, result, ticker, model_name, horizon)
 
             logger.info(
-                "[%s/%s/%s] Training complete in %.1fs | "
-                "Acc=%.3f F1=%.3f AUC=%.3f | trigger=%s",
+                "[%s/%s/%s] Training complete in %.2fs | "
+                "Acc=%.4f F1=%.4f AUC=%.4f | trigger=%s",
                 ticker,
                 model_name,
                 horizon,

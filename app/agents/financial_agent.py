@@ -1,40 +1,56 @@
 """
-FinSight AI — Phase 10: Agentic AI System
-Defines individual agent tools and an orchestrator that decides which tool
-to invoke based on the user's query using LLM reasoning.
+FinSight AI — Agentic AI System (v2)
 
-Fixes applied in this revision (from log analysis 2026-05-10)
--------------------------------------------------------------
+Fixes applied in this revision
+--------------------------------
 
-Issue 1 — RuntimeWarning: duckduckgo_search renamed to ddgs
-    The ``duckduckgo-search`` package was renamed to ``ddgs``.  The import
-    inside ``search_web`` now tries ``ddgs`` first and falls back to
-    ``duckduckgo_search`` for backward compatibility, so the RuntimeWarning
-    is eliminated regardless of which version is installed.
+Fix 1 — TypeError: predict() got unexpected keyword argument 'model_name'
+    Root cause: ``predict_stock()`` and ``explain_prediction()`` were calling
+    ``PredictionService.predict(ticker, model_name=model_name)``.  In v7 of
+    ``PredictionService`` the ``model_name`` parameter was removed because
+    model selection became fully automatic (leaderboard-driven).
 
-    Install:  pip install ddgs
+    Resolution:
+    * Both tool functions now call ``self._svc.predict(ticker)`` without a
+      ``model_name`` argument — the service picks the best model automatically.
+    * The tool *still* accepts ``model_name`` as an optional argument so
+      existing planner prompts that pass it do not produce a JSON validation
+      error.  The argument is accepted but noted in the log; the auto-selected
+      model is reported back in the tool output.
+    * ``explain_prediction()`` is identical — same fix applied.
 
-Issue 2 — ToolExecutionError: Knowledge base is empty
-    The planner selected ``retrieve_financial_context`` even though the
-    vector store had never been populated.  ``retrieve_financial_context``
-    now guards against this with an explicit ``_store_initialized`` check
-    and returns a graceful empty result dict instead of raising.  The
-    planner prompt also receives the current KB status so the LLM can
-    avoid selecting this tool when the store is empty.
+Fix 2 — Inconsistent font size / italic text in agent response
+    Root cause: The LLM (OpenAI) returns Markdown-formatted text
+    (``**bold**``, ``*italic*``, ``- bullets``, ``### headers``).  When this
+    raw Markdown is injected into an HTML ``<div>`` via
+    ``st.markdown(..., unsafe_allow_html=True)`` in the dashboard, Streamlit
+    does NOT re-parse Markdown inside a raw HTML block.  Instead the literal
+    asterisks / hyphens appear, or — when the HTML sanitiser processes the
+    content — the browser applies default italic/bold/list styling that
+    overrides the CSS variables set by the design system.
 
-Issue 3 — DEBUG flood from rustls / h2 / hyper_util / primp / cookie_store
-    The ``ddgs`` library uses a Rust HTTP client (primp/reqwest) that
-    registers Python loggers at DEBUG level.  These are now suppressed in
-    ``_suppress_ddgs_loggers()`` which is called once at module import time.
+    Resolution:
+    * ``FinancialAgent.run()`` now sanitises the LLM response through the
+      new ``_sanitise_response()`` static method before returning it.
+    * Sanitisation converts Markdown to clean HTML using a minimal, dependency-
+      free converter (no ``markdown`` / ``mistune`` package required):
+        - ``### heading`` → ``<span class="agent-heading">…</span>``
+        - ``**bold**``    → ``<span class="agent-bold">…</span>``
+        - ``*italic*``    → plain text (italic is stripped, not converted)
+        - ``- bullet``    → ``<span class="agent-bullet">•</span> …``
+        - blank lines     → ``<br>`` paragraph breaks
+    * All span classes are defined in ``dashboard.py``'s design system CSS
+      so they inherit the correct font-family / colour / size from the CSS
+      variables rather than from the browser default stylesheet.
 
-Issue 4 — analyze_sentiment called with the raw query string
-    The planner called ``analyze_sentiment(text="NVDA latest news")`` — the
-    literal search query, not a real headline.  Fixed by:
-    (a) Rewriting the tool description to explicitly forbid passing query
-        strings and require actual news content.
-    (b) Adding an ordering rule to ``_PLANNER_USER`` that requires
-        ``search_web`` to run before ``analyze_sentiment`` and instructs
-        the LLM to use a returned snippet as the ``text`` argument.
+Fix 3 — ToolResult.to_context_string() bypassed canonical formatter
+    ``ToolResult.to_context_string()`` had its own inline JSON slice at
+    ``[:2000]``.  It now delegates to ``build_tool_context_string()`` from
+    ``app.core.formatting`` so the 2 000-char cap and format are applied
+    uniformly.
+
+All four original fixes (Issue 1–4 from 2026-05-10 log) are preserved
+unchanged.
 """
 
 from __future__ import annotations
@@ -46,6 +62,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from app.core.exceptions import AgentError, ToolExecutionError
+from app.core.formatting import build_tool_context_string
 from app.core.logging_config import get_logger
 from app.rag.llm_chat import FinancialChatSystem, OpenAIClient
 from configs.settings import settings
@@ -54,21 +71,11 @@ logger = get_logger("agents")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Suppress noisy third-party loggers (Issue 3)
+# Suppress noisy third-party loggers (original Issue 3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _suppress_ddgs_loggers() -> None:
-    """
-    Silence DEBUG-level loggers emitted by the ``ddgs`` Rust HTTP client.
-
-    ``ddgs`` (formerly ``duckduckgo-search``) uses ``primp``/``reqwest``
-    internally, which registers Python loggers for every TLS handshake,
-    H2 frame, and cookie operation.  Without suppression these flood the
-    console at WARNING-level when the root logger is set to DEBUG.
-
-    Called once at module import time — safe to call multiple times.
-    """
     noisy_roots = [
         "rustls",
         "h2",
@@ -94,9 +101,7 @@ _suppress_ddgs_loggers()
 def _extract_json_array(text: str) -> str:
     """
     Robustly extract a JSON array from an LLM response string.
-
-    Handles: markdown fences, trailing prose, leading prose, whitespace.
-    Strategy: strip fences with regex, then slice first ``[`` to last ``]``.
+    Handles markdown fences, trailing prose, leading prose, whitespace.
     """
     text = re.sub(r"```(?:json|JSON)?\s*", "", text).strip()
     start = text.find("[")
@@ -104,6 +109,76 @@ def _extract_json_array(text: str) -> str:
     if start == -1 or end == -1 or end < start:
         raise ValueError(f"No JSON array found in LLM response: {text!r}")
     return text[start : end + 1]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Response Sanitiser
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _sanitise_response(text: str) -> str:
+    """
+    Convert LLM Markdown output to clean HTML that integrates with the
+    FinSight design system.
+
+    Rules (applied in order):
+    1. ``### Heading`` / ``## Heading`` / ``# Heading``
+       → ``<span class="agent-heading">Heading</span>``
+    2. ``**bold text**``
+       → ``<span class="agent-bold">bold text</span>``
+    3. ``*italic text*`` or ``_italic text_``
+       → plain text  (italic is removed — font consistency)
+    4. ``- bullet item`` or ``* bullet item`` (line-leading)
+       → ``<span class="agent-bullet">•</span> item``
+    5. Blank lines → ``<br>`` paragraph breaks
+    6. Remaining ``\n`` inside a paragraph → single space
+       (avoids raw newline artefacts inside the HTML div)
+
+    No external Markdown library is required.
+    All span class names are defined in ``dashboard.py`` CSS.
+    """
+    if not text:
+        return ""
+
+    # ── 1. ATX headings (### / ## / #) ───────────────────────────────────────
+    text = re.sub(
+        r"^#{1,3}\s+(.+)$",
+        lambda m: f'<span class="agent-heading">{m.group(1).strip()}</span>',
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # ── 2. Bold (**text** or __text__) ───────────────────────────────────────
+    text = re.sub(
+        r"\*{2}(.+?)\*{2}",
+        lambda m: f'<span class="agent-bold">{m.group(1)}</span>',
+        text,
+    )
+    text = re.sub(
+        r"_{2}(.+?)_{2}",
+        lambda m: f'<span class="agent-bold">{m.group(1)}</span>',
+        text,
+    )
+
+    # ── 3. Italic (*text* or _text_) — strip to plain text ───────────────────
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+
+    # ── 4. Bullet lists (- item / * item at line start) ──────────────────────
+    text = re.sub(
+        r"^[\-\*]\s+(.+)$",
+        lambda m: f'<span class="agent-bullet">•</span> {m.group(1).rstrip()}',
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # ── 5. Blank lines → paragraph break ─────────────────────────────────────
+    text = re.sub(r"\n{2,}", "<br><br>", text)
+
+    # ── 6. Remaining single newlines → space ─────────────────────────────────
+    text = text.replace("\n", " ")
+
+    return text.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,8 +196,13 @@ class ToolResult:
     error: Optional[str] = None
 
     def to_context_string(self) -> str:
+        """
+        Canonical tool-result string for LLM prompt injection.
+        Delegates to ``build_tool_context_string()`` from
+        ``app.core.formatting`` (2 000-char cap, deterministic format).
+        """
         if self.success:
-            return f"[{self.tool_name}] {json.dumps(self.output, default=str)[:2000]}"
+            return build_tool_context_string(self.tool_name, self.output)
         return f"[{self.tool_name}] FAILED: {self.error}"
 
 
@@ -162,46 +242,72 @@ class FinancialAgentTools:
 
     # ── Financial tools ───────────────────────────────────────────────────────
 
-    def predict_stock(self, ticker: str, model_name: str = "xgboost") -> dict:
+    def predict_stock(self, ticker: str, model_name: Optional[str] = None) -> dict:
         """
         Generate a next-day price direction prediction with probability.
 
+        ``model_name`` is accepted for backward-compatibility with planner
+        prompts that include it, but is silently ignored — ``PredictionService``
+        auto-selects the best trained model via the leaderboard.  The actual
+        model used is reported in the output dict.
+
         Args:
             ticker:     Stock ticker symbol (e.g. 'AAPL').
-            model_name: ML model to use.
+            model_name: Ignored.  Kept so old planner JSON does not cause a
+                        ``ToolExecutionError`` on unexpected-argument validation.
 
         Returns:
-            Dict with prediction, probability, and confidence.
+            Dict with prediction, probability, confidence, and model used.
         """
+        if model_name is not None:
+            logger.debug(
+                "predict_stock: model_name=%r was passed but is ignored "
+                "(PredictionService uses auto-selection).",
+                model_name,
+            )
         try:
-            result = self._svc.predict(ticker, model_name=model_name)
+            result = self._svc.predict(ticker)
             return {
                 "ticker": result.ticker,
                 "prediction": "BULLISH" if result.prediction == 1 else "BEARISH",
                 "probability": result.probability,
+                "p_bullish": result.p_bullish,
+                "p_bearish": result.p_bearish,
                 "confidence": result.confidence_label,
                 "latest_close": result.latest_close,
+                "model_used": result.model_name,  # report actual auto-selected model
+                "horizon": result.horizon,
             }
         except Exception as exc:
             raise ToolExecutionError(f"predict_stock failed: {exc}") from exc
 
-    def explain_prediction(self, ticker: str, model_name: str = "xgboost") -> dict:
+    def explain_prediction(self, ticker: str, model_name: Optional[str] = None) -> dict:
         """
         Generate a SHAP-based explanation for the latest prediction.
 
+        ``model_name`` is accepted but ignored — see ``predict_stock()``
+        for the same rationale.
+
         Args:
             ticker:     Stock ticker symbol.
-            model_name: ML model identifier.
+            model_name: Ignored.
 
         Returns:
             Dict with narrative and top SHAP features.
         """
+        if model_name is not None:
+            logger.debug(
+                "explain_prediction: model_name=%r was passed but is ignored.",
+                model_name,
+            )
         try:
-            result = self._svc.predict(ticker, model_name=model_name)
+            result = self._svc.predict(ticker)
             return {
                 "ticker": result.ticker,
                 "narrative": result.narrative,
                 "top_features": result.shap_explanation.get("top_features", [])[:5],
+                "model_used": result.model_name,
+                "horizon": result.horizon,
             }
         except Exception as exc:
             raise ToolExecutionError(f"explain_prediction failed: {exc}") from exc
@@ -211,20 +317,8 @@ class FinancialAgentTools:
         Retrieve relevant context from the RAG knowledge base.
 
         Gracefully returns an empty result when the knowledge base has not
-        been populated yet, instead of raising an exception that silently
-        marks the tool as failed.  This prevents the planner from wasting
-        a tool slot on an empty store.
-
-        Args:
-            query:        Natural language query.
-            rag_pipeline: Initialized ``RAGPipeline`` instance.
-
-        Returns:
-            Dict with ``query``, ``results``, and optionally a ``note``
-            field when the store is empty.
+        been populated yet (original Issue 2 fix preserved).
         """
-        # Issue 2 fix: guard before calling retrieve() so an empty KB
-        # returns a clear message instead of raising ToolExecutionError.
         if not getattr(rag_pipeline, "_store_initialized", False):
             logger.info(
                 "retrieve_financial_context: knowledge base is empty — skipping."
@@ -258,7 +352,7 @@ class FinancialAgentTools:
 
         IMPORTANT: ``text`` must be a real news headline or article excerpt —
         NOT a search query string.  Pass a snippet returned by ``search_web``,
-        not the original user query.
+        not the original user query (original Issue 4 fix preserved).
 
         Args:
             text: A real financial news headline or excerpt (min ~10 words).
@@ -318,7 +412,11 @@ class FinancialAgentTools:
             label = (
                 "positive" if score > 0.1 else "negative" if score < -0.1 else "neutral"
             )
-            return {"text": text[:300], "sentiment": label, "score": round(score, 3)}
+            return {
+                "text": text[:300],
+                "sentiment": label,
+                "score": round(score, 3),
+            }
         except Exception as exc:
             raise ToolExecutionError(f"analyze_sentiment failed: {exc}") from exc
 
@@ -345,45 +443,25 @@ class FinancialAgentTools:
         Search the web for current financial news and information.
 
         Uses DuckDuckGo (no API key required).  Tries the new ``ddgs`` package
-        name first and falls back to the legacy ``duckduckgo_search`` import
-        so both ``pip install ddgs`` and ``pip install duckduckgo-search``
-        work without code changes.
-
-        Use this tool for:
-        - Recent news, earnings, Fed decisions, M&A announcements
-        - Current stock prices or market conditions
-        - Anything that may postdate the LLM training cutoff
-
-        Install:  pip install ddgs
+        name first and falls back to ``duckduckgo_search`` (original Issue 1
+        fix preserved).
 
         Args:
             query:       Natural language search query.
             max_results: Number of results to return (1–10).
 
         Returns:
-            Dict with ``query``, ``results`` list, and a ``summary`` string::
-
-                {
-                    "query": "NVDA latest news",
-                    "results": [
-                        {"title": "Nvidia hits record...", "url": "...", "snippet": "..."},
-                        ...
-                    ],
-                    "summary": "[1] Nvidia hits record...\\n    URL: ...\\n    ..."
-                }
+            Dict with ``query``, ``results`` list, and a ``summary`` string.
         """
-        # Issue 1 fix: try new package name first, fall back to old name.
         DDGS = None
         try:
-            from ddgs import DDGS  # pip install ddgs (new name)
+            from ddgs import DDGS
         except ImportError:
             pass
 
         if DDGS is None:
             try:
-                from duckduckgo_search import (
-                    DDGS,
-                )  # pip install duckduckgo-search (old name)
+                from duckduckgo_search import DDGS
             except ImportError:
                 raise ToolExecutionError(
                     "Web search package not installed. Run: pip install ddgs"
@@ -438,11 +516,6 @@ _PLANNER_SYSTEM = (
     "Your entire response must be parseable by json.loads()."
 )
 
-# Issue 4 fix: added explicit ordering rules that prevent the planner from:
-#   (a) passing the raw user query string to analyze_sentiment
-#   (b) calling retrieve_financial_context when the KB is empty
-#   (c) calling analyze_sentiment before search_web has run
-
 _PLANNER_USER = """Available tools:
 {tool_descriptions}
 
@@ -464,7 +537,9 @@ IMPORTANT ordering and usage rules:
 3. Only include retrieve_financial_context if knowledge base status is POPULATED.
 4. Order tools so dependencies run first (e.g. search_web before analyze_sentiment).
 5. Use at most 3 tool calls total.
-6. If no tools are needed, return exactly: []"""
+6. Do NOT include model_name in predict_stock or explain_prediction args —
+   model selection is automatic.
+7. If no tools are needed, return exactly: []"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,17 +552,16 @@ class FinancialAgent:
     Agentic AI orchestrator that selects and executes tools to answer
     complex financial queries.
 
-    All four issues from the 2026-05-10 log are addressed here:
-
-    1. ``search_web`` uses a dual-import strategy (ddgs → duckduckgo_search)
-       eliminating the RuntimeWarning from the renamed package.
-    2. ``retrieve_financial_context`` guards against an empty knowledge base
-       and the planner receives the current KB status so it can avoid
-       selecting this tool when nothing has been ingested.
-    3. Noisy loggers from the Rust HTTP client are suppressed at module
-       import time via ``_suppress_ddgs_loggers()``.
-    4. The planner prompt explicitly forbids passing query strings to
-       ``analyze_sentiment`` and requires ``search_web`` to run first.
+    Fixes applied in this revision
+    --------------------------------
+    1. ``predict_stock`` / ``explain_prediction`` no longer pass ``model_name``
+       to ``PredictionService.predict()`` — the argument is accepted but
+       ignored with a debug log.
+    2. Planner prompt explicitly forbids ``model_name`` in tool args.
+    3. LLM response is passed through ``_sanitise_response()`` before being
+       returned so Markdown artefacts (bold, italic, bullets, headings) are
+       converted to design-system HTML span classes.
+    4. ``ToolResult.to_context_string()`` delegates to the canonical formatter.
     """
 
     def __init__(
@@ -510,13 +584,6 @@ class FinancialAgent:
         return self._llm
 
     def _kb_status(self) -> str:
-        """
-        Return a one-word KB status string injected into the planner prompt.
-
-        The planner uses this to decide whether ``retrieve_financial_context``
-        is worth calling.  This prevents Issue 2 at the planning stage rather
-        than only at execution time.
-        """
         if self.rag_pipeline is None:
             return "UNAVAILABLE"
         if getattr(self.rag_pipeline, "_store_initialized", False):
@@ -525,13 +592,14 @@ class FinancialAgent:
         return "EMPTY — do not call retrieve_financial_context"
 
     def _build_tool_registry(self) -> dict[str, AgentTool]:
-        """Register all available agent tools."""
         ti = self.tools_instance
         tools = [
             AgentTool(
                 name="predict_stock",
                 description=(
-                    "Predict next-day price direction (bullish/bearish) for a stock ticker."
+                    "Predict next-day price direction (bullish/bearish) for a stock "
+                    "ticker. Required args: ticker. Do NOT pass model_name — "
+                    "model selection is automatic."
                 ),
                 fn=ti.predict_stock,
                 required_args=["ticker"],
@@ -539,7 +607,8 @@ class FinancialAgent:
             AgentTool(
                 name="explain_prediction",
                 description=(
-                    "Generate a SHAP-based explanation for why a prediction was made."
+                    "Generate a SHAP-based explanation for why a prediction was made. "
+                    "Required args: ticker. Do NOT pass model_name."
                 ),
                 fn=ti.explain_prediction,
                 required_args=["ticker"],
@@ -575,15 +644,14 @@ class FinancialAgent:
             ),
         ]
 
-        # Only register retrieve_financial_context when a rag_pipeline is wired in.
-        # The tool itself still guards against empty stores at execution time.
         if self.rag_pipeline:
             tools.append(
                 AgentTool(
                     name="retrieve_financial_context",
                     description=(
-                        "Search the ingested financial knowledge base for relevant context. "
-                        "Only useful when the knowledge base status is POPULATED."
+                        "Search the ingested financial knowledge base for relevant "
+                        "context. Only useful when the knowledge base status is "
+                        "POPULATED."
                     ),
                     fn=lambda query: ti.retrieve_financial_context(
                         query, self.rag_pipeline
@@ -595,7 +663,6 @@ class FinancialAgent:
         return {t.name: t for t in tools}
 
     def _validate_step(self, step: dict) -> tuple[bool, str]:
-        """Validate a planned tool call against the registry."""
         tool_name = step.get("tool", "")
         args = step.get("args", {})
 
@@ -617,10 +684,6 @@ class FinancialAgent:
     def _plan_tool_calls(self, query: str) -> list[dict]:
         """
         Use the LLM to plan which tools to invoke.
-
-        Injects the current KB status into the prompt so the LLM can make
-        an informed decision about whether to call retrieve_financial_context.
-
         Returns ``[]`` on any failure so the agent degrades gracefully.
         """
         try:
@@ -670,7 +733,6 @@ class FinancialAgent:
             return []
 
     def _execute_tool(self, tool_name: str, args: dict) -> ToolResult:
-        """Execute a single validated tool call."""
         tool = self._tool_registry[tool_name]
         try:
             output = tool.fn(**args)
@@ -691,6 +753,11 @@ class FinancialAgent:
     def run(self, query: str) -> dict:
         """
         Execute the full agentic loop: plan → validate → execute → respond.
+
+        The LLM response is sanitised through ``_sanitise_response()`` before
+        being returned so Markdown formatting is converted to design-system
+        HTML classes instead of being rendered as raw asterisks or triggering
+        browser-default italic/bold styles.
 
         Args:
             query: User's natural language query.
@@ -717,19 +784,26 @@ class FinancialAgent:
                     use_rag=True,
                     prediction_context=tool_context if tool_context else None,
                 )
-                final_response = chat_resp.content
+                raw_response = chat_resp.content
             else:
-                final_response = (
+                raw_response = (
                     f"Tool results:\n{tool_context}\n\nQuery: {query}\n"
                     "(LLM not available — returning raw tool output)"
                 )
+
+            # Sanitise: convert Markdown artefacts to design-system HTML
+            final_response = _sanitise_response(raw_response)
 
             return {
                 "query": query,
                 "response": final_response,
                 "tools_used": [r.tool_name for r in tool_results if r.success],
                 "tool_results": [
-                    {"tool": r.tool_name, "success": r.success, "output": r.output}
+                    {
+                        "tool": r.tool_name,
+                        "success": r.success,
+                        "output": r.output,
+                    }
                     for r in tool_results
                 ],
             }

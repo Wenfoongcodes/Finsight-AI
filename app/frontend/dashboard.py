@@ -1,27 +1,51 @@
 """
-FinSight AI — Dashboard (v5)
+FinSight AI — Dashboard (v6)
 
-Changes vs v4
+Changes vs v5
 -------------
-1.  **Fused Bull/Bear probability bar fixed.**
 
-    Root cause: the previous implementation used two ``position:absolute``
-    divs inside a relative container — one anchored to ``left:0`` (bull,
-    green) and one to ``right:0`` (bear, red).  Each was given its own
-    percentage width.  When bear was dominant (e.g. 85%) the red bar
-    filled 85% from the right, completely obscuring the 14.9% green bar
-    that was correctly positioned at ``left:0``.  The *labels* below read
-    "▲ 14.9%  ▼ 85.1%" — so the numbers were correct but the bar was
-    visually inverted.  Users saw a mostly-red bar with a "14.9% bull"
-    label, which reads as "85% bear shown as bull".
+1.  **Agent response typography fix**
 
-    Fix: use a single ``display:flex`` bar.  The left segment (green, bull)
-    receives ``flex: {bull_pct}`` and the right segment (red, bear) receives
-    ``flex: {bear_pct}``.  Both colours fill their correct proportions
-    without overlapping, and the labels match what is displayed.
+    Root cause (re-stated for clarity):
+    ``FinancialAgent.run()`` returns a response string that was originally
+    raw Markdown from the OpenAI LLM.  That string was injected directly
+    into an ``unsafe_allow_html=True`` ``st.markdown()`` block inside a
+    ``<div class="narrative-block">``.
 
-2.  All other content (SHAP glossary, model badges, section labels, news
-    expander, etc.) is unchanged from v4.
+    Streamlit does NOT re-parse Markdown inside a raw HTML block.  Instead:
+    * ``*word*`` stays as literal asterisks, which the browser renders as
+      italicised text via the ``<em>`` element when the HTML is sanitised.
+    * ``**word**`` similarly produces ``<strong>`` → browser-default bold.
+    * ``- item`` list lines become bare ``-`` characters with no consistent
+      spacing or font.
+    * ``### Heading`` text inherits ``font-size: 1.5em`` from the browser
+      default ``h3`` rule rather than the design system's ``--font-mono``.
+
+    Fix (two-part):
+    a. ``financial_agent.py`` (v2) now passes every LLM response through
+       ``_sanitise_response()``, which converts Markdown tokens to
+       ``<span class="agent-…">`` elements before the string reaches the
+       dashboard.
+    b. The CSS block below adds explicit rules for:
+       - ``.agent-heading``  — section label style (mono, uppercase, muted)
+       - ``.agent-bold``     — strong weight in the primary text colour
+       - ``.agent-bullet``   — bullet dot in accent-cyan colour
+       These classes inherit ``font-family: var(--font-body)`` from the
+       ``.narrative-block`` parent so the font is always consistent.
+
+    Additionally the ``.narrative-block`` and ``.chat-bubble-ai`` rules
+    now include:
+       ``em, strong, b, i { font-style: normal; font-weight: inherit; }``
+    as a defensive reset for any residual ``<em>``/``<strong>`` that might
+    slip through from cached responses or the RAG chat path.
+
+2.  **Chat bubble typography hardened**
+
+    ``.chat-bubble-ai`` receives the same defensive reset so the AI Chat
+    tab is consistent with the Agent tab.
+
+All other content (SHAP glossary, model badges, signal fusion bar, news
+expander, market data chart) is unchanged from v5.
 """
 
 from __future__ import annotations
@@ -40,7 +64,18 @@ import streamlit as st
 
 API_BASE = "http://localhost:8000/api/v1"
 
-TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "JPM", "GS", "SPY"]
+TICKERS = [
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN",
+    "TSLA",
+    "META",
+    "NVDA",
+    "JPM",
+    "GS",
+    "SPY",
+]
 
 HORIZON_OPTIONS = {
     "Next Day (1d)": "1d",
@@ -120,7 +155,6 @@ _SHAP_GLOSSARY: dict[str, str] = {
 
 
 def _shap_feature_description(feature_name: str) -> str:
-    """Return the glossary description for a feature, or a generic fallback."""
     if feature_name in _SHAP_GLOSSARY:
         return _SHAP_GLOSSARY[feature_name]
     for key, desc in _SHAP_GLOSSARY.items():
@@ -253,41 +287,116 @@ html, body, .stApp * { font-family: var(--font-body) !important; color: var(--te
 .news-snippet { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
 .news-url { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); margin-top: 0.25rem; }
 
-/* ── Fixed probability bar: flex-based split (replaces overlapping absolutes) ── */
+/* ── Probability bar (flex split) ── */
 .prob-bar-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; }
 .prob-bar-label { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
-.prob-bar-track {
-    height: 8px;
-    background: var(--bg-elevated);
-    border-radius: 4px;
-    display: flex;           /* ← flex split instead of overlapping absolutes */
-    overflow: hidden;
-}
-.prob-bar-bull {
-    height: 100%;
-    background: var(--accent-green);
-    border-radius: 4px 0 0 4px;
-    transition: flex 0.4s ease;
-}
-.prob-bar-bear {
-    height: 100%;
-    background: var(--accent-red);
-    border-radius: 0 4px 4px 0;
-    transition: flex 0.4s ease;
-}
+.prob-bar-track { height: 8px; background: var(--bg-elevated); border-radius: 4px; display: flex; overflow: hidden; }
+.prob-bar-bull { height: 100%; background: var(--accent-green); border-radius: 4px 0 0 4px; transition: flex 0.4s ease; }
+.prob-bar-bear { height: 100%; background: var(--accent-red); border-radius: 0 4px 4px 0; transition: flex 0.4s ease; }
 .prob-bar-labels { display: flex; justify-content: space-between; margin-top: 0.4rem; font-family: var(--font-mono); font-size: 0.72rem; }
 
-/* SHAP glossary table */
+/* ── SHAP glossary ── */
 .shap-glossary-row { display: grid; grid-template-columns: 220px 1fr; gap: 0.5rem; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; line-height: 1.5; }
 .shap-glossary-row:last-child { border-bottom: none; }
 .shap-feat-name { font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .shap-feat-desc { color: var(--text-secondary); }
 
 .section-label { font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
-.narrative-block { background: var(--bg-elevated); border: 1px solid var(--border); border-left: 3px solid var(--accent-cyan); border-radius: 0 6px 6px 0; padding: 1.2rem 1.5rem; font-size: 0.9rem; line-height: 1.7; color: var(--text-primary); }
+
+/* ── narrative-block: defensive reset for italic/bold/list browser defaults ── */
+.narrative-block {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-cyan);
+    border-radius: 0 6px 6px 0;
+    padding: 1.2rem 1.5rem;
+    font-family: var(--font-body) !important;
+    font-size: 0.9rem;
+    font-style: normal !important;
+    font-weight: 400 !important;
+    line-height: 1.7;
+    color: var(--text-primary);
+}
+/* Defensive reset — prevents browser defaults from leaking into the block */
+.narrative-block em,
+.narrative-block i    { font-style: normal !important; }
+.narrative-block strong,
+.narrative-block b    { font-weight: 400 !important; color: var(--text-primary) !important; }
+.narrative-block h1,
+.narrative-block h2,
+.narrative-block h3   { font-size: 0.9rem !important; font-weight: 400 !important; font-family: var(--font-body) !important; margin: 0.25rem 0 !important; }
+.narrative-block ul,
+.narrative-block ol   { margin: 0 !important; padding: 0 !important; list-style: none !important; }
+.narrative-block li   { font-size: 0.9rem !important; line-height: 1.7 !important; }
+
+/* ── Agent response typography — design-system span classes ── */
+/*    Produced by _sanitise_response() in financial_agent.py     */
+.agent-heading {
+    display: block;
+    font-family: var(--font-mono) !important;
+    font-size: 0.7rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-muted) !important;
+    margin-top: 0.9rem;
+    margin-bottom: 0.2rem;
+    font-style: normal !important;
+}
+.agent-bold {
+    font-family: var(--font-body) !important;
+    font-size: 0.9rem !important;
+    font-weight: 600 !important;
+    color: var(--text-primary) !important;
+    font-style: normal !important;
+}
+.agent-bullet {
+    font-family: var(--font-mono) !important;
+    font-size: 0.75rem !important;
+    font-weight: 500 !important;
+    color: var(--accent-cyan) !important;
+    margin-right: 0.35rem;
+    font-style: normal !important;
+}
+
+/* ── Chat bubbles — same defensive reset ── */
 .chat-scroll-area { max-height: 420px; overflow-y: auto; padding-right: 0.5rem; margin-bottom: 1rem; }
-.chat-bubble-user { background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.15); border-radius: 0 10px 10px 10px; padding: 0.8rem 1rem; margin: 0.5rem 0; font-size: 0.88rem; }
-.chat-bubble-ai { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px 10px 10px 0; padding: 0.8rem 1rem; margin: 0.5rem 0; font-size: 0.88rem; border-left: 2px solid var(--accent-cyan); }
+.chat-bubble-user {
+    background: rgba(0,212,255,0.06);
+    border: 1px solid rgba(0,212,255,0.15);
+    border-radius: 0 10px 10px 10px;
+    padding: 0.8rem 1rem;
+    margin: 0.5rem 0;
+    font-family: var(--font-body) !important;
+    font-size: 0.88rem;
+    font-style: normal !important;
+    font-weight: 400 !important;
+}
+.chat-bubble-ai {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px 10px 10px 0;
+    padding: 0.8rem 1rem;
+    margin: 0.5rem 0;
+    font-family: var(--font-body) !important;
+    font-size: 0.88rem;
+    font-style: normal !important;
+    font-weight: 400 !important;
+    border-left: 2px solid var(--accent-cyan);
+    line-height: 1.65;
+}
+/* Defensive reset inside chat bubbles */
+.chat-bubble-ai em,
+.chat-bubble-ai i    { font-style: normal !important; }
+.chat-bubble-ai strong,
+.chat-bubble-ai b    { font-weight: 500 !important; color: var(--text-primary) !important; }
+.chat-bubble-ai h1,
+.chat-bubble-ai h2,
+.chat-bubble-ai h3   { font-size: 0.88rem !important; font-weight: 500 !important; font-family: var(--font-body) !important; margin: 0.2rem 0 !important; }
+.chat-bubble-ai ul,
+.chat-bubble-ai ol   { margin: 0 !important; padding-left: 1.2rem !important; }
+.chat-bubble-ai li   { font-size: 0.88rem !important; line-height: 1.65 !important; }
+
 .chat-role { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.3rem; }
 .tool-chip { display: inline-block; background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.25); border-radius: 4px; padding: 0.2rem 0.6rem; font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent-cyan); margin: 0.15rem; }
 .market-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 1.5rem 0; }
@@ -389,7 +498,6 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-    # ── Instrument ────────────────────────────────────────────────────────────
     st.markdown(
         '<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True
     )
@@ -402,7 +510,6 @@ with st.sidebar:
     if custom_ticker:
         selected_ticker = custom_ticker
 
-    # ── Prediction Horizon ────────────────────────────────────────────────────
     st.markdown(
         '<div class="sidebar-section-title">Prediction Horizon</div>',
         unsafe_allow_html=True,
@@ -416,7 +523,6 @@ with st.sidebar:
     )
     selected_horizon = HORIZON_OPTIONS[horizon_label]
 
-    # ── Knowledge Base ────────────────────────────────────────────────────────
     st.markdown(
         '<div class="sidebar-section-title">Knowledge Base</div>',
         unsafe_allow_html=True,
@@ -550,7 +656,6 @@ with tab_predict:
 
     pred = st.session_state.last_prediction
 
-    # Invalidate when ticker or horizon changed
     if pred and (
         pred.get("ticker") != selected_ticker or pred.get("horizon") != selected_horizon
     ):
@@ -566,7 +671,6 @@ with tab_predict:
         pred = None
 
     if pred and pred.get("ticker") == selected_ticker:
-        # ── Model + horizon badges ────────────────────────────────────────────
         model_used = pred.get("model_name", "unknown").replace("_", " ").title()
         horizon_display = pred.get("horizon", "1d")
         st.markdown(
@@ -577,9 +681,6 @@ with tab_predict:
             unsafe_allow_html=True,
         )
 
-        # ════════════════════════════════════════════════════════════════════
-        # FUSED SIGNAL
-        # ════════════════════════════════════════════════════════════════════
         st.markdown(
             '<div class="section-label">Fused Signal — ML + News Synthesis</div>',
             unsafe_allow_html=True,
@@ -618,23 +719,16 @@ with tab_predict:
             )
 
         with c_fused_prob:
-            # ── Probability bar (flex split — Issue 1 fix) ────────────────────
-            # fused_prob IS P(bullish); bear prob is its complement.
-            # Use flex children so each segment fills its exact share with no
-            # overlap: bull segment on the left, bear segment on the right.
             fused_prob = float(pred.get("fused_probability", 0.5))
             fused_prob = max(0.0, min(1.0, fused_prob))
 
             if fused_dir == "BULLISH":
                 bull_prob = fused_prob
                 bear_prob = 1.0 - fused_prob
-
             elif fused_dir == "BEARISH":
                 bear_prob = fused_prob
                 bull_prob = 1.0 - fused_prob
-
             else:
-                # Neutral / unknown fallback
                 bull_prob = 0.5
                 bear_prob = 0.5
 
@@ -673,7 +767,6 @@ with tab_predict:
                 unsafe_allow_html=True,
             )
 
-        # ── LLM Synthesis Narrative ──────────────────────────────────────────
         if fusion_nar:
             st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
             st.markdown(
@@ -682,7 +775,6 @@ with tab_predict:
                 unsafe_allow_html=True,
             )
 
-        # ── News Sources (collapsible) ────────────────────────────────────────
         news_items = pred.get("news_items", [])
         if news_items:
             with st.expander(
@@ -698,9 +790,6 @@ with tab_predict:
                         unsafe_allow_html=True,
                     )
 
-        # ════════════════════════════════════════════════════════════════════
-        # ML SIGNAL
-        # ════════════════════════════════════════════════════════════════════
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="section-label">Quantitative Signal — ML Model Only</div>',
@@ -739,10 +828,6 @@ with tab_predict:
             )
 
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
-
-        # ════════════════════════════════════════════════════════════════════
-        # SHAP CHART
-        # ════════════════════════════════════════════════════════════════════
         st.markdown(
             '<div class="section-label">SHAP Feature Attribution</div>',
             unsafe_allow_html=True,
@@ -803,7 +888,6 @@ with tab_predict:
                 fig, use_container_width=True, config={"displayModeBar": False}
             )
 
-            # ── SHAP Feature Glossary ─────────────────────────────────────────
             with st.expander("📖 What do these features mean?", expanded=False):
                 st.markdown(
                     '<div style="font-family:var(--font-mono);font-size:0.68rem;'
@@ -1018,9 +1102,19 @@ with tab_chat:
     else:
         for msg in st.session_state.chat_history:
             if msg["role"] == "user":
-                history_html += f'<div class="chat-bubble-user"><div class="chat-role">You</div>{msg["content"]}</div>'
+                history_html += (
+                    f'<div class="chat-bubble-user">'
+                    f'<div class="chat-role">You</div>'
+                    f"{msg['content']}"
+                    f"</div>"
+                )
             else:
-                history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
+                history_html += (
+                    f'<div class="chat-bubble-ai">'
+                    f'<div class="chat-role">FinSight AI</div>'
+                    f"{msg['content']}"
+                    f"</div>"
+                )
 
     st.markdown(
         f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True
@@ -1074,8 +1168,10 @@ with tab_agent:
         '<div class="section-label">Autonomous Agent</div>', unsafe_allow_html=True
     )
     st.markdown(
-        '<div style="font-family:var(--font-body);font-size:0.875rem;color:var(--text-secondary);margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
-        "The agent autonomously plans, selects, and chains tools — prediction, SHAP explanation, sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries."
+        '<div style="font-family:var(--font-body);font-size:0.875rem;color:var(--text-secondary);'
+        'margin-bottom:1.5rem;line-height:1.6;max-width:680px;">'
+        "The agent autonomously plans, selects, and chains tools — prediction, SHAP explanation, "
+        "sentiment analysis, and knowledge retrieval — to answer complex multi-step financial queries."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1116,6 +1212,7 @@ with tab_agent:
 
             if result:
                 st.markdown('<div style="height:1rem;"></div>', unsafe_allow_html=True)
+
                 if result.get("tools_used"):
                     st.markdown(
                         '<div class="section-label">Tools Invoked</div>',
@@ -1134,6 +1231,10 @@ with tab_agent:
                     '<div class="section-label">Agent Response</div>',
                     unsafe_allow_html=True,
                 )
+
+                # Response is pre-sanitised by financial_agent._sanitise_response()
+                # so Markdown tokens are already converted to design-system span classes.
+                # The narrative-block CSS ensures uniform font, size, and colour.
                 st.markdown(
                     f'<div class="narrative-block">{result["response"]}</div>',
                     unsafe_allow_html=True,

@@ -1,29 +1,29 @@
 """
-FinSight AI — Prediction Service (v6)
+FinSight AI — Prediction Service (v7)
 
-Changes vs v5
+Changes vs v6
 -------------
-* SHAP explainer now receives the full aligned feature matrix (``X_aligned``)
-  as background data, not just the single inference row (``X_latest``).
 
-  Root cause of the "SHAP chart empty for custom tickers" bug:
-  ``SHAPExplainer._build_explainer()`` received ``X_instance`` (a 1-row
-  DataFrame) as its background dataset.  For TreeExplainer this is harmless
-  on pre-trained tickers whose model was already cached, but for custom
-  tickers where ``load_or_train`` triggers a fresh training run the model
-  may be a ``CalibratedClassifierCV`` wrapper.  When the explainer correctly
-  unwraps to the base estimator and falls through to ``KernelExplainer``,
-  ``shap.sample(X_background, min(100, 1))`` returns a 1-row background.
-  SHAP's KernelExplainer with a 1-row background produces all-zero SHAP
-  values (no variance to attribute) — so ``top_features`` comes back empty
-  and the chart renders nothing.
+1.  **Horizon propagated to SignalFusionService (Req 1)**
 
-  Fix: ``SHAPExplainer`` is constructed with ``X_aligned`` (all rows,
-  capped internally by ``max_samples=500`` in ``compute_shap_values``).
-  ``local_explanation`` still receives only ``X_latest`` for inference.
+    ``fuse()`` is now called with the ``horizon`` argument so the news
+    recency filter inside ``SignalFusionService`` applies the correct
+    lookback window.  Previously all fusion calls defaulted to ``"1d"``
+    behaviour regardless of the requested prediction horizon.
 
-* All other logic (multi-model training on no-artifacts, narrative,
-  batch predict, signal fusion) is unchanged from v5.
+2.  **Deterministic output formatting (Req 2)**
+
+    - The private ``_confidence_label()`` function is removed.
+      ``PredictionResponse`` now uses ``confidence_label()`` from
+      ``app.core.formatting`` — the single shared implementation.
+    - ``p_bullish``, ``p_bearish``, ``probability`` → ``round_prob()``
+    - ``latest_close``                              → ``round_price()``
+    - Feature snapshot values                       → ``round_shap()``
+      (consistent with SHAP output precision)
+    - ``trained_at`` timestamps                     → ``utc_now_iso()``
+
+All other pipeline logic (walk-forward model selection, SHAP background
+fix, batch predict) is unchanged from v6.
 """
 
 from __future__ import annotations
@@ -32,6 +32,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from app.core.exceptions import PredictionError
+from app.core.formatting import (
+    confidence_label,
+    round_price,
+    round_prob,
+    round_shap,
+)
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import ingest_market_data
 from app.ml.explainability import SHAPExplainer
@@ -60,24 +66,10 @@ class PredictionResponse:
     """
     Full prediction response.
 
-    Fields
-    ------
-    ticker              : Stock ticker symbol.
-    model_name          : Auto-selected model name.
-    horizon             : '1d' | '7d' | '1m' | '6m'.
-    selection_reason    : REASON_* constant from ModelSelector.
-    confidence_degraded : True when no artifact existed or AUC < MIN_AUC.
-    prediction          : 0 = bearish, 1 = bullish.
-    probability         : P(predicted direction).
-    p_bullish           : Calibrated P(bullish).
-    p_bearish           : 1 - p_bullish.
-    confidence_label    : 'high' | 'moderate' | 'low'.
-    shap_explanation    : SHAP local explanation dict.
-    narrative           : Plain-English summary.
-    latest_close        : Most recent close price.
-    feature_snapshot    : Top-20 feature values at inference time.
-    fused_signal        : FusedSignal (None when fusion was skipped).
-    auto_trained        : True when any training occurred this call.
+    All float fields use canonical precision from ``app.core.formatting``:
+    - ``p_bullish``, ``p_bearish``, ``probability`` → ``round_prob()`` (4 d.p.)
+    - ``latest_close``                              → ``round_price()`` (2 d.p.)
+    - Feature snapshot values                       → ``round_shap()``  (4 d.p.)
     """
 
     ticker: str
@@ -86,25 +78,16 @@ class PredictionResponse:
     selection_reason: str
     confidence_degraded: bool
     prediction: int
-    probability: float
-    p_bullish: float
-    p_bearish: float
+    probability: float  # round_prob()
+    p_bullish: float  # round_prob()
+    p_bearish: float  # round_prob()
     confidence_label: str
     shap_explanation: dict
     narrative: str
-    latest_close: float
+    latest_close: float  # round_price()
     feature_snapshot: dict
     fused_signal: Optional[FusedSignal] = None
     auto_trained: bool = False
-
-
-def _confidence_label(p_bullish: float) -> str:
-    delta = abs(p_bullish - 0.5)
-    if delta > 0.15:
-        return "high"
-    if delta > 0.05:
-        return "moderate"
-    return "low"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,7 +243,7 @@ class PredictionService:
             if train_result_incr is not None:
                 auto_trained = True
                 logger.info(
-                    "[%s/%s] Incremental retrain: AUC=%.3f trigger='%s'",
+                    "[%s/%s] Incremental retrain: AUC=%.4f trigger='%s'",
                     ticker,
                     horizon,
                     train_result_incr.mean_roc_auc,
@@ -279,15 +262,12 @@ class PredictionService:
             # ── 7. Inference ──────────────────────────────────────────────────
             X_latest = X_aligned.iloc[[-1]]
             pred = int(model.predict(X_latest)[0])
-            p_bullish = round(float(model.predict_proba(X_latest)[0, 1]), 4)
-            p_bearish = round(1.0 - p_bullish, 4)
-            prob = p_bullish if pred == 1 else p_bearish
+
+            p_bullish = round_prob(float(model.predict_proba(X_latest)[0, 1]))
+            p_bearish = round_prob(1.0 - p_bullish)
+            prob = round_prob(p_bullish if pred == 1 else p_bearish)
 
             # ── 8. SHAP ───────────────────────────────────────────────────────
-            # Pass the full X_aligned as background so the explainer has a
-            # meaningful distribution for KernelExplainer (or TreeExplainer's
-            # expected_value baseline).  local_explanation() still receives
-            # only the single inference row.
             explainer = SHAPExplainer(model, feature_columns, X_background=X_aligned)
             shap_exp = explainer.local_explanation(X_latest)
 
@@ -301,11 +281,11 @@ class PredictionService:
 
             # ── 10. Feature snapshot ──────────────────────────────────────────
             snapshot = {
-                col: round(float(X_latest.iloc[0][col]), 4)
+                col: round_shap(float(X_latest.iloc[0][col]))
                 for col in feature_columns[:20]
             }
 
-            latest_close = float(raw_df["Close"].iloc[-1])
+            latest_close = round_price(float(raw_df["Close"].iloc[-1]))
 
             response = PredictionResponse(
                 ticker=ticker,
@@ -314,30 +294,35 @@ class PredictionService:
                 selection_reason=sel.reason,
                 confidence_degraded=confidence_degraded,
                 prediction=pred,
-                probability=round(prob, 4),
+                probability=prob,
                 p_bullish=p_bullish,
                 p_bearish=p_bearish,
-                confidence_label=_confidence_label(p_bullish),
+                confidence_label=confidence_label(p_bullish),  # shared implementation
                 shap_explanation=shap_exp,
                 narrative=narrative,
-                latest_close=round(latest_close, 4),
+                latest_close=latest_close,
                 feature_snapshot=snapshot,
                 fused_signal=None,
                 auto_trained=auto_trained,
             )
 
-            # ── 11. Signal fusion (best-effort — never blocks) ────────────────
+            # ── 11. Signal fusion (best-effort — horizon-aware) ───────────────
             if run_fusion and settings.OPENAI_API_KEY:
                 try:
-                    fused = self.fusion_service.fuse(ticker, response)
+                    fused = self.fusion_service.fuse(
+                        ticker,
+                        response,
+                        horizon=horizon,  # ← propagated in v7
+                    )
                     response.fused_signal = fused
                     logger.info(
-                        "[%s/%s] Fusion: %s → %s (applied=%s)",
+                        "[%s/%s] Fusion: %s → %s (applied=%s, recency=%s)",
                         ticker,
                         horizon,
                         "BULLISH" if pred else "BEARISH",
                         fused.final_direction,
                         fused.fusion_applied,
+                        fused.recency_note,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -354,7 +339,7 @@ class PredictionService:
 
             logger.info(
                 "Prediction complete: %s/%s → %s "
-                "(p_bull=%.3f conf=%s model=%s reason=%s auto_trained=%s)",
+                "(p_bull=%.4f conf=%s model=%s reason=%s auto_trained=%s)",
                 ticker,
                 horizon,
                 "BULLISH" if pred else "BEARISH",

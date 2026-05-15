@@ -1,21 +1,44 @@
 """
-FinSight AI — Financial Intelligence Retrieval Service (v3)
+FinSight AI — Financial Intelligence Retrieval Service (v4)
 
-Changes vs v2
+Changes vs v3
 -------------
-1.  **Snippet-based situation summary** — ``IntelligenceSummarizer.summarize()``
-    now builds the ``situation_summary`` from the actual article snippets
-    (the body text retrieved from each source), not just the headlines.
-    Each top article contributes a condensed extract so the summary reflects
-    real content rather than keyword-level title strings.
 
-2.  **Catalyst extraction removed** — ``bullish_catalysts`` and
-    ``bearish_catalysts`` are no longer populated.  The fields remain on
-    ``IntelligenceBrief`` as empty lists for API schema backward compatibility,
-    but the frontend no longer renders them (removed in dashboard v4).
+1.  **Strict news recency enforcement (Req 1)**
 
-All retrieval, scoring, source-quality, deduplication, and retry logic is
-unchanged from v2.
+    ``FinancialIntelligenceService.get_brief()`` now accepts an optional
+    ``horizon`` argument.  After retrieval, all articles are passed through
+    ``NewsRecencyFilter`` before scoring and summarisation.  Articles older
+    than the lookback window for the given horizon are discarded (or
+    weight-penalised for unknown-date items per the default
+    ``"accept_with_penalty"`` policy).
+
+    Lookback windows per horizon:
+    +---------+-------+
+    | 1d      |  3 d  |
+    | 7d      |  7 d  |
+    | 1m      | 30 d  |
+    | 6m      | 90 d  |
+    +---------+-------+
+
+    ``IntelligenceBrief`` now carries two new fields:
+    - ``articles_retrieved``: total raw count before recency filtering.
+    - ``articles_kept``:      count after recency filtering.
+
+    A ``recency_note`` field summarises the filter outcome for downstream
+    logging and the ``synthesis_narrative`` produced by ``SignalFusionService``.
+
+2.  **Deterministic output formatting (Req 2)**
+
+    All numeric fields on ``IntelligenceBrief`` and ``NewsItem`` now use
+    helpers from ``app.core.formatting``:
+    - ``sentiment_score``  → ``round_sentiment()``  (3 d.p.)
+    - ``final_weight``     → ``round_weight()``      (3 d.p.)
+    - ``situation_summary`` format is canonical (see ``IntelligenceSummarizer``).
+
+    No inline ``round()`` calls remain.
+
+All retrieval, scoring, source-quality, and retry logic is unchanged from v3.
 """
 
 from __future__ import annotations
@@ -26,13 +49,19 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from app.core.formatting import (
+    round_sentiment,
+    round_weight,
+    utc_now_iso,
+)
 from app.core.logging_config import get_logger
+from app.services.news_recency import NewsRecencyFilter
 
 logger = get_logger("news_retrieval")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source quality classification  (unchanged from v2)
+# Source quality classification  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 TIER1_SOURCES: dict[str, float] = {
@@ -169,14 +198,14 @@ SEVERITY_KEYWORDS: frozenset[str] = frozenset(
     }
 )
 
-_MAX_SNIPPET_CHARS = 400
-_FETCH_TIMEOUT_S = 12
-_MAX_RETRIES = 2
-_RETRY_DELAY_S = 1.5
-_DEFAULT_CREDIBILITY = 0.55
+_MAX_SNIPPET_CHARS: int = 400
+_FETCH_TIMEOUT_S: int = 12
+_MAX_RETRIES: int = 2
+_RETRY_DELAY_S: float = 1.5
+_DEFAULT_CREDIBILITY: float = 0.55
 
-# Maximum characters from each article's snippet to include in the situation summary
-_SUMMARY_SNIPPET_CHARS = 180
+# Characters contributed by each article to the situation summary.
+_SUMMARY_SNIPPET_CHARS: int = 180
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,10 +219,11 @@ class NewsItem:
     snippet: str
     url: str
     sentiment: str = "neutral"
-    sentiment_score: float = 0.0
-    severity_score: float = 0.0
-    credibility_score: float = _DEFAULT_CREDIBILITY
-    final_weight: float = 0.5
+    # All float fields use canonical precision from app.core.formatting
+    sentiment_score: float = 0.0  # round_sentiment() — 3 d.p.
+    severity_score: float = 0.0  # round_sentiment() — 3 d.p. (same scale)
+    credibility_score: float = _DEFAULT_CREDIBILITY  # 3 d.p.
+    final_weight: float = 0.5  # round_weight() — 3 d.p.
 
     @property
     def domain(self) -> str:
@@ -213,25 +243,34 @@ class IntelligenceBrief:
     """
     Institutional-style market intelligence summary.
 
-    ``bullish_catalysts`` and ``bearish_catalysts`` are retained for API
-    schema backward compatibility but are always empty in v3 — the
-    frontend no longer renders them.
+    New fields (v4)
+    ---------------
+    articles_retrieved : Total articles before recency filtering.
+    articles_kept      : Articles that passed the lookback filter.
+    recency_note       : Human-readable filter summary included in narratives.
+    generated_at       : UTC ISO-8601 timestamp of brief creation.
     """
 
     ticker: str
     situation_summary: str
-    bullish_catalysts: list[str] = field(default_factory=list)  # kept for compat
-    bearish_catalysts: list[str] = field(default_factory=list)  # kept for compat
+    # Kept empty for API schema backward compatibility (removed from frontend v4)
+    bullish_catalysts: list[str] = field(default_factory=list)
+    bearish_catalysts: list[str] = field(default_factory=list)
     aggregate_sentiment: str = "neutral"
-    sentiment_score: float = 0.0
+    sentiment_score: float = 0.0  # round_sentiment() — 3 d.p.
     top_news: list[NewsItem] = field(default_factory=list)
     source_quality_note: str = ""
     retrieval_success: bool = True
     error_message: str = ""
+    # v4 additions
+    articles_retrieved: int = 0
+    articles_kept: int = 0
+    recency_note: str = ""
+    generated_at: str = field(default_factory=utc_now_iso)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source quality helpers
+# Source quality helpers  (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -249,7 +288,7 @@ def _is_blocked(domain: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# News Retriever
+# News Retriever  (unchanged from v3)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -290,7 +329,9 @@ class NewsRetriever:
         items.sort(key=lambda x: x.credibility_score, reverse=True)
         result = items[: self.top_k]
         logger.info(
-            "[%s] Retrieved %d news items (after dedup/filter)", ticker, len(result)
+            "[%s] Retrieved %d news items (after dedup/domain-filter)",
+            ticker,
+            len(result),
         )
         return result
 
@@ -324,13 +365,16 @@ class NewsRetriever:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# News Analyzer  (unchanged from v2)
+# News Analyzer  — uses canonical formatting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class NewsAnalyzer:
     """
-    Composite weight = credibility×0.40 + severity×0.30 + |sentiment|×0.30
+    Composite weight = credibility × 0.40 + severity × 0.30 + |sentiment| × 0.30
+
+    All score fields are rounded via canonical helpers before assignment so
+    downstream JSON serialisation is deterministic.
     """
 
     def analyze(self, items: list[NewsItem]) -> list[NewsItem]:
@@ -342,19 +386,20 @@ class NewsAnalyzer:
 
             if bull > bear:
                 item.sentiment = "positive"
-                item.sentiment_score = min(1.0, bull / max(bull + bear, 1))
+                raw_score = min(1.0, bull / max(bull + bear, 1))
             elif bear > bull:
                 item.sentiment = "negative"
-                item.sentiment_score = -min(1.0, bear / max(bull + bear, 1))
+                raw_score = -min(1.0, bear / max(bull + bear, 1))
             else:
                 item.sentiment = "neutral"
-                item.sentiment_score = 0.0
+                raw_score = 0.0
 
-            item.severity_score = min(
-                1.0,
-                sum(1 for kw in SEVERITY_KEYWORDS if kw in text) / 3.0,
+            item.sentiment_score = round_sentiment(raw_score)
+
+            item.severity_score = round_sentiment(
+                min(1.0, sum(1 for kw in SEVERITY_KEYWORDS if kw in text) / 3.0)
             )
-            item.final_weight = (
+            item.final_weight = round_weight(
                 item.credibility_score * 0.40
                 + item.severity_score * 0.30
                 + abs(item.sentiment_score) * 0.30
@@ -365,7 +410,7 @@ class NewsAnalyzer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Intelligence Summarizer  (v3 — snippet-based summary)
+# Intelligence Summarizer  — deterministic output format
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -373,29 +418,49 @@ class IntelligenceSummarizer:
     """
     Converts scored news items into an institutional-style market brief.
 
-    ``situation_summary`` is now constructed from the article snippets
-    (body text), not just headlines.  Each of the top articles contributes
-    a trimmed extract so the summary reflects actual reported content.
-    Catalyst lists are intentionally left empty (frontend removed them).
+    Output format contract
+    ----------------------
+    ``situation_summary`` always follows this canonical structure::
+
+        Market sentiment for {TICKER} is {sentiment} based on {N}
+        source-weighted, recency-filtered articles ({recency_note}).
+        {article_1_title}: {trimmed_snippet}. {article_2_title}: ...
+
+    ``sentiment_score`` is rounded via ``round_sentiment()`` (3 d.p.).
+    ``generated_at``    is a canonical UTC ISO-8601 string.
     """
 
-    def summarize(self, ticker: str, items: list[NewsItem]) -> IntelligenceBrief:
+    def summarize(
+        self,
+        ticker: str,
+        items: list[NewsItem],
+        articles_retrieved: int = 0,
+        recency_note: str = "",
+    ) -> IntelligenceBrief:
         if not items:
             return IntelligenceBrief(
                 ticker=ticker,
-                situation_summary="No reliable financial news retrieved for this ticker.",
+                situation_summary=(
+                    "No reliable financial news retrieved for this ticker "
+                    f"within the recency window. {recency_note}".strip()
+                ),
                 aggregate_sentiment="neutral",
                 sentiment_score=0.0,
                 top_news=[],
+                articles_retrieved=articles_retrieved,
+                articles_kept=0,
+                recency_note=recency_note,
                 retrieval_success=False,
-                error_message="No items retrieved.",
+                error_message="No items passed recency filter.",
+                generated_at=utc_now_iso(),
             )
 
         # ── Weighted aggregate sentiment ──────────────────────────────────────
         total_weight = sum(i.final_weight for i in items) or 1.0
-        agg_score = (
+        agg_score_raw = (
             sum(i.sentiment_score * i.final_weight for i in items) / total_weight
         )
+        agg_score = round_sentiment(agg_score_raw)
 
         if agg_score > 0.10:
             agg_sentiment = "positive"
@@ -405,26 +470,22 @@ class IntelligenceSummarizer:
             agg_sentiment = "neutral"
 
         # ── Build situation summary from snippets ─────────────────────────────
-        # Use top-3 items by final_weight.  For each, extract the snippet
-        # (body text) trimmed to _SUMMARY_SNIPPET_CHARS.  If the snippet is
-        # empty or too short, fall back to the title.
         top_items = items[:3]
         extracts: list[str] = []
         for item in top_items:
-            body = (item.snippet or "").strip()
-            # Strip redundant whitespace and truncate cleanly at a word boundary
-            body = re.sub(r"\s+", " ", body)
+            body = re.sub(r"\s+", " ", (item.snippet or "").strip())
             if len(body) >= 40:
                 trimmed = body[:_SUMMARY_SNIPPET_CHARS].rsplit(" ", 1)[0].rstrip(".,;")
                 extracts.append(f"{item.title}: {trimmed}.")
             else:
-                # Fallback to headline only when snippet is absent/trivial
                 extracts.append(item.title.strip().rstrip(".") + ".")
 
         summary_body = " ".join(extracts)
+        recency_clause = f" ({recency_note})" if recency_note else ""
         situation = (
             f"Market sentiment for {ticker} is {agg_sentiment} "
-            f"based on {len(items)} source-weighted articles. "
+            f"based on {len(items)} source-weighted, recency-filtered "
+            f"articles{recency_clause}. "
             f"{summary_body}"
         )
 
@@ -437,54 +498,129 @@ class IntelligenceSummarizer:
         return IntelligenceBrief(
             ticker=ticker,
             situation_summary=situation,
-            # catalysts intentionally empty — frontend removed them
             bullish_catalysts=[],
             bearish_catalysts=[],
             aggregate_sentiment=agg_sentiment,
-            sentiment_score=round(agg_score, 4),
+            sentiment_score=agg_score,
             top_news=items,
             source_quality_note=source_note,
             retrieval_success=True,
+            articles_retrieved=articles_retrieved,
+            articles_kept=len(items),
+            recency_note=recency_note,
+            generated_at=utc_now_iso(),
         )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Facade
+# Facade  — wires in recency filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class FinancialIntelligenceService:
     """
     End-to-end financial intelligence facade.
+
     Always returns an ``IntelligenceBrief``; never raises.
+
+    Parameters
+    ----------
+    top_k:
+        Maximum articles to retrieve per query set.
+    unknown_date_policy:
+        What to do with articles whose publish date cannot be determined.
+        ``"accept_with_penalty"`` (default) halves the ``final_weight`` of
+        undated articles rather than discarding them outright, striking a
+        balance between completeness and staleness risk.
     """
 
-    def __init__(self, top_k: int = 8) -> None:
+    def __init__(
+        self,
+        top_k: int = 8,
+        unknown_date_policy: str = "accept_with_penalty",
+    ) -> None:
         self._retriever = NewsRetriever(top_k=top_k)
         self._analyzer = NewsAnalyzer()
         self._summarizer = IntelligenceSummarizer()
+        self._unknown_date_policy = unknown_date_policy
 
-    def get_brief(self, ticker: str) -> IntelligenceBrief:
+    def get_brief(
+        self,
+        ticker: str,
+        horizon: str = "1d",
+    ) -> IntelligenceBrief:
+        """
+        Retrieve, filter by recency, analyse, and summarise news for *ticker*.
+
+        Parameters
+        ----------
+        ticker:  Stock ticker symbol.
+        horizon: Prediction horizon key — determines the lookback window.
+                 Defaults to ``"1d"`` (3-day lookback).
+        """
         try:
-            items = self._retriever.retrieve(ticker)
-            items = self._analyzer.analyze(items)
-            brief = self._summarizer.summarize(ticker, items)
+            # ── 1. Retrieve raw items ─────────────────────────────────────────
+            raw_items = self._retriever.retrieve(ticker)
+            articles_retrieved = len(raw_items)
+
+            # ── 2. Recency filter ─────────────────────────────────────────────
+            recency_filter = NewsRecencyFilter(
+                horizon=horizon,
+                unknown_date_policy=self._unknown_date_policy,
+            )
+            items, dropped = recency_filter.apply(raw_items)
+
+            recency_note = (
+                f"max age {recency_filter.max_age_days}d; "
+                f"{len(dropped)} article(s) discarded as stale"
+            )
             logger.info(
-                "[%s] Brief: sentiment=%s score=%.3f items=%d",
+                "[%s/%s] Recency filter: %d retrieved, %d kept, %d dropped",
                 ticker,
+                horizon,
+                articles_retrieved,
+                len(items),
+                len(dropped),
+            )
+
+            # ── 3. Analyse remaining items ────────────────────────────────────
+            items = self._analyzer.analyze(items)
+
+            # ── 4. Summarise ──────────────────────────────────────────────────
+            brief = self._summarizer.summarize(
+                ticker,
+                items,
+                articles_retrieved=articles_retrieved,
+                recency_note=recency_note,
+            )
+
+            logger.info(
+                "[%s/%s] Brief: sentiment=%s score=%.3f items=%d "
+                "(retrieved=%d kept=%d)",
+                ticker,
+                horizon,
                 brief.aggregate_sentiment,
                 brief.sentiment_score,
                 len(items),
+                articles_retrieved,
+                len(items),
             )
             return brief
+
         except Exception as exc:
-            logger.warning("[%s] Intelligence retrieval failed: %s", ticker, exc)
+            logger.warning(
+                "[%s/%s] Intelligence retrieval failed: %s", ticker, horizon, exc
+            )
             return IntelligenceBrief(
                 ticker=ticker,
                 situation_summary="Intelligence retrieval unavailable.",
                 aggregate_sentiment="neutral",
                 sentiment_score=0.0,
                 top_news=[],
+                articles_retrieved=0,
+                articles_kept=0,
+                recency_note="",
                 retrieval_success=False,
                 error_message=str(exc),
+                generated_at=utc_now_iso(),
             )
