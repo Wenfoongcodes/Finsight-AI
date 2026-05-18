@@ -1,0 +1,128 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# FinSight AI — Hugging Face Spaces Dockerfile (API)
+#
+# HuggingFace Spaces hard requirements
+# ─────────────────────────────────────
+# 1. The application MUST listen on port 7860 (only port exposed publicly).
+# 2. The container process must run as UID 1000 (non-root).
+#    HF will refuse to start a container running as root.
+# 3. /data is the persistent volume — model artifacts and FAISS index
+#    should be stored there so they survive Space restarts.
+# 4. The Spaces runtime injects secrets as environment variables at startup
+#    (configured in Space Settings → Variables and Secrets).
+#    Do NOT bake secrets into this image.
+#
+# Build context
+# ─────────────────────────────────────
+# Push the entire project root to the Space repo.  HuggingFace will build
+# this Dockerfile automatically on every git push to the Space.
+#
+# Persistent storage layout
+# ─────────────────────────
+#   /data/models/      ← trained model .pkl + _meta.json artifacts
+#   /data/raw/         ← cached parquet files (yfinance)
+#   /data/embeddings/  ← FAISS index + docs pickle + urls sidecar
+#   /data/logs/        ← application logs
+#
+# The MODELS_DIR, RAW_DATA_DIR, etc. env vars in configs/settings.py are
+# overridden below to point at /data/* so artifacts persist across restarts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# System build deps (needed to compile numpy / faiss wheels)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    libgomp1 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolated virtual environment — keeps the runtime stage clean
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy only requirements first (maximises Docker layer cache reuse)
+COPY requirements/ requirements/
+
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements/ml.txt
+
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+# ── HuggingFace requirement: UID 1000 ─────────────────────────────────────────
+# HF Spaces will not run containers as root.  The user name can be anything;
+# UID/GID 1000 is required.
+RUN addgroup --gid 1000 finsight && \
+    adduser --uid 1000 --gid 1000 --disabled-password --gecos "" finsight
+
+WORKDIR /app
+
+# Runtime system libraries only (libgomp1 required by LightGBM / XGBoost)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy venv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy application source
+COPY app/         app/
+COPY configs/     configs/
+COPY main.py      main.py
+
+# ── Persistent storage directories ────────────────────────────────────────────
+# /data is the HuggingFace persistent volume (survives Space restarts).
+# We create the sub-directories here so the app never crashes on missing dirs
+# even if /data is not yet mounted (e.g. during the initial build smoke-test).
+RUN mkdir -p \
+    /data/models \
+    /data/raw \
+    /data/processed \
+    /data/embeddings \
+    /data/logs \
+    && chown -R finsight:finsight /app /data
+
+USER finsight
+
+# ── Environment — HuggingFace overrides ──────────────────────────────────────
+# Port 7860 is the ONLY publicly accessible port on HF Spaces.
+# All data paths point at /data (the persistent volume).
+# Secrets (OPENAI_API_KEY, API_SECRET_KEY, etc.) are injected at runtime
+# via HF Space Settings → Variables and Secrets — never set them here.
+ENV ENVIRONMENT=production \
+    DEBUG=false \
+    API_HOST=0.0.0.0 \
+    API_PORT=7860 \
+    MODELS_DIR=/data/models \
+    RAW_DATA_DIR=/data/raw \
+    PROCESSED_DATA_DIR=/data/processed \
+    EMBEDDINGS_DIR=/data/embeddings \
+    VECTOR_DB_PATH=/data/embeddings/faiss_index \
+    LOGS_DIR=/data/logs \
+    RATE_LIMIT_ENABLED=true \
+    RATE_LIMIT_MAX_REQUESTS=60 \
+    RATE_LIMIT_WINDOW_S=60
+
+# HuggingFace Spaces healthcheck polls the root; /health is our endpoint
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:7860/health || exit 1
+
+EXPOSE 7860
+
+# Single worker — HF free CPU tier has 2 vCPUs; 1 worker keeps memory stable.
+# The --timeout is generous because the first prediction trains all models.
+CMD ["uvicorn", "main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "7860", \
+     "--workers", "1", \
+     "--timeout-keep-alive", "75", \
+     "--log-level", "info"]

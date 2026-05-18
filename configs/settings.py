@@ -10,20 +10,32 @@ Design notes
 
 * ``LLM_BASE_URL`` is an optional override for the OpenAI client base URL.
   Leave it unset to use the default OpenAI endpoint.  Set it to the Groq,
-  Azure, or Ollama endpoint when using an alternative provider — no code
-  changes required.
+  Azure, or Ollama endpoint when using an alternative provider.
+
+* HuggingFace Spaces deployment
+  --------------------------------
+  HF Spaces mounts a persistent volume at ``/data``.  The Dockerfile.hf
+  sets the following env vars to redirect all artifact I/O there:
+
+      MODELS_DIR=/data/models
+      RAW_DATA_DIR=/data/raw
+      PROCESSED_DATA_DIR=/data/processed
+      EMBEDDINGS_DIR=/data/embeddings
+      VECTOR_DB_PATH=/data/embeddings/faiss_index
+      LOGS_DIR=/data/logs
+      API_PORT=7860          <- HF only exposes port 7860
+
+  When these are set, Settings picks them up automatically via Pydantic's
+  env-var resolution, so no code changes are needed between local and HF
+  deployments.
 
 * v2 additions for public / cloud deployment:
-  - ``ALLOWED_ORIGINS``    → now accepts ``"*"`` for fully public APIs, or a
-                             comma-separated list of origins from the env.
-  - ``API_KEY_ENABLED``    → gate the entire API behind a shared secret.
-  - ``API_SECRET_KEY``     → the shared secret (never committed to VCS).
-  - ``RATE_LIMIT_ENABLED`` → toggle in-memory IP rate limiting.
-  - ``RATE_LIMIT_MAX_REQUESTS`` / ``RATE_LIMIT_WINDOW_S`` → tunable limits.
-  - ``FRONTEND_API_BASE``  → the URL the Streamlit dashboard should call;
-                             defaults to localhost for local dev, override
-                             in production to the public API URL.
-  - ``TRUSTED_PROXY_IPS``  → forwarded-for header trust list for Nginx / ALB.
+  - ALLOWED_ORIGINS         -> env-driven CORS list
+  - API_KEY_ENABLED         -> gate API behind a shared secret
+  - API_SECRET_KEY          -> the shared secret (never commit to VCS)
+  - RATE_LIMIT_ENABLED      -> toggle in-memory IP rate limiting
+  - FRONTEND_API_BASE       -> URL the Streamlit dashboard calls
+  - TRUSTED_PROXY_IPS       -> forwarded-for header trust list
 """
 
 from functools import lru_cache
@@ -34,6 +46,9 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Default local data root — overridden to /data on HuggingFace Spaces
+_DEFAULT_DATA_ROOT = BASE_DIR / "data"
 
 
 class Settings(BaseSettings):
@@ -49,18 +64,27 @@ class Settings(BaseSettings):
         default=None, env="ALPHA_VANTAGE_API_KEY"
     )
 
-    # ── Paths ─────────────────────────────────────────────────────────────────
-    DATA_DIR: Path = BASE_DIR / "data"
-    RAW_DATA_DIR: Path = BASE_DIR / "data" / "raw"
-    PROCESSED_DATA_DIR: Path = BASE_DIR / "data" / "processed"
-    EMBEDDINGS_DIR: Path = BASE_DIR / "data" / "embeddings"
-    MODELS_DIR: Path = BASE_DIR / "data" / "models"
-    LOGS_DIR: Path = BASE_DIR / "logs"
+    # ── Data Paths — env-driven so HF Spaces can redirect to /data ───────────
+    # Local default: <project_root>/data/*
+    # HF Spaces:     /data/*  (persistent volume, set via Dockerfile.hf env)
+    DATA_DIR: Path = Field(default=_DEFAULT_DATA_ROOT, env="DATA_DIR")
+    RAW_DATA_DIR: Path = Field(default=_DEFAULT_DATA_ROOT / "raw", env="RAW_DATA_DIR")
+    PROCESSED_DATA_DIR: Path = Field(
+        default=_DEFAULT_DATA_ROOT / "processed", env="PROCESSED_DATA_DIR"
+    )
+    EMBEDDINGS_DIR: Path = Field(
+        default=_DEFAULT_DATA_ROOT / "embeddings", env="EMBEDDINGS_DIR"
+    )
+    MODELS_DIR: Path = Field(
+        default=_DEFAULT_DATA_ROOT / "models", env="MODELS_DIR"
+    )
+    LOGS_DIR: Path = Field(default=BASE_DIR / "logs", env="LOGS_DIR")
 
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = Field(default="sqlite:///./finsight.db", env="DATABASE_URL")
     VECTOR_DB_PATH: str = Field(
-        default="data/embeddings/faiss_index", env="VECTOR_DB_PATH"
+        default=str(_DEFAULT_DATA_ROOT / "embeddings" / "faiss_index"),
+        env="VECTOR_DB_PATH",
     )
 
     # ── ML Configuration ──────────────────────────────────────────────────────
@@ -86,11 +110,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = Field(default="gpt-4o-mini", env="LLM_MODEL")
     LLM_TEMPERATURE: float = 0.1
     LLM_MAX_TOKENS: int = 1024
-
-    # Optional base URL override for OpenAI-compatible providers (Groq, Azure,
-    # Ollama, etc.).  Leave unset to use the official OpenAI API endpoint.
     LLM_BASE_URL: Optional[str] = Field(default=None, env="LLM_BASE_URL")
-
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     # ── RAG Configuration ────────────────────────────────────────────────────
@@ -100,12 +120,14 @@ class Settings(BaseSettings):
 
     # ── FastAPI ───────────────────────────────────────────────────────────────
     API_HOST: str = Field(default="0.0.0.0", env="API_HOST")
+    # Port 7860 is the only publicly accessible port on HuggingFace Spaces.
+    # Dockerfile.hf sets API_PORT=7860; local dev keeps 8000.
     API_PORT: int = Field(default=8000, env="API_PORT")
 
-    # Comma-separated list of allowed CORS origins.
-    # Use "*" to allow all origins (fully public API — acceptable when
-    # API_KEY_ENABLED=true adds a separate auth layer).
-    # Example: "https://finsight.yourdomain.com,https://app.yourdomain.com"
+    # ── CORS ──────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed CORS origins, or "*" for fully public.
+    # On HF Spaces set to your Dashboard Space URL in Space Secrets.
+    # Example: "https://YOUR_USERNAME-finsight-dashboard.hf.space"
     ALLOWED_ORIGINS_RAW: str = Field(
         default="http://localhost:3000,http://localhost:8501",
         env="ALLOWED_ORIGINS",
@@ -114,55 +136,35 @@ class Settings(BaseSettings):
     # ── Security — API Key Auth ───────────────────────────────────────────────
     # Set API_KEY_ENABLED=true and API_SECRET_KEY=<random-secret> to gate
     # every non-health endpoint behind a shared API key.
-    #
-    # Generate a strong key:
-    #   python -c "import secrets; print(secrets.token_urlsafe(32))"
-    #
-    # Clients must send:  X-API-Key: <key>   (header)
-    # or:                  ?api_key=<key>      (query param — less preferred)
     API_KEY_ENABLED: bool = Field(default=False, env="API_KEY_ENABLED")
     API_SECRET_KEY: Optional[str] = Field(default=None, env="API_SECRET_KEY")
 
     # ── Security — Rate Limiting ──────────────────────────────────────────────
-    # In-memory per-IP token bucket.  Not shared across workers — replace
-    # with a Redis-backed limiter for multi-worker or multi-instance setups.
     RATE_LIMIT_ENABLED: bool = Field(default=True, env="RATE_LIMIT_ENABLED")
     RATE_LIMIT_MAX_REQUESTS: int = Field(default=120, env="RATE_LIMIT_MAX_REQUESTS")
     RATE_LIMIT_WINDOW_S: int = Field(default=60, env="RATE_LIMIT_WINDOW_S")
 
     # ── Frontend / Dashboard ──────────────────────────────────────────────────
-    # The URL that the Streamlit dashboard should use to reach the API.
-    # Override in production:  FRONTEND_API_BASE=https://api.yourdomain.com/api/v1
+    # Override in production: FRONTEND_API_BASE=https://your-api.hf.space/api/v1
     FRONTEND_API_BASE: str = Field(
         default="http://localhost:8000/api/v1",
         env="FRONTEND_API_BASE",
     )
 
     # ── Trusted Proxies ───────────────────────────────────────────────────────
-    # Comma-separated list of IPs or CIDR blocks whose X-Forwarded-For headers
-    # should be trusted (Nginx, Traefik, AWS ALB, Cloudflare, etc.).
-    # Leave empty to trust no proxy (direct connections only).
     TRUSTED_PROXIES_RAW: str = Field(
         default="127.0.0.1",
         env="TRUSTED_PROXIES",
     )
 
     # ── Data cache ────────────────────────────────────────────────────────────
-    # Number of days before a cached parquet file is considered stale and
-    # re-fetched from the data source.  Default: 1 day.
     CACHE_MAX_AGE_DAYS: int = Field(default=1, env="CACHE_MAX_AGE_DAYS")
 
-    # ── Computed properties (derived from raw env strings) ────────────────────
+    # ── Computed properties ───────────────────────────────────────────────────
 
     @property
     def ALLOWED_ORIGINS(self) -> List[str]:
-        """
-        Parse ALLOWED_ORIGINS_RAW into a list.
-
-        Supports:
-          - "*"                          → ["*"]
-          - "https://a.com,https://b.com" → ["https://a.com", "https://b.com"]
-        """
+        """Parse ALLOWED_ORIGINS_RAW into a list."""
         raw = self.ALLOWED_ORIGINS_RAW.strip()
         if raw == "*":
             return ["*"]
@@ -178,11 +180,9 @@ class Settings(BaseSettings):
         """
         Create all runtime directories eagerly on first load.
 
-        Using a single ``model_validator`` instead of per-field validators
-        guarantees that every required directory exists regardless of whether
-        Pydantic resolves the fields in a particular order, and avoids the
-        silent omission bug where only ``MODELS_DIR`` and ``LOGS_DIR`` were
-        previously auto-created.
+        On HuggingFace Spaces the /data volume is writable by UID 1000.
+        All paths are resolved from env vars so this works identically
+        locally and in the cloud.
         """
         dirs_to_create = [
             self.DATA_DIR,
@@ -193,21 +193,20 @@ class Settings(BaseSettings):
             self.LOGS_DIR,
         ]
         for d in dirs_to_create:
-            Path(d).mkdir(parents=True, exist_ok=True)
+            try:
+                Path(d).mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                # On some read-only filesystems (e.g. HF build stage) this
+                # may fail — that is acceptable; the runtime will have /data.
+                pass
         return self
 
     @model_validator(mode="after")
     def _warn_insecure_config(self) -> "Settings":
-        """
-        Emit warnings for insecure production configurations.
-
-        Checks are advisory — they do not block startup — so developers can
-        still run the app locally without setting every security variable.
-        """
+        """Emit warnings for insecure production configurations."""
         if self.ENVIRONMENT == "production":
             if not self.API_KEY_ENABLED:
                 import warnings
-
                 warnings.warn(
                     "ENVIRONMENT=production but API_KEY_ENABLED=false. "
                     "The API is publicly accessible without authentication. "
@@ -216,10 +215,8 @@ class Settings(BaseSettings):
                 )
             if self.ALLOWED_ORIGINS_RAW == "*" and not self.API_KEY_ENABLED:
                 import warnings
-
                 warnings.warn(
-                    "ALLOWED_ORIGINS=* with API_KEY_ENABLED=false is an open API. "
-                    "This is only safe if all endpoints are intentionally public.",
+                    "ALLOWED_ORIGINS=* with API_KEY_ENABLED=false is a fully open API.",
                     stacklevel=2,
                 )
         return self

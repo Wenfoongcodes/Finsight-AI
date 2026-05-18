@@ -42,6 +42,7 @@ be substituted by replacing ``_InMemoryRateLimiter`` with a Redis adapter.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import threading
@@ -198,8 +199,9 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
         # ── 1. API Key authentication ─────────────────────────────────────────
         if settings.API_KEY_ENABLED and path not in _AUTH_EXEMPT_PATHS:
-            provided = request.headers.get("X-API-Key") or request.query_params.get(
-                "api_key"
+            provided = (
+                request.headers.get("X-API-Key")
+                or request.query_params.get("api_key")
             )
             if not _verify_api_key(provided):
                 logger.warning(
@@ -210,10 +212,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 )
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={
-                        "error": "Unauthorized",
-                        "detail": "Invalid or missing API key.",
-                    },
+                    content={"error": "Unauthorized", "detail": "Invalid or missing API key."},
                     headers={"X-Request-ID": request_id},
                 )
 
