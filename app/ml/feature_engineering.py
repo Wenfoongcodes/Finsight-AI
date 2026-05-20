@@ -1,38 +1,3 @@
-"""
-FinSight AI — Enhanced Feature Engineering Pipeline (v3)
-
-Changes vs v2
--------------
-**Hurst exponent is compile-time-only, not runtime-toggleable.**
-
-Problem with the previous design
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``FeatureEngineer`` accepted ``compute_hurst_exp: bool = False`` as a
-constructor argument.  Any code path that constructed ``FeatureEngineer``
-could set ``compute_hurst_exp=True``, including request handlers.  The
-Hurst computation runs ``scipy.stats.polyfit`` inside a rolling window
-apply — O(n × lags) with a Python-level loop — which takes ~2-4 seconds
-on 1 000 rows.  An API request that triggered this would time out or block
-the Uvicorn worker thread for the duration.
-
-Fix
-~~~
-``compute_hurst_exp`` is retained as a constructor argument for CLI /
-notebook use, but ``build_features`` now enforces that it can only be set
-to ``True`` if the class-level sentinel ``_HURST_ALLOWED`` is ``True``.
-``_HURST_ALLOWED`` is ``False`` by default and can only be changed by
-importing the module directly — it cannot be passed through the FastAPI
-request payload chain.
-
-In practice this means:
-* ``FeatureEngineer(compute_hurst_exp=True)``  in a script → works fine.
-* Any path where the FastAPI handler instantiates FeatureEngineer →
-  always ``False`` regardless of any request-side parameter.
-
-All other logic (indicators, regime features, multi-horizon labels,
-FeatureSelector) is unchanged from v2.
-"""
-
 from __future__ import annotations
 
 import warnings

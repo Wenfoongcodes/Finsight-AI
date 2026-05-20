@@ -1,9 +1,3 @@
-"""
-FinSight AI — Phase 4: ML Model Definitions
-Defines baseline and advanced model factories with consistent sklearn-compatible API.
-Supports: Logistic Regression, Random Forest, XGBoost, LightGBM, LSTM (Keras optional).
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional

@@ -1,14 +1,3 @@
-"""
-FinSight AI — Offline Data Ingestion Script
-Downloads and caches OHLCV market data for a list of tickers.
-Useful for pre-warming the cache before training or deployment.
-
-Usage:
-    python scripts/ingest_data.py --ticker AAPL
-    python scripts/ingest_data.py --tickers AAPL MSFT GOOGL TSLA --years 5
-    python scripts/ingest_data.py --tickers AAPL MSFT --no-cache
-"""
-
 from __future__ import annotations
 
 import argparse

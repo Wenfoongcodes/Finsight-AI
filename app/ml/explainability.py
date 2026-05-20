@@ -1,38 +1,3 @@
-"""
-FinSight AI — Explainable AI Layer (v4)
-
-Changes vs v3
--------------
-
-1.  **Deterministic output formatting (Req 2)**
-
-    All numeric values in ``local_explanation()`` and ``generate_narrative()``
-    now use helpers from ``app.core.formatting``:
-
-    - SHAP values              → ``round_shap()``   (4 d.p.)
-    - Feature values snapshot  → ``round_shap()``   (4 d.p., same scale)
-    - Probabilities (raw)      → ``round_prob()``   (4 d.p.)
-    - Probability display      → ``fmt_prob()``     ("72.3%")
-
-    The ``generate_narrative()`` method no longer builds its own f-string
-    template.  It delegates entirely to the canonical
-    ``build_prediction_narrative()`` helper in ``app.core.formatting``, which
-    is the single implementation shared with any future caller.
-
-2.  **Confidence threshold de-duplication (Req 2)**
-
-    The private constants ``_CONFIDENCE_HIGH_DELTA`` and
-    ``_CONFIDENCE_MODERATE_DELTA`` are removed.  ``generate_narrative()``
-    now calls the single ``confidence_label()`` function from
-    ``app.core.formatting``, which owns the thresholds.
-
-    Previously ``prediction_service.py`` had its own identical copy of the
-    threshold logic.  Both callers now use the same function.
-
-All SHAP/LIME explainer logic and the ``_build_explainer`` background-data
-fix introduced in v3 are unchanged.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional

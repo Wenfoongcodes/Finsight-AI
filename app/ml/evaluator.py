@@ -1,9 +1,3 @@
-"""
-FinSight AI — Phase 5: Model Evaluation & Validation
-Comprehensive evaluation suite: classification report, calibration,
-feature importance, and cross-model comparison utilities.
-"""
-
 from __future__ import annotations
 
 from typing import Any

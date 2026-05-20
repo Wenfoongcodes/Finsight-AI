@@ -1,27 +1,3 @@
-"""
-FinSight AI — Phase 9: LLM Chat System
-Provides a conversational financial assistant powered by OpenAI GPT
-with RAG context injection and multi-turn memory management.
-
-Bug fixed in previous revision
--------------------------------
-``OpenAIClient`` previously hardcoded ``base_url="https://api.groq.com/openai/v1"``.
-That was fixed: ``LLM_BASE_URL`` is now respected, and an empty string is
-normalised to ``None`` so the SDK uses the official OpenAI endpoint by default.
-
-Improvement in this revision
------------------------------
-``OpenAIClient.chat()`` now logs the *actual* model name used in each call
-at DEBUG level.  This makes model-mismatch problems (e.g. "gpt-4o-mini" sent
-to Groq) immediately visible in the log file without having to add ad-hoc
-print statements.
-
-Additionally, ``OpenAIClient.chat()`` extracts the error message from the
-OpenAI SDK exception and re-raises it as a ``LLMError`` with full detail so
-callers receive a meaningful message instead of a bare ``str(exc)`` that
-often omits the HTTP status code and provider error body.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

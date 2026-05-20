@@ -1,9 +1,3 @@
-"""
-FinSight AI — Custom Exception Hierarchy
-Provides domain-specific exceptions for precise error handling.
-"""
-
-
 class FinSightBaseError(Exception):
     """Base exception for all FinSight AI errors."""
 

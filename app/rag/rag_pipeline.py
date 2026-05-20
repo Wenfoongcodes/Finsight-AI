@@ -1,38 +1,3 @@
-"""
-FinSight AI — Phase 8: RAG Pipeline (v2)
-
-Changes vs v1
--------------
-**``_ingested_urls`` is now persisted to disk.**
-
-Problem with the previous design
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``RAGPipeline._ingested_urls`` was an in-memory ``dict``.  Every time the
-FastAPI process restarted (deploy, crash, container restart), the deduplication
-state was lost.  On the next startup, a user who had already ingested a URL
-would trigger a full re-fetch and re-embedding of the same article, adding
-duplicate chunks to the FAISS index and degrading retrieval quality over time.
-
-Fix
-~~~
-``_ingested_urls`` is persisted as a JSON sidecar file alongside the FAISS
-index and ``_docs.pkl``.  The sidecar path is::
-
-    {VECTOR_DB_PATH}_urls.json
-
-It is written atomically via a temp file + rename so a crash mid-write
-cannot corrupt the existing state.
-
-* ``save()`` — writes the sidecar in addition to the FAISS index and docs.
-* ``load()`` — reads the sidecar if it exists; silently ignores missing files
-  (backward compatible with indexes created before this change).
-* ``ingest_url()`` — persists the sidecar immediately after each new URL is
-  ingested so a crash between calls does not lose the deduplication record.
-
-All other logic (WebArticleFetcher, TextChunker, EmbeddingGenerator,
-FAISSVectorStore, RAGPipeline retrieval) is unchanged from v1.
-"""
-
 from __future__ import annotations
 
 import json

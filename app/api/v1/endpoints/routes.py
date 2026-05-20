@@ -1,17 +1,3 @@
-"""
-FinSight AI — FastAPI Route Handlers (v4)
-
-Changes vs v3
--------------
-* ``IntelligenceBriefSchema`` import removed — class no longer exists in schemas.
-* The block that built ``intelligence_brief_schema`` from ``resp.intelligence_brief``
-  is removed entirely.
-* ``intelligence_brief=intelligence_brief_schema`` kwarg removed from the
-  ``PredictionResult(...)`` constructor call.
-
-All other route logic unchanged.
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, status

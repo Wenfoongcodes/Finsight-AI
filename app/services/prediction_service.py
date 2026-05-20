@@ -1,31 +1,3 @@
-"""
-FinSight AI — Prediction Service (v7)
-
-Changes vs v6
--------------
-
-1.  **Horizon propagated to SignalFusionService (Req 1)**
-
-    ``fuse()`` is now called with the ``horizon`` argument so the news
-    recency filter inside ``SignalFusionService`` applies the correct
-    lookback window.  Previously all fusion calls defaulted to ``"1d"``
-    behaviour regardless of the requested prediction horizon.
-
-2.  **Deterministic output formatting (Req 2)**
-
-    - The private ``_confidence_label()`` function is removed.
-      ``PredictionResponse`` now uses ``confidence_label()`` from
-      ``app.core.formatting`` — the single shared implementation.
-    - ``p_bullish``, ``p_bearish``, ``probability`` → ``round_prob()``
-    - ``latest_close``                              → ``round_price()``
-    - Feature snapshot values                       → ``round_shap()``
-      (consistent with SHAP output precision)
-    - ``trained_at`` timestamps                     → ``utc_now_iso()``
-
-All other pipeline logic (walk-forward model selection, SHAP background
-fix, batch predict) is unchanged from v6.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

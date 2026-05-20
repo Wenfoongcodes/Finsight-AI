@@ -1,7 +1,3 @@
-"""
-Tests for app.ml.feature_engineering
-"""
-
 from __future__ import annotations
 
 import numpy as np

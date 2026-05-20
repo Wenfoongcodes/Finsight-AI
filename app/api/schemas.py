@@ -1,15 +1,3 @@
-"""
-FinSight AI — API Schemas (v5)
-
-Changes vs v4
--------------
-* ``IntelligenceBriefSchema`` class removed entirely.
-* ``intelligence_brief`` field removed from ``PredictionResult``.
-* Import of ``IntelligenceBriefSchema`` removed everywhere.
-
-All other contracts unchanged.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Literal, Optional

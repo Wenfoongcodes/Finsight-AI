@@ -1,7 +1,3 @@
-"""
-Tests for app.ml.training.trainer
-"""
-
 from __future__ import annotations
 
 import pytest

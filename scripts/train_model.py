@@ -1,13 +1,3 @@
-"""
-FinSight AI — Offline Model Training Script
-CLI entry point for training and persisting a model artifact.
-
-Usage:
-    python scripts/train_model.py --ticker AAPL --model xgboost
-    python scripts/train_model.py --ticker MSFT --model lightgbm --hpo --hpo-trials 50
-    python scripts/train_model.py --tickers AAPL MSFT GOOGL --model random_forest
-"""
-
 from __future__ import annotations
 
 import argparse

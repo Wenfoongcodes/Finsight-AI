@@ -1,8 +1,3 @@
-"""
-Tests for app.api.v1.endpoints.routes (FastAPI HTTP layer)
-Uses TestClient with mocked service dependencies.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch

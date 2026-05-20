@@ -1,38 +1,3 @@
-"""
-FinSight AI — FastAPI Application Entry Point (v2)
-
-Changes vs v1
--------------
-
-1.  **Public deployment readiness**
-
-    ``ALLOWED_ORIGINS`` is now read from ``settings.ALLOWED_ORIGINS`` which
-    parses the ``ALLOWED_ORIGINS`` environment variable at startup.  Set it to
-    ``"*"`` for a fully open API or to a comma-separated list of production
-    domain(s).
-
-2.  **Security middleware added**
-
-    ``SecurityMiddleware`` from ``app.core.security`` is registered before the
-    CORS middleware.  It provides:
-    - Optional API-key authentication (``API_KEY_ENABLED=true``).
-    - Per-IP in-memory rate limiting (``RATE_LIMIT_ENABLED=true``).
-    - ``X-Request-ID`` header on every response.
-    - Hardened security response headers.
-
-3.  **Startup validation**
-
-    The lifespan handler now validates critical configuration at boot and
-    logs clear, actionable warnings rather than failing silently later during
-    the first request.
-
-4.  **Request logging middleware**
-
-    Every request is logged at INFO level with method, path, status, duration,
-    and request ID so production logs are immediately useful without an APM
-    tool.
-"""
-
 from __future__ import annotations
 
 import time

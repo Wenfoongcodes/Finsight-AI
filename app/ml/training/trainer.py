@@ -1,31 +1,3 @@
-"""
-FinSight AI — Enhanced Training Pipeline (v4)
-
-Changes vs v3
--------------
-
-1.  **Deterministic output formatting (Req 2)**
-
-    All numeric fields produced by ``TrainingResult.to_dict()`` and
-    ``TrainingResult.compute_aggregates()`` now use helpers from
-    ``app.core.formatting``:
-
-    - Metrics (AUC, accuracy, F1, MAE, RMSE) → ``round_metric()``  (4 d.p.)
-    - Duration (seconds)                      → ``round()`` with ``DURATION_DECIMAL_PLACES``
-    - Timestamps                              → ``utc_now_iso()``
-
-    Inline ``round(..., 4)`` calls are eliminated so a single constant
-    controls precision everywhere.
-
-2.  **Logging precision aligned with ``to_dict()`` (Req 2)**
-
-    ``logger.info`` calls inside the walk-forward loop previously used
-    ``:.3f``.  They now use ``:.4f`` to match the canonical 4-decimal
-    metric precision so log output is consistent with leaderboard JSON.
-
-All walk-forward, HPO, calibration, and artifact logic is unchanged from v3.
-"""
-
 from __future__ import annotations
 
 import json

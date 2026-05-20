@@ -1,8 +1,3 @@
-"""
-FinSight AI — Structured Logging Configuration
-Provides consistent JSON-structured logging across all modules.
-"""
-
 import logging
 import sys
 from importlib.util import find_spec

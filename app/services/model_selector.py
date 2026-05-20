@@ -1,25 +1,3 @@
-"""
-FinSight AI — Automatic Model Selection Service (v4)
-
-Change vs v3
-------------
-When no trained artifacts exist for a ticker/horizon (REASON_NO_ARTIFACTS),
-the system previously fell back silently to a single hardcoded model
-(DEFAULT_TRAINING_MODEL = "xgboost").
-
-Fix: ``select()`` still returns a ``SelectionResult`` immediately (it cannot
-train inline — that is the trainer's responsibility).  The *caller*
-(``PredictionService``) is now responsible for iterating over
-``ALL_TRAINING_MODELS`` when it receives ``REASON_NO_ARTIFACTS``, training
-every model, and then re-running ``select()`` to pick the best one by AUC.
-
-This file exports ``ALL_TRAINING_MODELS`` so the caller has a single source
-of truth for which models to train.
-
-All other behaviour (leaderboard, REASON_BELOW_THRESHOLD, SelectionResult)
-is unchanged.
-"""
-
 from __future__ import annotations
 
 import json
