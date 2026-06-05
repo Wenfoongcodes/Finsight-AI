@@ -22,3 +22,6 @@ loguru==0.7.2
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-multipart==0.0.9
+
+# ── Distributed Rate Limiting (optional — required when RATE_LIMIT_BACKEND=redis) ──
+redis[hiredis]>=5.0.0

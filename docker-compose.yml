@@ -53,7 +53,7 @@ services:
       - ./docker/nginx/certs:/etc/nginx/certs:ro
       - nginx_logs:/var/log/nginx
     depends_on:
-      api:
+      redis:
         condition: service_healthy
       dashboard:
         condition: service_started
@@ -86,6 +86,9 @@ services:
       - ENVIRONMENT=production
       - API_HOST=0.0.0.0
       - API_PORT=8000
+      - RATE_LIMIT_BACKEND=${RATE_LIMIT_BACKEND:-redis}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       # Override ALLOWED_ORIGINS in .env to restrict CORS to your domain(s).
       # Example: ALLOWED_ORIGINS=https://finsight.yourdomain.com
     volumes:
@@ -130,8 +133,31 @@ services:
       # Forward the API key so the dashboard can authenticate its requests.
       - FINSIGHT_API_KEY=${API_SECRET_KEY:-}
     depends_on:
-      api:
+      redis:
         condition: service_healthy
+    restart: unless-stopped
+
+# ── Redis — Distributed Rate Limiter Backing Store ────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: finsight_redis
+    command: >
+      redis-server
+        --maxmemory 64mb
+        --maxmemory-policy allkeys-lru
+        --save ""
+        --appendonly no
+    expose:
+      - "6379"
+    ports:
+      # Expose on localhost only — not for external traffic.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
 volumes:

@@ -35,9 +35,7 @@ class Settings(BaseSettings):
     EMBEDDINGS_DIR: Path = Field(
         default=_DEFAULT_DATA_ROOT / "embeddings", env="EMBEDDINGS_DIR"
     )
-    MODELS_DIR: Path = Field(
-        default=_DEFAULT_DATA_ROOT / "models", env="MODELS_DIR"
-    )
+    MODELS_DIR: Path = Field(default=_DEFAULT_DATA_ROOT / "models", env="MODELS_DIR")
     LOGS_DIR: Path = Field(default=BASE_DIR / "logs", env="LOGS_DIR")
 
     # ── Database ──────────────────────────────────────────────────────────────
@@ -120,6 +118,24 @@ class Settings(BaseSettings):
     # ── Data cache ────────────────────────────────────────────────────────────
     CACHE_MAX_AGE_DAYS: int = Field(default=1, env="CACHE_MAX_AGE_DAYS")
 
+    # ── Rate Limit Backend ────────────────────────────────────────────────────────
+    # "memory"  — in-process sliding window (default; no external deps)
+    # "redis"   — distributed sliding window via Redis (required for multi-worker)
+    RATE_LIMIT_BACKEND: str = Field(default="memory", env="RATE_LIMIT_BACKEND")
+
+    # Redis connection — used only when RATE_LIMIT_BACKEND=redis
+    REDIS_HOST: str = Field(default="localhost", env="REDIS_HOST")
+    REDIS_PORT: int = Field(default=6379, env="REDIS_PORT")
+    REDIS_PASSWORD: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
+    REDIS_DB: int = Field(default=0, env="REDIS_DB")
+    REDIS_SSL: bool = Field(default=False, env="REDIS_SSL")
+    REDIS_SOCKET_TIMEOUT_S: float = Field(default=0.5, env="REDIS_SOCKET_TIMEOUT_S")
+    REDIS_CONNECT_TIMEOUT_S: float = Field(default=1.0, env="REDIS_CONNECT_TIMEOUT_S")
+    REDIS_MAX_CONNECTIONS: int = Field(default=20, env="REDIS_MAX_CONNECTIONS")
+
+    # Key prefix — isolates FinSight keys from other apps sharing the Redis instance
+    REDIS_KEY_PREFIX: str = Field(default="finsight:ratelimit", env="REDIS_KEY_PREFIX")
+
     # ── Computed properties ───────────────────────────────────────────────────
 
     @property
@@ -167,6 +183,7 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT == "production":
             if not self.API_KEY_ENABLED:
                 import warnings
+
                 warnings.warn(
                     "ENVIRONMENT=production but API_KEY_ENABLED=false. "
                     "The API is publicly accessible without authentication. "
@@ -175,6 +192,7 @@ class Settings(BaseSettings):
                 )
             if self.ALLOWED_ORIGINS_RAW == "*" and not self.API_KEY_ENABLED:
                 import warnings
+
                 warnings.warn(
                     "ALLOWED_ORIGINS=* with API_KEY_ENABLED=false is a fully open API.",
                     stacklevel=2,
