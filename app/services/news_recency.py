@@ -107,13 +107,34 @@ class ArticleDateExtractor:
 
     Extraction order
     ----------------
-    1. ``result_metadata`` dict keys: ``published``, ``date``,
-       ``pubDate``, ``publishedAt``.
+    1. ``item.metadata`` dict — checked before any text parsing.
+       Keys searched (in priority order):
+         "date"                  — DuckDuckGo's primary date field (ISO-8601)
+         "published"             — generic publisher metadata
+         "pubDate"               — RSS-style field
+         "publishedAt"           — common API field
+         "article:published_time"— Open Graph meta tag value
+
+       Searching the metadata dict first is critical: DuckDuckGo returns a
+       structured "date" key on most results, so the regex fallback should
+       rarely be needed when NewsRetriever correctly stores r.get("date") into
+       item.metadata.
+
     2. Snippet text: regex patterns from most to least specific.
     3. Title text: same regex pass on the headline.
 
     Returns an *aware* UTC ``datetime`` or ``None``.
     """
+
+    # Metadata keys checked in priority order.
+    # "date" is listed first because that is DuckDuckGo's field name.
+    _METADATA_KEYS: tuple[str, ...] = (
+        "date",
+        "published",
+        "pubDate",
+        "publishedAt",
+        "article:published_time",
+    )
 
     def extract(
         self,
@@ -129,15 +150,9 @@ class ArticleDateExtractor:
             where ``source_label`` is ``"metadata"``, ``"snippet"``,
             ``"title"``, ``"relative_text"``, or ``"unknown"``.
         """
-        # ── 1. Metadata fields ────────────────────────────────────────────────
+        # ── 1. Metadata dict (DDG "date", Open Graph, RSS) ────────────────────
         if metadata:
-            for key in (
-                "published",
-                "date",
-                "pubDate",
-                "publishedAt",
-                "article:published_time",
-            ):
+            for key in self._METADATA_KEYS:
                 raw = metadata.get(key)
                 if raw and isinstance(raw, str):
                     dt = self._parse_iso(raw)
@@ -189,7 +204,6 @@ class ArticleDateExtractor:
                 continue
 
             if fmt == "relative":
-                # e.g. "3 days ago"
                 count = int(match.group(1))
                 unit = match.group(2).lower().rstrip("s")
                 delta_map = {
@@ -204,14 +218,13 @@ class ArticleDateExtractor:
                 continue
 
             if fmt is None:
-                # Month-name long form: "May 14, 2026"
                 dt = self._parse_month_name(match.group(1))
                 if dt:
                     return dt, "snippet_long_date"
                 continue
 
             try:
-                date_str = match.group(1).split("T")[0]  # strip time component
+                date_str = match.group(1).split("T")[0]
                 dt = datetime.strptime(date_str, fmt)
                 return dt.replace(tzinfo=timezone.utc), "snippet_numeric"
             except ValueError:
@@ -247,6 +260,30 @@ class NewsRecencyFilter:
     """
     Filters a list of ``NewsItem`` objects to those within a lookback window.
 
+    Design rationale for changed defaults
+    --------------------------------------
+    The previous defaults were ``unknown_date_policy="accept_with_penalty"``
+    and ``min_kept=2``.  Both defaults have been changed:
+
+    ``unknown_date_policy`` → ``"reject"`` (was ``"accept_with_penalty"``)
+        DuckDuckGo's ``timelimit`` parameter now pre-filters results server-side
+        before ``NewsRecencyFilter`` runs.  An article that passes the DDG time
+        filter but still has no parseable publish date is more likely to be a
+        stale aggregator cache entry than fresh news.  Rejecting it is safer
+        than keeping it with a weight penalty.
+
+        Callers that explicitly want the old behaviour can pass
+        ``unknown_date_policy="accept_with_penalty"``.
+
+    ``min_kept`` → ``0`` (was ``2``)
+        The rescue floor actively undermined the filter: when all retrieved
+        articles failed the recency check (e.g. only stale results were
+        returned), ``min_kept=2`` would pull the two least-stale articles back
+        into the result set and let them reach the LLM.  Removing the floor
+        means an empty result correctly signals "no verifiable fresh news",
+        which causes ``SignalFusionService`` to fall back to an ML-only signal
+        rather than synthesising with unverified data.
+
     Usage
     -----
     ::
@@ -254,33 +291,32 @@ class NewsRecencyFilter:
         filter_ = NewsRecencyFilter(horizon="1d")
         kept, dropped = filter_.apply(items)
 
-    The ``audit`` attribute on each ``NewsItem`` (added in-place via
-    ``setattr``) records the extraction outcome for downstream logging.
-
     Parameters
     ----------
     horizon:
         Prediction horizon key (``"1d"``, ``"7d"``, ``"1m"``, ``"6m"``).
         Determines ``max_age_days`` from ``HORIZON_MAX_AGE_DAYS``.
-        Overrides ``max_age_days`` when both are supplied.
     max_age_days:
         Explicit override for the lookback window in calendar days.
+        Takes precedence over ``horizon`` when both are supplied.
     unknown_date_policy:
         What to do with articles whose publish date cannot be determined.
-        See module docstring for policy descriptions.
+        ``"reject"``              — drop the article (default).
+        ``"accept_with_penalty"`` — keep at 50% weight.
+        ``"accept"``              — keep at full weight.
     min_kept:
         Minimum number of articles to keep regardless of recency.
-        Prevents an empty result when all articles lack dates and
-        ``unknown_date_policy="reject"``.  The oldest available articles
-        are kept to satisfy this floor.  Default: 2.
+        Set to 0 (default) to disable the rescue floor entirely.
+        A non-zero value re-enables the old rescue behaviour — use only
+        when an empty result set is unacceptable for the call site.
     """
 
     def __init__(
         self,
         horizon: str = "1d",
         max_age_days: Optional[int] = None,
-        unknown_date_policy: UnknownDatePolicy = "accept_with_penalty",
-        min_kept: int = 2,
+        unknown_date_policy: UnknownDatePolicy = "reject",
+        min_kept: int = 0,
     ) -> None:
         if max_age_days is not None:
             self.max_age_days = max_age_days
@@ -297,8 +333,14 @@ class NewsRecencyFilter:
         Apply the recency filter to a list of ``NewsItem`` objects.
 
         Each item receives a ``recency_audit`` attribute (``RecencyAuditEntry``).
-        Items are not mutated in any other way — ``final_weight`` is only
-        reduced when ``unknown_date_policy="accept_with_penalty"``.
+
+        The ``ArticleDateExtractor`` checks ``item.metadata`` before falling back
+        to regex-parsing snippet and title text.  When ``NewsRetriever`` stores
+        DuckDuckGo's ``"date"`` field in ``item.metadata``, the extractor finds a
+        structured date on the first lookup and the regex paths are rarely reached.
+
+        Items are not mutated in any other way — ``final_weight`` is only reduced
+        when ``unknown_date_policy="accept_with_penalty"``.
 
         Returns:
             ``(kept_items, dropped_items)``
@@ -320,10 +362,14 @@ class NewsRecencyFilter:
             else:
                 dropped.append(item)
 
-        # Enforce the minimum-kept floor
-        if len(kept) < self.min_kept and dropped:
+        # ── Rescue floor (disabled by default via min_kept=0) ─────────────────
+        # When min_kept > 0, articles dropped for staleness can be rescued back
+        # into the result set to satisfy the floor.  This is intentionally
+        # disabled by default: an empty result correctly signals "no verifiable
+        # fresh news" and should trigger an ML-only fallback rather than allow
+        # stale articles to reach the LLM.
+        if self.min_kept > 0 and len(kept) < self.min_kept and dropped:
             shortfall = self.min_kept - len(kept)
-            # Prefer items with the most recent extracted dates
             rescued = self._rescue_newest(dropped, shortfall)
             for item in rescued:
                 item.recency_audit.kept = True
@@ -334,9 +380,10 @@ class NewsRecencyFilter:
                 dropped.remove(item)
 
         logger.info(
-            "Recency filter (max_age=%dd, policy=%s): kept=%d dropped=%d",
+            "Recency filter (max_age=%dd, policy=%s, min_kept=%d): kept=%d dropped=%d",
             self.max_age_days,
             self.unknown_date_policy,
+            self.min_kept,
             len(kept),
             len(dropped),
         )
@@ -358,18 +405,26 @@ class NewsRecencyFilter:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _audit_item(self, item, now: datetime, cutoff: datetime) -> RecencyAuditEntry:
-        """Build a ``RecencyAuditEntry`` for a single ``NewsItem``."""
+        """
+        Build a ``RecencyAuditEntry`` for a single ``NewsItem``.
+
+        The extractor receives ``item.metadata`` so that DuckDuckGo's structured
+        ``"date"`` field (stored by ``NewsRetriever``) is checked before any
+        regex-based fallback.
+        """
         metadata = getattr(item, "metadata", None)
         dt, src = self._extractor.extract(item.title, item.snippet, metadata)
 
         if dt is None:
-            # Date unknown — apply policy
             if self.unknown_date_policy == "reject":
                 return RecencyAuditEntry(
                     extracted_date=None,
                     age_days=None,
                     kept=False,
-                    rejection_reason="Date unknown and policy=reject.",
+                    rejection_reason=(
+                        "Publish date could not be determined and "
+                        "unknown_date_policy=reject."
+                    ),
                     date_source="unknown",
                 )
             elif self.unknown_date_policy == "accept_with_penalty":
@@ -413,6 +468,8 @@ class NewsRecencyFilter:
         """
         Pick the ``count`` most recent (or date-unknown) articles from
         the dropped list to satisfy the ``min_kept`` floor.
+
+        Only reachable when ``min_kept > 0``.
         """
 
         def sort_key(item) -> float:
@@ -421,6 +478,6 @@ class NewsRecencyFilter:
             )
             if audit.extracted_date:
                 return audit.extracted_date.timestamp()
-            return 0.0  # unknown-date items sort to the bottom
+            return 0.0
 
         return sorted(dropped, key=sort_key, reverse=True)[:count]

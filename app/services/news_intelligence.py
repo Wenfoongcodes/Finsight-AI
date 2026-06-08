@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import re
 import time
@@ -12,13 +10,17 @@ from app.core.formatting import (
     utc_now_iso,
 )
 from app.core.logging_config import get_logger
-from app.services.news_recency import NewsRecencyFilter
+from app.services.news_recency import (
+    HORIZON_MAX_AGE_DAYS,
+    DEFAULT_MAX_AGE_DAYS,
+    NewsRecencyFilter,
+)
 
 logger = get_logger("news_retrieval")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source quality classification  (unchanged from v3)
+# Source quality classification
 # ─────────────────────────────────────────────────────────────────────────────
 
 TIER1_SOURCES: dict[str, float] = {
@@ -56,6 +58,7 @@ TIER2_SOURCES: dict[str, float] = {
 }
 
 BLOCKED_DOMAINS: set[str] = {
+    # ── General noise ─────────────────────────────────────────────────────────
     "wikipedia.org",
     "en.wikipedia.org",
     "wikidata.org",
@@ -70,7 +73,87 @@ BLOCKED_DOMAINS: set[str] = {
     "tumblr.com",
     "medium.com",
     "substack.com",
+    # ── Price-data aggregators — no editorial content ─────────────────────────
+    # These sites return price tables, screeners, and historical OHLCV data.
+    # DDG ranks them highly for stock queries because they are heavily linked,
+    # but they carry no news narrative for the LLM to reason over.
+    "macrotrends.net",
+    "stockanalysis.com",
+    "tradingview.com",
+    "finviz.com",
+    "barchart.com",
+    "wisesheets.io",
+    "simplywall.st",
+    "chartmill.com",
+    "gurufocus.com",
+    "stockscreener.com",
+    "alphaquery.com",
+    "dividendhistory.org",
+    "stockhistory.app",
+    "tickertape.in",
+    "tickertape.com",
+    "statmuse.com",
+    "wallstreetzen.com",
+    "investing.com",
+    "stlouisfed.org",
 }
+
+# Domains that publish BOTH editorial content and price/quote pages.
+# Items from these domains are checked against PRICE_PAGE_PATH_PATTERNS
+# before being admitted — the domain-level credibility score applies only
+# to URLs that pass the path check.
+MIXED_CONTENT_DOMAINS: set[str] = {
+    "finance.yahoo.com",
+    "marketwatch.com",
+    "cnbc.com",
+    "bloomberg.com",
+    "reuters.com",
+    "wsj.com",
+    "ft.com",
+    "barrons.com",
+}
+
+# URL path segments that identify price/data pages on mixed-content domains.
+# A URL whose path contains any of these strings is rejected regardless of
+# the domain's credibility score.
+PRICE_PAGE_PATH_PATTERNS: tuple[str, ...] = (
+    "/quote/",
+    "/quotes/",
+    "/symbol/",
+    "/stocks/",
+    "/price/",
+    "/chart/",
+    "/history/",
+    "/historical",
+    "/financials/",
+    "/balance-sheet",
+    "/income-statement",
+    "/cash-flow",
+    "/ownership/",
+    "/holders/",
+    "/statistics/",
+    "/key-statistics",
+    "/screener",
+    "/markets/stocks/",
+    "/investing/stock/",
+    "/market-data/",
+)
+
+# DDG -site: exclusions appended to every query string.
+# Eliminates the noisiest price-data domains server-side before DDG transmits
+# results, reducing both latency and the post-retrieval filtering burden.
+_DDG_SITE_EXCLUSIONS: str = (
+    " -site:macrotrends.net"
+    " -site:stockanalysis.com"
+    " -site:tradingview.com"
+    " -site:finviz.com"
+    " -site:barchart.com"
+    " -site:wisesheets.io"
+    " -site:simplywall.st"
+    " -site:finance.yahoo.com/quote"
+    " -site:marketwatch.com/investing/stock"
+    " -site:investing.com"
+)
 
 BULLISH_KEYWORDS: frozenset[str] = frozenset(
     {
@@ -161,8 +244,26 @@ _MAX_RETRIES: int = 2
 _RETRY_DELAY_S: float = 1.5
 _DEFAULT_CREDIBILITY: float = 0.55
 
-# Characters contributed by each article to the situation summary.
+# Minimum word count a snippet must have to be considered news prose.
+# Price-data pages return fragments like "AAPL 185.20 +1.3% Open: 184.50"
+# which are far too terse to carry any editorial content.
+_MIN_SNIPPET_WORDS: int = 15
+
 _SUMMARY_SNIPPET_CHARS: int = 180
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DDG timelimit mapping
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _horizon_to_ddg_timelimit(horizon: str) -> str:
+    """Return the tightest DuckDuckGo timelimit string for the given horizon."""
+    max_age = HORIZON_MAX_AGE_DAYS.get(horizon, DEFAULT_MAX_AGE_DAYS)
+    if max_age <= 3:
+        return "d"
+    if max_age <= 7:
+        return "w"
+    return "m"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,11 +277,14 @@ class NewsItem:
     snippet: str
     url: str
     sentiment: str = "neutral"
-    # All float fields use canonical precision from app.core.formatting
-    sentiment_score: float = 0.0  # round_sentiment() — 3 d.p.
-    severity_score: float = 0.0  # round_sentiment() — 3 d.p. (same scale)
-    credibility_score: float = _DEFAULT_CREDIBILITY  # 3 d.p.
-    final_weight: float = 0.5  # round_weight() — 3 d.p.
+    sentiment_score: float = 0.0
+    severity_score: float = 0.0
+    credibility_score: float = _DEFAULT_CREDIBILITY
+    final_weight: float = 0.5
+    # Raw metadata from the search result (e.g. DDG's "date" field).
+    # Stored here so ArticleDateExtractor can find a structured publish date
+    # without having to parse free-form snippet text.
+    metadata: dict = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -197,29 +301,18 @@ class NewsItem:
 
 @dataclass
 class IntelligenceBrief:
-    """
-    Institutional-style market intelligence summary.
-
-    New fields (v4)
-    ---------------
-    articles_retrieved : Total articles before recency filtering.
-    articles_kept      : Articles that passed the lookback filter.
-    recency_note       : Human-readable filter summary included in narratives.
-    generated_at       : UTC ISO-8601 timestamp of brief creation.
-    """
+    """Institutional-style market intelligence summary."""
 
     ticker: str
     situation_summary: str
-    # Kept empty for API schema backward compatibility (removed from frontend v4)
     bullish_catalysts: list[str] = field(default_factory=list)
     bearish_catalysts: list[str] = field(default_factory=list)
     aggregate_sentiment: str = "neutral"
-    sentiment_score: float = 0.0  # round_sentiment() — 3 d.p.
+    sentiment_score: float = 0.0
     top_news: list[NewsItem] = field(default_factory=list)
     source_quality_note: str = ""
     retrieval_success: bool = True
     error_message: str = ""
-    # v4 additions
     articles_retrieved: int = 0
     articles_kept: int = 0
     recency_note: str = ""
@@ -227,7 +320,7 @@ class IntelligenceBrief:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source quality helpers  (unchanged)
+# Source quality helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -241,63 +334,190 @@ def _credibility_score(domain: str) -> float:
 
 
 def _is_blocked(domain: str) -> bool:
+    """Return True when the domain is on the blocklist."""
     return domain.replace("www.", "").lower() in BLOCKED_DOMAINS
 
 
+def _is_price_page(domain: str, url: str) -> bool:
+    """
+    Return True when a URL from a mixed-content domain resolves to a price
+    or data page rather than an editorial article.
+
+    Mixed-content domains (e.g. finance.yahoo.com, marketwatch.com) publish
+    both editorial articles and price/quote/chart pages.  The domain-level
+    credibility score is only meaningful for their editorial content, so URLs
+    that match known data-page path patterns are rejected here regardless of
+    how high the domain scores.
+
+    Pure news domains (e.g. reuters.com article pages) are not affected
+    because they are not in MIXED_CONTENT_DOMAINS.
+    """
+    clean_domain = domain.replace("www.", "").lower()
+    if clean_domain not in MIXED_CONTENT_DOMAINS:
+        return False
+    url_lower = url.lower()
+    return any(pattern in url_lower for pattern in PRICE_PAGE_PATH_PATTERNS)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# News Retriever  (unchanged from v3)
+# News Retriever
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class NewsRetriever:
+    """
+    Retrieves financial news articles via DuckDuckGo.
+
+    Query strategy
+    --------------
+    Each query is phrased to signal editorial intent to DDG's ranking model.
+    Words like "news", "report", "analysis", "announces", and "says" strongly
+    bias DDG toward article pages rather than data/screener pages.
+    ``_DDG_SITE_EXCLUSIONS`` is appended to every query to eliminate the
+    noisiest price-data aggregators server-side.
+
+    Post-retrieval filtering layers (applied in order)
+    ---------------------------------------------------
+    1. Domain blocklist      — ``_is_blocked()``  full domains with no
+                               editorial content.
+    2. Price-page URL filter — ``_is_price_page()``  quote/chart/screener
+                               paths on mixed-content domains.
+    3. Snippet word-count    — rejects fragments shorter than
+                               ``_MIN_SNIPPET_WORDS`` words (price tickers,
+                               data tables) that carry no news prose.
+    4. Fingerprint dedup     — title-hash deduplication across queries.
+
+    Recency
+    -------
+    ``horizon`` selects the tightest DDG ``timelimit`` bucket that still
+    covers the prediction window, filtering stale results server-side before
+    the local ``NewsRecencyFilter`` runs.
+    """
+
     def __init__(self, top_k: int = 8) -> None:
         self.top_k = top_k
 
-    def retrieve(self, ticker: str) -> list[NewsItem]:
+    def retrieve(self, ticker: str, horizon: str = "1d") -> list[NewsItem]:
+        """
+        Retrieve deduplicated news articles for *ticker*.
+
+        Parameters
+        ----------
+        ticker:  Stock ticker symbol (e.g. "AAPL").
+        horizon: Prediction horizon key — used to select the DDG time bucket
+                 and communicate context for logging.
+        """
+        timelimit = _horizon_to_ddg_timelimit(horizon)
+
+        # ── Query design ──────────────────────────────────────────────────────
+        # Three complementary queries targeting different editorial content
+        # types.  Quoting the ticker ("AAPL") prevents DDG from broadening to
+        # unrelated results.  _DDG_SITE_EXCLUSIONS appended to every query
+        # eliminates the highest-volume price-data domains server-side.
         queries = [
-            f"{ticker} stock earnings results quarterly",
-            f"{ticker} analyst rating price target",
-            f"{ticker} SEC filing guidance outlook",
+            # Breaking news and recent corporate events
+            f'"{ticker}" stock news{_DDG_SITE_EXCLUSIONS}',
+            # Analyst commentary: upgrades, downgrades, price-target changes
+            f'"{ticker}" analyst report upgrade downgrade{_DDG_SITE_EXCLUSIONS}',
+            # Earnings, guidance revisions, SEC filings, M&A
+            f'"{ticker}" earnings guidance announcement{_DDG_SITE_EXCLUSIONS}',
         ]
+
         seen_fps: set[str] = set()
         items: list[NewsItem] = []
 
         for query in queries:
             try:
-                raw = self._fetch_ddgs(query, max_results=self.top_k)
+                raw = self._fetch_ddgs(
+                    query, max_results=self.top_k, timelimit=timelimit
+                )
                 for r in raw:
+                    url = r.get("href", "")
+                    title = r.get("title", "")
+                    snippet = r.get("body", "")
+
                     item = NewsItem(
-                        title=r.get("title", ""),
-                        snippet=r.get("body", "")[:_MAX_SNIPPET_CHARS],
-                        url=r.get("href", ""),
+                        title=title,
+                        snippet=snippet[:_MAX_SNIPPET_CHARS],
+                        url=url,
                     )
+
+                    # Persist DDG's structured date into metadata so
+                    # ArticleDateExtractor finds it without regex fallback.
+                    raw_date = r.get("date") or r.get("published")
+                    if raw_date:
+                        item.metadata["date"] = str(raw_date)
+
+                    # ── Filter layer 1: domain blocklist ──────────────────────
                     if _is_blocked(item.domain):
-                        logger.debug("Blocked domain skipped: %s", item.domain)
+                        logger.debug("Blocked domain: %s", item.domain)
                         continue
+
+                    # ── Filter layer 2: price-page URL pattern ────────────────
+                    # Rejects quote/chart/screener URLs from mixed-content
+                    # domains (e.g. finance.yahoo.com/quote/AAPL,
+                    # marketwatch.com/investing/stock/aapl/charts).
+                    if _is_price_page(item.domain, url):
+                        logger.debug("Price page filtered: %s", url)
+                        continue
+
+                    # ── Filter layer 3: snippet word-count floor ──────────────
+                    # Price-data pages produce terse fragments like
+                    # "AAPL 185.20 +1.3% Open: 184.50 Vol: 54M" which are
+                    # useless for sentiment analysis and LLM synthesis.
+                    if len(snippet.split()) < _MIN_SNIPPET_WORDS:
+                        logger.debug(
+                            "Snippet too short (%d words), likely price data: %s",
+                            len(snippet.split()),
+                            url,
+                        )
+                        continue
+
+                    # ── Filter layer 4: fingerprint deduplication ─────────────
                     fp = item.fingerprint
                     if fp in seen_fps:
                         continue
                     seen_fps.add(fp)
+
                     item.credibility_score = _credibility_score(item.domain)
                     items.append(item)
+
             except Exception as exc:
                 logger.warning("News query failed for %r: %s", query, exc)
 
         items.sort(key=lambda x: x.credibility_score, reverse=True)
         result = items[: self.top_k]
         logger.info(
-            "[%s] Retrieved %d news items (after dedup/domain-filter)",
+            "[%s] Retrieved %d news items (horizon=%s ddg_timelimit=%s)",
             ticker,
             len(result),
+            horizon,
+            timelimit,
         )
         return result
 
-    def _fetch_ddgs(self, query: str, max_results: int) -> list[dict]:
+    def _fetch_ddgs(
+        self,
+        query: str,
+        max_results: int,
+        timelimit: str = "w",
+    ) -> list[dict]:
+        """
+        Execute a DuckDuckGo text search.
+
+        Parameters
+        ----------
+        query:       Natural language search query (with -site: exclusions).
+        max_results: Maximum number of results to request.
+        timelimit:   DDG recency filter — 'd' (day), 'w' (week), 'm' (month).
+                     Applied server-side before results are transmitted.
+        """
         DDGS = None
         try:
             from ddgs import DDGS
         except ImportError:
             pass
+
         if DDGS is None:
             try:
                 from duckduckgo_search import DDGS
@@ -309,12 +529,20 @@ class NewsRetriever:
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 with DDGS() as ddgs:
-                    return list(ddgs.text(query, max_results=max_results))
+                    return list(
+                        ddgs.text(
+                            query,
+                            max_results=max_results,
+                            timelimit=timelimit,
+                        )
+                    )
             except Exception:
                 if attempt < _MAX_RETRIES:
                     wait = _RETRY_DELAY_S * (2**attempt)
                     logger.debug(
-                        "DDGS attempt %d failed; retrying in %.1fs…", attempt + 1, wait
+                        "DDGS attempt %d failed; retrying in %.1fs…",
+                        attempt + 1,
+                        wait,
                     )
                     time.sleep(wait)
                 else:
@@ -322,7 +550,7 @@ class NewsRetriever:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# News Analyzer  — uses canonical formatting helpers
+# News Analyzer
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -352,7 +580,6 @@ class NewsAnalyzer:
                 raw_score = 0.0
 
             item.sentiment_score = round_sentiment(raw_score)
-
             item.severity_score = round_sentiment(
                 min(1.0, sum(1 for kw in SEVERITY_KEYWORDS if kw in text) / 3.0)
             )
@@ -367,7 +594,7 @@ class NewsAnalyzer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Intelligence Summarizer  — deterministic output format
+# Intelligence Summarizer
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -470,7 +697,7 @@ class IntelligenceSummarizer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Facade  — wires in recency filter
+# Facade
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -480,21 +707,31 @@ class FinancialIntelligenceService:
 
     Always returns an ``IntelligenceBrief``; never raises.
 
+    Content-quality enforcement happens at three layers:
+    1. **Query design** — queries are phrased with editorial-intent language
+       ("news", "analyst report", "announcement") and ``_DDG_SITE_EXCLUSIONS``
+       eliminates high-volume price-data domains at DDG's server.
+    2. **Post-retrieval filtering** — ``NewsRetriever`` applies domain blocklist,
+       price-page URL pattern, and snippet word-count checks before items enter
+       the pipeline.
+    3. **Recency filter** — ``NewsRecencyFilter`` validates publish dates against
+       the horizon-specific lookback window.  ``unknown_date_policy="reject"``
+       drops articles whose publish date cannot be determined.
+
     Parameters
     ----------
     top_k:
         Maximum articles to retrieve per query set.
     unknown_date_policy:
         What to do with articles whose publish date cannot be determined.
-        ``"accept_with_penalty"`` (default) halves the ``final_weight`` of
-        undated articles rather than discarding them outright, striking a
-        balance between completeness and staleness risk.
+        Defaults to ``"reject"`` — an undated result from a time-filtered DDG
+        query is more likely a stale aggregator link than fresh news.
     """
 
     def __init__(
         self,
         top_k: int = 8,
-        unknown_date_policy: str = "accept_with_penalty",
+        unknown_date_policy: str = "reject",
     ) -> None:
         self._retriever = NewsRetriever(top_k=top_k)
         self._analyzer = NewsAnalyzer()
@@ -512,24 +749,34 @@ class FinancialIntelligenceService:
         Parameters
         ----------
         ticker:  Stock ticker symbol.
-        horizon: Prediction horizon key — determines the lookback window.
-                 Defaults to ``"1d"`` (3-day lookback).
+        horizon: Prediction horizon key — forwarded to both the retriever
+                 (DDG timelimit + query context) and the recency filter
+                 (lookback window).
         """
         try:
-            # ── 1. Retrieve raw items ─────────────────────────────────────────
-            raw_items = self._retriever.retrieve(ticker)
+            # ── 1. Retrieve ───────────────────────────────────────────────────
+            # horizon drives DDG timelimit selection and is embedded in
+            # logging context.  Post-retrieval content-quality filters run
+            # inside NewsRetriever.retrieve() before items are returned.
+            raw_items = self._retriever.retrieve(ticker, horizon=horizon)
             articles_retrieved = len(raw_items)
 
             # ── 2. Recency filter ─────────────────────────────────────────────
+            # unknown_date_policy="reject" and min_kept=0:
+            #   - Articles with no parseable publish date are dropped.
+            #   - The filter never rescues dropped articles to satisfy a floor.
+            # An empty result signals "no verifiable fresh news" and causes
+            # SignalFusionService to return an ML-only FusedSignal.
             recency_filter = NewsRecencyFilter(
                 horizon=horizon,
                 unknown_date_policy=self._unknown_date_policy,
+                min_kept=0,
             )
             items, dropped = recency_filter.apply(raw_items)
 
             recency_note = (
                 f"max age {recency_filter.max_age_days}d; "
-                f"{len(dropped)} article(s) discarded as stale"
+                f"{len(dropped)} article(s) discarded as stale or undated"
             )
             logger.info(
                 "[%s/%s] Recency filter: %d retrieved, %d kept, %d dropped",
@@ -540,7 +787,7 @@ class FinancialIntelligenceService:
                 len(dropped),
             )
 
-            # ── 3. Analyse remaining items ────────────────────────────────────
+            # ── 3. Sentiment + weight scoring ─────────────────────────────────
             items = self._analyzer.analyze(items)
 
             # ── 4. Summarise ──────────────────────────────────────────────────
