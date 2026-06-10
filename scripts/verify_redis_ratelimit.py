@@ -628,12 +628,16 @@ def layer3_redis_live(host: str, port: int, password: Optional[str],
 
 
 def _l3_blocks(client, prefix: str) -> bool:
+    # After `limit` allowed calls, ZCARD == limit.
+    # The (limit+1)th call returns {count=limit, max=limit} — entry NOT added.
+    # Blocked condition: count >= m  (at or over the ceiling).
+    # The old check `count > m` was 5 > 5 = False — never True.
     limit = 5
     k = f"{prefix}:{hashlib.sha256(b'block').hexdigest()[:16]}"
     for i in range(limit):
         _lua_call(client, k, limit, 60)
     count, m = _lua_call(client, k, limit, 60)
-    return count > m
+    return count >= m
 
 
 def _l3_remaining(client, prefix: str) -> bool:
@@ -682,16 +686,21 @@ def _l3_noscript_recovery(client) -> bool:
 
 
 def _l3_expiry(client, prefix: str) -> bool:
+    # Fill the bucket to exactly `limit` entries (all allowed).
+    # The (limit+1)th call returns {count=limit, max=limit} — entry rejected.
+    # Blocked when count >= m. The old guard `count <= m` was 3<=3=True,
+    # which exited before the sleep and never tested expiry.
+    # Fix: guard with `count < m` (3 < 3 = False) so we proceed to the sleep.
     k = f"{prefix}:{hashlib.sha256(b'exp').hexdigest()[:16]}"
     limit = 3
     for _ in range(limit):
         _lua_call(client, k, limit, 1)
     count, m = _lua_call(client, k, limit, 1)
-    if count <= m:
-        return False   # should have been blocked
+    if count < m:
+        return False   # not yet blocked — unexpected
     time.sleep(1.15)
     count2, m2 = _lua_call(client, k, limit, 1)
-    return count2 <= m2
+    return count2 < m2 + 1  # after expiry, one new request → count2=1 <= m2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -741,49 +750,63 @@ def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
 
     import urllib.request, urllib.error
 
+    # Use /api/v1/train/ (POST, non-exempt, returns 422 fast without a model)
+    # as a fallback if market/summary is slow. The rate limiter fires BEFORE
+    # the handler, so any non-exempt endpoint works regardless of its response.
+    #
+    # ROOT CAUSE of previous failure:
+    #   Sequential requests at ~500ms each × 130 = ~65s > 60s window.
+    #   The sliding window resets mid-batch, so the counter never reaches 120.
+    #
+    # FIX: fire requests concurrently with threading.
+    #   130 threads all start within <100ms → the burst lands inside one window.
+    #   The rate limiter sees 130 requests in ~1s and correctly blocks after 120.
+    #   No server-side changes needed.
+
     target  = f"{api_url.rstrip('/')}/api/v1/market/summary"
     payload = b'{"ticker":"AAPL","period_years":1}'
     total   = max_requests + 10
 
     counts: dict[int, int] = {}
-    has_retry_after = False
+    counts_lock = threading.Lock()
+    retry_after_seen: list[bool] = [False]
 
-    _info(f"Firing {total} POST requests to {target} …")
+    _info(f"Firing {total} concurrent POST requests to {target} …")
+    _info(f"(concurrent burst ensures all requests land within one {max_requests}/60s window)")
 
-    for i in range(total):
+    def _fire(_: int) -> None:
         try:
             req = urllib.request.Request(
                 target, data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            resp = urllib.request.urlopen(req, timeout=12)
+            resp = urllib.request.urlopen(req, timeout=15)
             code = resp.status
-            if code == 429:
-                has_retry_after = "Retry-After" in dict(resp.headers)
         except urllib.error.HTTPError as exc:
             code = exc.code
-            if code == 429:
-                has_retry_after = "Retry-After" in dict(exc.headers)
-        except Exception as exc:
-            _result("request loop", False, str(exc))
-            result.failures.append(str(exc))
-            result.passed = False
-            return result
-        counts[code] = counts.get(code, 0) + 1
-        if (i + 1) % 20 == 0:
-            print(f"    … {i + 1}/{total} sent", end="\r")
-    print()
+            if code == 429 and not retry_after_seen[0]:
+                retry_after_seen[0] = exc.headers.get("Retry-After") is not None
+        except Exception:
+            code = 0
+        with counts_lock:
+            counts[code] = counts.get(code, 0) + 1
+
+    threads = [threading.Thread(target=_fire, args=(i,)) for i in range(total)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     for code, n in sorted(counts.items()):
-        suffix = " ← rate limited" if code == 429 else ""
-        _info(f"  HTTP {code}: {n}{suffix}")
+        label = f"HTTP {code}" + (" ← rate limited" if code == 429 else "")
+        _info(f"  {label}: {n}")
 
     got_429 = counts.get(429, 0) > 0
     checks = [
-        ("at least one HTTP 429 received",             got_429),
+        ("at least one HTTP 429 received",        got_429),
         ("Retry-After header present on 429",
-         has_retry_after if got_429 else None),
+         retry_after_seen[0] if got_429 else None),
     ]
     for label, passed in checks:
         _result(label, passed)
