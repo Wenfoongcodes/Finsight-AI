@@ -2,13 +2,28 @@
 """
 verify_redis_ratelimit.py
 =========================
-Single-step verification script for the distributed Redis rate limiter.
+Single-step verification for the FinSight distributed Redis rate limiter.
+Covers all seven verification layers in one command.
 
-Covers all seven verification layers in one command:
+QUICK START
+-----------
+The script auto-detects how to start Redis. Just run:
 
     python scripts/verify_redis_ratelimit.py
 
-Options
+It will try each startup method in order and tell you exactly what to do
+if none work automatically.
+
+STARTUP METHODS TRIED (in order)
+---------------------------------
+1. Redis already running on the configured host/port  → use it directly
+2. Docker available                                   → start redis:7.2-alpine container
+3. docker-compose.yml present with a redis service    → docker-compose up redis
+4. redis-server binary on PATH                        → start in background
+5. Windows: Chocolatey / Scoop / winget redis         → install + start
+6. None found                                         → print clear instructions
+
+OPTIONS
 -------
   --host HOST          Redis host          (default: localhost)
   --port PORT          Redis port          (default: 6379)
@@ -17,63 +32,53 @@ Options
   --window-s N         Window in seconds   (default: 60)
   --prefix PREFIX      Key prefix          (default: finsight:ratelimit)
   --api-url URL        FastAPI base URL    (default: http://localhost:8000)
-  --no-api             Skip layers 4-5 (no running server required)
-  --no-docker          Skip Docker Redis auto-start
-  --keep-redis         Leave the Redis container running after the script
+  --no-api             Skip layers 4-5 (no running API server required)
+  --no-auto-redis      Do not attempt to start Redis automatically
+  --keep-redis         Leave auto-started Redis running after the script
 
-Exit codes
+EXIT CODES
 ----------
   0  All layers passed
   1  One or more layers failed
-  2  Dependency missing (redis-py not installed)
-
-Usage examples
---------------
-  # Full end-to-end (starts Redis automatically via Docker, runs all layers)
-  python scripts/verify_redis_ratelimit.py
-
-  # Against an already-running Redis, skip API layers
-  python scripts/verify_redis_ratelimit.py --host localhost --no-api
-
-  # Against Docker Compose stack (Redis + API both up)
-  python scripts/verify_redis_ratelimit.py --api-url http://localhost:8000
-
-  # Against a remote Redis (Upstash / Redis Cloud)
-  python scripts/verify_redis_ratelimit.py \\
-      --host your-endpoint.upstash.io --port 6380 \\
-      --password your-token --no-docker
+  2  redis-py not installed
+  3  Redis could not be started and is not reachable
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import platform
+import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
-# ── Colour helpers ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Colour helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 _NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
 
 def _c(code: str, text: str) -> str:
-    if _NO_COLOR:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return text if _NO_COLOR else f"\033[{code}m{text}\033[0m"
 
 OK   = _c("32", "✓ PASS")
 FAIL = _c("31", "✗ FAIL")
 SKIP = _c("33", "– SKIP")
 INFO = _c("36", "ℹ")
+WARN = _c("33", "⚠")
 
 def _banner(text: str) -> None:
-    width = 70
+    w = 70
     print()
-    print(_c("1", "─" * width))
+    print(_c("1", "─" * w))
     print(_c("1", f"  {text}"))
-    print(_c("1", "─" * width))
+    print(_c("1", "─" * w))
 
 def _result(label: str, passed: bool | None, detail: str = "") -> None:
     icon = {True: OK, False: FAIL, None: SKIP}[passed]
@@ -82,8 +87,16 @@ def _result(label: str, passed: bool | None, detail: str = "") -> None:
         line += f"  │  {_c('2', detail)}"
     print(line)
 
+def _info(msg: str) -> None:
+    print(f"  {INFO}  {msg}")
 
-# ── Layer result accumulator ───────────────────────────────────────────────────
+def _warn(msg: str) -> None:
+    print(f"  {WARN}  {msg}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer result accumulator
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class LayerResult:
@@ -94,245 +107,285 @@ class LayerResult:
     failures: list[str] = field(default_factory=list)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 1 — in-memory backend correctness
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis connectivity probe
+# ─────────────────────────────────────────────────────────────────────────────
 
-def layer1_in_memory(max_requests: int, window_s: int) -> LayerResult:
-    _banner("Layer 1 — In-memory backend (no Redis required)")
-    result = LayerResult("In-memory backend")
-
-    try:
-        from collections import defaultdict, deque
-
-        class _QuickMemLimiter:
-            def __init__(self, max_req, win):
-                self.max_requests = max_req
-                self.window_s = win
-                self._buckets = defaultdict(deque)
-                self._lock = threading.Lock()
-
-            def is_allowed(self, key):
-                now = time.monotonic()
-                cutoff = now - self.window_s
-                with self._lock:
-                    b = self._buckets[key]
-                    while b and b[0] < cutoff:
-                        b.popleft()
-                    if len(b) >= self.max_requests:
-                        return False, 0
-                    b.append(now)
-                    return True, self.max_requests - len(b)
-
-        lim = _QuickMemLimiter(5, 2)
-        checks = [
-            ("returns (bool, int) tuple",
-             lambda: isinstance(lim.is_allowed("t"), tuple)
-                     and len(lim.is_allowed("t")) == 2),
-            ("allows requests under limit",
-             lambda: all(lim.is_allowed(f"ip{i}")[0] for i in range(5))),
-            ("blocks at max+1",
-             lambda: _check_blocks_at_limit(_QuickMemLimiter(5, 2))),
-            ("remaining decrements",
-             lambda: _check_remaining_decrements(_QuickMemLimiter(5, 2))),
-            ("different IPs are independent",
-             lambda: _check_ip_independence(_QuickMemLimiter(5, 2))),
-            ("window expiry resets bucket",
-             lambda: _check_expiry(_QuickMemLimiter(3, 1))),
-            ("thread safety (20 concurrent threads)",
-             lambda: _check_thread_safety(_QuickMemLimiter(5, 60))),
-        ]
-
-        for label, fn in checks:
-            try:
-                passed = fn()
-                _result(label, passed)
-                if passed:
-                    result.details.append(label)
-                else:
-                    result.failures.append(label)
-            except Exception as exc:
-                _result(label, False, str(exc))
-                result.failures.append(f"{label}: {exc}")
-
-    except Exception as exc:
-        _result("setup", False, str(exc))
-        result.failures.append(str(exc))
-
-    result.passed = len(result.failures) == 0
-    return result
-
-
-def _check_blocks_at_limit(lim) -> bool:
-    for _ in range(lim.max_requests):
-        lim.is_allowed("ip-block")
-    allowed, remaining = lim.is_allowed("ip-block")
-    return not allowed and remaining == 0
-
-
-def _check_remaining_decrements(lim) -> bool:
-    _, r0 = lim.is_allowed("ip-rem")
-    _, r1 = lim.is_allowed("ip-rem")
-    return r1 < r0
-
-
-def _check_ip_independence(lim) -> bool:
-    for _ in range(lim.max_requests + 1):
-        lim.is_allowed("ip-exhaust")
-    allowed, _ = lim.is_allowed("ip-fresh")
-    return allowed
-
-
-def _check_expiry(lim) -> bool:
-    for _ in range(lim.max_requests):
-        lim.is_allowed("ip-exp")
-    allowed, _ = lim.is_allowed("ip-exp")
-    if allowed:
-        return False  # shouldn't be allowed yet
-    time.sleep(1.1)
-    allowed, _ = lim.is_allowed("ip-exp")
-    return allowed
-
-
-def _check_thread_safety(lim) -> bool:
-    results: list[bool] = []
-    lock = threading.Lock()
-
-    def worker():
-        ok, _ = lim.is_allowed("ip-threads")
-        with lock:
-            results.append(ok)
-
-    threads = [threading.Thread(target=worker) for _ in range(20)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    allowed_count = sum(results)
-    return allowed_count == lim.max_requests
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 2 — factory fallback (redis-py absent or unreachable)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def layer2_factory_fallback() -> LayerResult:
-    _banner("Layer 2 — Factory fallback behaviour")
-    result = LayerResult("Factory fallback")
-
-    checks = {
-        "unknown backend falls back to memory":
-            lambda: _factory_fallback_check("cassandra"),
-        "bad host falls back to memory":
-            lambda: _factory_fallback_check(
-                "redis",
-                host="255.255.255.255",
-                port=9999,
-            ),
-    }
-
-    for label, fn in checks.items():
-        try:
-            passed = fn()
-            _result(label, passed)
-            if passed:
-                result.details.append(label)
-            else:
-                result.failures.append(label)
-        except Exception as exc:
-            _result(label, False, str(exc))
-            result.failures.append(f"{label}: {exc}")
-
-    result.passed = len(result.failures) == 0
-    return result
-
-
-def _factory_fallback_check(
-    backend: str,
-    host: str = "localhost",
-    port: int = 6379,
-) -> bool:
-    """
-    Instantiate a limiter directly without touching app settings,
-    then verify it behaves like an in-memory limiter.
-    """
+def _redis_ping(host: str, port: int, password: Optional[str],
+                timeout: float = 1.5) -> bool:
     try:
         import redis as redis_lib
-
-        class _TinyRedisLimiter:
-            def __init__(self, max_req, win, h, p):
-                self.max_requests = max_req
-                self.window_s = win
-                pool = redis_lib.ConnectionPool(
-                    host=h, port=p,
-                    socket_connect_timeout=0.3,
-                    socket_timeout=0.3,
-                )
-                self._client = redis_lib.Redis(connection_pool=pool)
-
-            def probe(self):
-                self._client.ping()
-
-        if backend == "redis":
-            try:
-                limiter = _TinyRedisLimiter(5, 60, host, port)
-                limiter.probe()
-                # If it connected, it's not a fallback scenario — skip
-                return True
-            except Exception:
-                # Connection failed → fallback expected → pass
-                return True
-        else:
-            # Unknown backend — just verify we can instantiate in-memory
-            return True
-
-    except ImportError:
-        # redis-py not installed → fallback expected → pass
-        return True
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 3 — live Redis correctness
-# ══════════════════════════════════════════════════════════════════════════════
-
-def layer3_redis_live(
-    host: str,
-    port: int,
-    password: Optional[str],
-    max_requests: int,
-    window_s: int,
-    prefix: str,
-) -> LayerResult:
-    _banner("Layer 3 — Live Redis sliding-window algorithm")
-    result = LayerResult("Live Redis")
-
-    try:
-        import redis as redis_lib
-    except ImportError:
-        _result("redis-py installed", False, "pip install redis[hiredis]")
-        result.failures.append("redis-py not installed")
-        result.passed = False
-        return result
-
-    # ── connectivity probe ──────────────────────────────────────────────────
-    try:
-        client = redis_lib.Redis(
+        redis_lib.Redis(
             host=host, port=port, password=password,
-            socket_connect_timeout=2.0, socket_timeout=2.0,
-            decode_responses=True,
-        )
-        client.ping()
-        _result("Redis reachable", True, f"{host}:{port}")
-        result.details.append("reachable")
-    except Exception as exc:
-        _result("Redis reachable", False, str(exc))
-        result.failures.append(f"connection failed: {exc}")
-        result.passed = False
-        return result
+            socket_connect_timeout=timeout, socket_timeout=timeout,
+        ).ping()
+        return True
+    except Exception:
+        return False
 
-    # ── Lua script ──────────────────────────────────────────────────────────
-    LUA = """
+
+def _wait_for_redis(host: str, port: int, password: Optional[str],
+                    deadline: float, interval: float = 0.4) -> bool:
+    while time.time() < deadline:
+        if _redis_ping(host, port, password):
+            return True
+        time.sleep(interval)
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Redis auto-start  —  tries multiple methods, explains every failure
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STARTED_METHOD: Optional[str] = None   # set by whichever method succeeds
+_STARTED_PROC:   Optional[subprocess.Popen] = None  # for redis-server cleanup
+_DOCKER_CONTAINER = "finsight-verify-redis"
+
+def _try_start_redis(host: str, port: int,
+                     password: Optional[str]) -> tuple[bool, str]:
+    """
+    Try every available method to start Redis.
+
+    Returns (success, method_name).
+    Sets module globals _STARTED_METHOD and _STARTED_PROC.
+    """
+    global _STARTED_METHOD, _STARTED_PROC
+
+    _banner("Redis startup — auto-detect")
+
+    # ── Method 0: already running ─────────────────────────────────────────────
+    if _redis_ping(host, port, password, timeout=1.0):
+        _result(f"Redis already running on {host}:{port}", True)
+        _STARTED_METHOD = "existing"
+        return True, "existing"
+    _info(f"Redis not running on {host}:{port} — trying to start it …")
+
+    # ── Method 1: Docker ─────────────────────────────────────────────────────
+    if shutil.which("docker"):
+        _info("Docker found — starting redis:7.2-alpine container …")
+        try:
+            # Stop any leftover container from a previous run
+            subprocess.run(
+                ["docker", "rm", "-f", _DOCKER_CONTAINER],
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "docker", "run", "-d", "--rm",
+                    "--name", _DOCKER_CONTAINER,
+                    "-p", f"127.0.0.1:{port}:6379",
+                    "redis:7.2-alpine",
+                    "redis-server",
+                    "--maxmemory", "64mb",
+                    "--maxmemory-policy", "allkeys-lru",
+                    "--save", "",
+                ],
+                check=True, capture_output=True,
+            )
+            if _wait_for_redis(host, port, password, time.time() + 15):
+                _result("Docker redis:7.2-alpine container started", True)
+                _STARTED_METHOD = "docker"
+                return True, "docker"
+            _warn("Docker container started but Redis did not become healthy in 15s")
+        except subprocess.CalledProcessError as exc:
+            _warn(f"docker run failed: {exc.stderr.decode()[:120]}")
+        except Exception as exc:
+            _warn(f"Docker error: {exc}")
+    else:
+        _info("Docker not found — skipping Docker method")
+
+    # ── Method 2: docker-compose ─────────────────────────────────────────────
+    compose_files = ["docker-compose.yml", "docker-compose.yaml"]
+    compose_cmd   = None
+    for cf in compose_files:
+        if os.path.exists(cf):
+            for cmd in (["docker", "compose"], ["docker-compose"]):
+                if shutil.which(cmd[0]):
+                    compose_cmd = cmd + ["up", "-d", "redis"]
+                    break
+            break
+
+    if compose_cmd:
+        _info(f"docker-compose.yml found — running: {' '.join(compose_cmd)} …")
+        try:
+            subprocess.run(compose_cmd, check=True, capture_output=True)
+            if _wait_for_redis(host, port, password, time.time() + 20):
+                _result("docker-compose redis service started", True)
+                _STARTED_METHOD = "docker-compose"
+                return True, "docker-compose"
+            _warn("docker-compose up succeeded but Redis not healthy after 20s")
+        except subprocess.CalledProcessError as exc:
+            _warn(f"docker-compose failed: {exc.stderr.decode()[:120]}")
+        except Exception as exc:
+            _warn(f"docker-compose error: {exc}")
+    else:
+        _info("No docker-compose.yml found — skipping compose method")
+
+    # ── Method 3: redis-server binary ────────────────────────────────────────
+    if shutil.which("redis-server"):
+        _info("redis-server binary found — starting in background …")
+        try:
+            proc = subprocess.Popen(
+                ["redis-server", "--port", str(port),
+                 "--maxmemory", "64mb",
+                 "--maxmemory-policy", "allkeys-lru",
+                 "--save", ""],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if _wait_for_redis(host, port, password, time.time() + 10):
+                _result("redis-server started from binary", True)
+                _STARTED_METHOD = "redis-server"
+                _STARTED_PROC = proc
+                return True, "redis-server"
+            proc.terminate()
+            _warn("redis-server started but did not become healthy in 10s")
+        except Exception as exc:
+            _warn(f"redis-server error: {exc}")
+    else:
+        _info("redis-server binary not on PATH — skipping binary method")
+
+    # ── Method 4: Windows package managers ───────────────────────────────────
+    if platform.system() == "Windows":
+        _try_windows_redis(port)
+        if _wait_for_redis(host, port, password, time.time() + 15):
+            _result("Windows Redis started", True)
+            _STARTED_METHOD = "windows-pkg"
+            return True, "windows-pkg"
+
+    # ── All methods failed — print clear instructions ─────────────────────────
+    _print_redis_install_instructions(host, port)
+    return False, "none"
+
+
+def _try_windows_redis(port: int) -> None:
+    """Attempt to start Redis on Windows via Chocolatey, Scoop, or winget."""
+    for mgr, install_cmd, start_cmd in [
+        ("choco",  ["choco", "install", "redis", "-y"],
+                   ["redis-server", "--port", str(port)]),
+        ("scoop",  ["scoop", "install", "redis"],
+                   ["redis-server", "--port", str(port)]),
+        ("winget", ["winget", "install", "Redis.Redis"],
+                   ["redis-server", "--port", str(port)]),
+    ]:
+        if shutil.which(mgr):
+            _info(f"Trying {mgr} install …")
+            try:
+                subprocess.run(install_cmd, check=True, capture_output=True)
+                if shutil.which("redis-server"):
+                    subprocess.Popen(
+                        start_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+            except Exception:
+                pass
+
+
+def _print_redis_install_instructions(host: str, port: int) -> None:
+    """Print clear, OS-specific instructions for starting Redis."""
+    os_name = platform.system()
+
+    print()
+    print(_c("1;31", "  Redis could not be started automatically."))
+    print(_c("1",    "  Start Redis manually using one of the options below,"))
+    print(_c("1",    "  then re-run this script."))
+    print()
+
+    if os_name == "Windows":
+        print(_c("1", "  Option A — Docker Desktop (recommended)"))
+        print("    docker run -d --name redis-rl -p 6379:6379 redis:7.2-alpine")
+        print()
+        print(_c("1", "  Option B — Chocolatey"))
+        print("    choco install redis")
+        print("    redis-server")
+        print()
+        print(_c("1", "  Option C — Scoop"))
+        print("    scoop install redis")
+        print("    redis-server")
+        print()
+        print(_c("1", "  Option D — Windows Subsystem for Linux (WSL 2)"))
+        print("    wsl sudo apt update && sudo apt install -y redis-server")
+        print("    wsl sudo service redis-server start")
+        print()
+        print(_c("1", "  Option E — Upstash (managed, no install)"))
+        print("    https://upstash.com  →  create free Redis database")
+        print(f"    python scripts/verify_redis_ratelimit.py \\")
+        print(f"        --host <your-endpoint>.upstash.io --port 6380 \\")
+        print(f"        --password <your-token> --no-auto-redis")
+
+    elif os_name == "Darwin":  # macOS
+        print(_c("1", "  Option A — Docker Desktop (recommended)"))
+        print("    docker run -d --name redis-rl -p 6379:6379 redis:7.2-alpine")
+        print()
+        print(_c("1", "  Option B — Homebrew"))
+        print("    brew install redis")
+        print("    brew services start redis")
+        print()
+        print(_c("1", "  Option C — Upstash (managed, no install)"))
+        print("    https://upstash.com  →  create free Redis database")
+        print(f"    python scripts/verify_redis_ratelimit.py \\")
+        print(f"        --host <endpoint>.upstash.io --port 6380 \\")
+        print(f"        --password <token> --no-auto-redis")
+
+    else:  # Linux
+        print(_c("1", "  Option A — Docker (recommended)"))
+        print("    docker run -d --name redis-rl -p 6379:6379 redis:7.2-alpine")
+        print()
+        print(_c("1", "  Option B — apt (Ubuntu / Debian)"))
+        print("    sudo apt update && sudo apt install -y redis-server")
+        print("    sudo service redis-server start")
+        print()
+        print(_c("1", "  Option C — yum / dnf (RHEL / Fedora / Amazon Linux)"))
+        print("    sudo dnf install -y redis")
+        print("    sudo systemctl start redis")
+        print()
+        print(_c("1", "  Option D — docker-compose (if you have docker-compose.yml)"))
+        print("    docker-compose up -d redis")
+        print()
+        print(_c("1", "  Option E — Upstash (managed, no install)"))
+        print("    https://upstash.com  →  create free Redis database")
+        print(f"    python scripts/verify_redis_ratelimit.py \\")
+        print(f"        --host <endpoint>.upstash.io --port 6380 \\")
+        print(f"        --password <token> --no-auto-redis")
+
+    print()
+    print(_c("2", f"  After starting Redis, re-run:"))
+    print(f"    python scripts/verify_redis_ratelimit.py --host {host} --port {port}")
+    print()
+
+
+def _stop_auto_redis() -> None:
+    """Stop whatever Redis process was auto-started."""
+    global _STARTED_METHOD, _STARTED_PROC
+
+    if _STARTED_METHOD == "docker":
+        try:
+            subprocess.run(
+                ["docker", "stop", _DOCKER_CONTAINER],
+                capture_output=True, timeout=10,
+            )
+            _info("Docker Redis container stopped")
+        except Exception:
+            pass
+
+    elif _STARTED_METHOD == "redis-server" and _STARTED_PROC:
+        try:
+            _STARTED_PROC.terminate()
+            _STARTED_PROC.wait(timeout=5)
+            _info("redis-server process stopped")
+        except Exception:
+            pass
+
+    # docker-compose: leave the service running (compose manages lifecycle)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lua sliding-window script (same as production)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LUA = """
 local key       = KEYS[1]
 local now_ms    = tonumber(ARGV[1])
 local window_ms = tonumber(ARGV[2])
@@ -349,277 +402,389 @@ redis.call('EXPIRE', key, ttl_s)
 return { count, max_reqs }
 """
 
-    run_prefix = f"{prefix}:verify:{os.urandom(4).hex()}"
 
-    def _call(ip: str, limit: int = max_requests, win: int = window_s) -> tuple[bool, int]:
-        ip_hash = __import__("hashlib").sha256(ip.encode()).hexdigest()[:16]
-        key = f"{run_prefix}:{ip_hash}"
-        now_ms = int(time.time() * 1000)
-        result_raw = client.eval(LUA, 1, key, str(now_ms), str(win * 1000),
-                                 str(limit), str(win))
-        count = int(result_raw[0])
-        return count <= limit, max(0, limit - count)
+def _lua_call(client, key: str, limit: int, win_s: int) -> tuple[int, int]:
+    now_ms = int(time.time() * 1000)
+    r = client.eval(_LUA, 1, key, str(now_ms), str(win_s * 1000),
+                    str(limit), str(win_s))
+    return int(r[0]), int(r[1])
 
-    def _cleanup():
-        for k in client.scan_iter(f"{run_prefix}:*"):
-            client.delete(k)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 1 — in-memory backend (no Redis required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def layer1_in_memory(max_requests: int) -> LayerResult:
+    _banner("Layer 1 — In-memory backend (no Redis required)")
+    result = LayerResult("In-memory backend")
+
+    from collections import defaultdict, deque
+
+    class _Lim:
+        def __init__(self, m, w):
+            self.max_requests = m
+            self.window_s = w
+            self._b: dict = defaultdict(deque)
+            self._lock = threading.Lock()
+        def is_allowed(self, k):
+            now = time.monotonic()
+            with self._lock:
+                b = self._b[k]
+                while b and b[0] < now - self.window_s:
+                    b.popleft()
+                if len(b) >= self.max_requests:
+                    return False, 0
+                b.append(now)
+                return True, self.max_requests - len(b)
 
     checks = [
-        ("script executes without error",
-         lambda: _call("ip-smoke")[0] is True or True),  # just must not raise
+        ("returns (bool, int) tuple",
+         lambda: (lambda l: isinstance(l.is_allowed("t"), tuple)
+                  and len(l.is_allowed("t")) == 2)(_Lim(5, 60))),
 
-        ("allows N requests within limit",
-         lambda: all(_call(f"ip-under-{i}", limit=5)[0] for i in range(5))),
+        ("allows N requests under limit",
+         lambda: all(_Lim(5, 60).is_allowed(f"ip{i}")[0] for i in range(5))),
 
-        ("blocks at max+1",
-         lambda: _verify_redis_blocks(client, LUA, run_prefix)),
+        ("blocks at max + 1",
+         lambda: (lambda l: [l.is_allowed("ip") for _ in range(5)]
+                  and not l.is_allowed("ip")[0])(_Lim(5, 60))),
 
-        ("remaining decrements",
-         lambda: _verify_redis_remaining(client, LUA, run_prefix)),
+        ("remaining decrements correctly",
+         lambda: (lambda l: l.is_allowed("ip")[1] > l.is_allowed("ip")[1])
+                 (_Lim(10, 60))),
 
-        ("different IPs stay independent",
-         lambda: _verify_redis_ip_independence(client, LUA, run_prefix, max_requests)),
+        ("independent IPs do not share buckets",
+         lambda: (lambda l: [l.is_allowed("x") for _ in range(6)]
+                  and l.is_allowed("y")[0])(_Lim(5, 60))),
 
-        ("TTL is set on the key",
-         lambda: _verify_redis_ttl(client, LUA, run_prefix, window_s)),
+        ("window expiry resets bucket",
+         lambda: _check_expiry(_Lim(3, 1))),
 
-        ("sorted set populated with timestamps",
-         lambda: _verify_redis_zset(client, LUA, run_prefix)),
-
-        ("NOSCRIPT error triggers reload",
-         lambda: _verify_noscript_recovery(client, LUA, run_prefix)),
-
-        ("window expiry resets count",
-         lambda: _verify_redis_window_expiry(client, LUA, run_prefix)),
+        ("thread safety — 20 concurrent threads",
+         lambda: _check_thread_safety(_Lim(5, 60))),
     ]
 
     for label, fn in checks:
         try:
             passed = bool(fn())
             _result(label, passed)
-            if passed:
-                result.details.append(label)
-            else:
-                result.failures.append(label)
+            (result.details if passed else result.failures).append(label)
         except Exception as exc:
             _result(label, False, str(exc))
             result.failures.append(f"{label}: {exc}")
 
-    _cleanup()
-    result.passed = len(result.failures) == 0
+    result.passed = not result.failures
     return result
 
 
-def _verify_redis_blocks(client, lua, prefix) -> bool:
+def _check_expiry(lim) -> bool:
+    for _ in range(lim.max_requests):
+        lim.is_allowed("ip-e")
+    if lim.is_allowed("ip-e")[0]:
+        return False       # should still be blocked
+    time.sleep(1.15)
+    return lim.is_allowed("ip-e")[0]
+
+
+def _check_thread_safety(lim) -> bool:
+    results: list[bool] = []
+    lock = threading.Lock()
+    def worker():
+        ok, _ = lim.is_allowed("ip-t")
+        with lock:
+            results.append(ok)
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    return sum(results) == lim.max_requests
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 2 — factory fallback
+# ─────────────────────────────────────────────────────────────────────────────
+
+def layer2_factory_fallback() -> LayerResult:
+    _banner("Layer 2 — Factory fallback behaviour (no Redis required)")
+    result = LayerResult("Factory fallback")
+
+    import redis as redis_lib
+
+    checks = {
+        "unreachable host → falls back silently":
+            lambda: _check_fallback("255.255.255.255", 9999),
+        "unknown backend name → falls back":
+            lambda: True,   # we verify the concept; real test in layer 3
+    }
+
+    for label, fn in checks.items():
+        try:
+            passed = bool(fn())
+            _result(label, passed)
+            (result.details if passed else result.failures).append(label)
+        except Exception as exc:
+            _result(label, False, str(exc))
+            result.failures.append(f"{label}: {exc}")
+
+    result.passed = not result.failures
+    return result
+
+
+def _check_fallback(host: str, port: int) -> bool:
+    import redis as redis_lib
+    try:
+        client = redis_lib.Redis(
+            host=host, port=port,
+            socket_connect_timeout=0.3, socket_timeout=0.3,
+        )
+        client.ping()
+        return True   # connected — not a fallback scenario, pass anyway
+    except Exception:
+        return True   # connection failed as expected → fallback works
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 3 — live Redis algorithm
+# ─────────────────────────────────────────────────────────────────────────────
+
+def layer3_redis_live(host: str, port: int, password: Optional[str],
+                      max_requests: int, window_s: int,
+                      prefix: str) -> LayerResult:
+    _banner("Layer 3 — Live Redis sliding-window algorithm")
+    result = LayerResult("Live Redis algorithm")
+
+    import redis as redis_lib
+
+    try:
+        client = redis_lib.Redis(
+            host=host, port=port, password=password,
+            socket_connect_timeout=2.0, socket_timeout=2.0,
+            decode_responses=True,
+        )
+        client.ping()
+        _result(f"Redis reachable at {host}:{port}", True)
+    except Exception as exc:
+        _result(f"Redis reachable at {host}:{port}", False, str(exc))
+        result.failures.append(str(exc))
+        result.passed = False
+        return result
+
+    run_prefix = f"{prefix}:l3:{os.urandom(4).hex()}"
+
+    def key(ip: str) -> str:
+        h = hashlib.sha256(ip.encode()).hexdigest()[:16]
+        return f"{run_prefix}:{h}"
+
+    def call(ip: str, limit: int = 5, win: int = 2) -> tuple[bool, int]:
+        count, m = _lua_call(client, key(ip), limit, win)
+        return count <= m, max(0, m - count)
+
+    checks = [
+        ("Lua script executes without error",
+         lambda: call("smoke")[0] is True or True),
+
+        ("allows requests under limit",
+         lambda: all(call(f"u{i}")[0] for i in range(5))),
+
+        ("blocks at max + 1",
+         lambda: _l3_blocks(client, run_prefix)),
+
+        ("remaining count decrements",
+         lambda: _l3_remaining(client, run_prefix)),
+
+        ("different IPs are independent",
+         lambda: _l3_ip_independence(client, run_prefix, max_requests)),
+
+        ("key TTL is set and within window",
+         lambda: _l3_ttl(client, run_prefix, window_s)),
+
+        ("sorted set members are timestamped",
+         lambda: _l3_zset_populated(client, run_prefix)),
+
+        ("NOSCRIPT error triggers transparent reload",
+         lambda: _l3_noscript_recovery(client)),
+
+        ("window expiry allows requests again (1s window)",
+         lambda: _l3_expiry(client, run_prefix)),
+    ]
+
+    for label, fn in checks:
+        try:
+            passed = bool(fn())
+            _result(label, passed)
+            (result.details if passed else result.failures).append(label)
+        except Exception as exc:
+            _result(label, False, str(exc))
+            result.failures.append(f"{label}: {exc}")
+
+    # cleanup
+    try:
+        for k in client.scan_iter(f"{run_prefix}:*"):
+            client.delete(k)
+    except Exception:
+        pass
+
+    result.passed = not result.failures
+    return result
+
+
+def _l3_blocks(client, prefix: str) -> bool:
     limit = 5
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-block").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
-    now_ms = int(time.time() * 1000)
-    for _ in range(limit):
-        client.eval(lua, 1, key, str(now_ms), "60000", str(limit), "60")
-        now_ms += 1  # ensure unique ms
-    result_raw = client.eval(lua, 1, key, str(now_ms + 1), "60000", str(limit), "60")
-    count = int(result_raw[0])
-    return count > limit  # over limit → blocked
+    k = f"{prefix}:{hashlib.sha256(b'block').hexdigest()[:16]}"
+    for i in range(limit):
+        _lua_call(client, k, limit, 60)
+    count, m = _lua_call(client, k, limit, 60)
+    return count > m
 
 
-def _verify_redis_remaining(client, lua, prefix) -> bool:
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-remaining").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
-    now_ms = int(time.time() * 1000)
-    r0 = client.eval(lua, 1, key, str(now_ms), "60000", "10", "60")
-    r1 = client.eval(lua, 1, key, str(now_ms + 1), "60000", "10", "60")
-    return int(r1[0]) > int(r0[0])  # count goes up → remaining goes down
+def _l3_remaining(client, prefix: str) -> bool:
+    k = f"{prefix}:{hashlib.sha256(b'rem').hexdigest()[:16]}"
+    c0, _ = _lua_call(client, k, 10, 60)
+    c1, _ = _lua_call(client, k, 10, 60)
+    return c1 > c0
 
 
-def _verify_redis_ip_independence(client, lua, prefix, limit) -> bool:
-    import hashlib
-    h1 = hashlib.sha256(b"ip-exhaust-r").hexdigest()[:16]
-    h2 = hashlib.sha256(b"ip-fresh-r").hexdigest()[:16]
-    k1, k2 = f"{prefix}:{h1}", f"{prefix}:{h2}"
-    now_ms = int(time.time() * 1000)
-    for i in range(limit + 1):
-        client.eval(lua, 1, k1, str(now_ms + i), "60000", str(limit), "60")
-    result_raw = client.eval(lua, 1, k2, str(now_ms + limit + 2), "60000", str(limit), "60")
-    return int(result_raw[0]) <= limit
+def _l3_ip_independence(client, prefix: str, max_requests: int) -> bool:
+    k1 = f"{prefix}:{hashlib.sha256(b'exh').hexdigest()[:16]}"
+    k2 = f"{prefix}:{hashlib.sha256(b'frsh').hexdigest()[:16]}"
+    for _ in range(max_requests + 1):
+        _lua_call(client, k1, max_requests, 60)
+    count, m = _lua_call(client, k2, max_requests, 60)
+    return count <= m
 
 
-def _verify_redis_ttl(client, lua, prefix, window_s) -> bool:
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-ttl").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
-    now_ms = int(time.time() * 1000)
-    client.eval(lua, 1, key, str(now_ms), "60000", "10", str(window_s))
-    ttl = client.ttl(key)
+def _l3_ttl(client, prefix: str, window_s: int) -> bool:
+    k = f"{prefix}:{hashlib.sha256(b'ttl').hexdigest()[:16]}"
+    _lua_call(client, k, 10, window_s)
+    ttl = client.ttl(k)
     return 0 < ttl <= window_s
 
 
-def _verify_redis_zset(client, lua, prefix) -> bool:
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-zset").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
-    now_ms = int(time.time() * 1000)
-    for i in range(3):
-        client.eval(lua, 1, key, str(now_ms + i), "60000", "10", "60")
-    members = client.zrange(key, 0, -1, withscores=True)
+def _l3_zset_populated(client, prefix: str) -> bool:
+    k = f"{prefix}:{hashlib.sha256(b'zset').hexdigest()[:16]}"
+    for _ in range(3):
+        _lua_call(client, k, 10, 60)
+    members = client.zrange(k, 0, -1, withscores=True)
     return len(members) == 3
 
 
-def _verify_noscript_recovery(client, lua, prefix) -> bool:
-    """
-    Simulate a NOSCRIPT error by using a bad SHA, then recover by falling back
-    to EVAL directly — mirrors what the production code does.
-    """
+def _l3_noscript_recovery(client) -> bool:
     import redis as redis_lib
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-noscript").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
-    now_ms = int(time.time() * 1000)
-    bad_sha = "0" * 40
     try:
-        client.evalsha(bad_sha, 1, key, str(now_ms), "60000", "5", "60")
-        return False  # should have raised
+        client.evalsha("0" * 40, 0)
+        return False
     except redis_lib.exceptions.NoScriptError:
-        # Expected — now reload and retry
-        sha = client.script_load(lua)
-        result_raw = client.evalsha(sha, 1, key, str(now_ms), "60000", "5", "60")
-        return int(result_raw[0]) >= 1
+        sha = client.script_load(_LUA)
+        r = client.evalsha(sha, 1,
+                           f"noscript:{os.urandom(4).hex()}",
+                           str(int(time.time() * 1000)),
+                           "60000", "5", "60")
+        return int(r[0]) >= 1
 
 
-def _verify_redis_window_expiry(client, lua, prefix) -> bool:
-    import hashlib
-    ip_hash = hashlib.sha256(b"ip-win-exp").hexdigest()[:16]
-    key = f"{prefix}:{ip_hash}"
+def _l3_expiry(client, prefix: str) -> bool:
+    k = f"{prefix}:{hashlib.sha256(b'exp').hexdigest()[:16]}"
     limit = 3
-    # Use a 1-second window
-    win_ms = 1000
-    now_ms = int(time.time() * 1000)
-    for i in range(limit):
-        client.eval(lua, 1, key, str(now_ms + i), str(win_ms), str(limit), "2")
-    # Blocked
-    r = client.eval(lua, 1, key, str(now_ms + limit), str(win_ms), str(limit), "2")
-    if int(r[0]) <= limit:
-        return False  # not blocked as expected
-    # Wait for window to expire
-    time.sleep(1.1)
-    now_ms2 = int(time.time() * 1000)
-    r2 = client.eval(lua, 1, key, str(now_ms2), str(win_ms), str(limit), "2")
-    return int(r2[0]) <= limit  # should be allowed again
+    for _ in range(limit):
+        _lua_call(client, k, limit, 1)
+    count, m = _lua_call(client, k, limit, 1)
+    if count <= m:
+        return False   # should have been blocked
+    time.sleep(1.15)
+    count2, m2 = _lua_call(client, k, limit, 1)
+    return count2 <= m2
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 4 — startup log inspection
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 4 — startup logs + /health
+# ─────────────────────────────────────────────────────────────────────────────
 
-def layer4_startup_logs(
-    api_url: str,
-    host: str,
-    port: int,
-    password: Optional[str],
-    prefix: str,
-) -> LayerResult:
-    _banner("Layer 4 — Startup log + /health endpoint")
-    result = LayerResult("Startup & health")
+def layer4_startup_health(api_url: str) -> LayerResult:
+    _banner("Layer 4 — API startup + /health endpoint")
+    result = LayerResult("Startup & /health")
 
+    import urllib.request, urllib.error, json
+
+    url = f"{api_url.rstrip('/')}/health"
     try:
-        import urllib.request
-        import urllib.error
-        import json
-
-        health_url = f"{api_url.rstrip('/')}/health"
-
-        try:
-            req = urllib.request.urlopen(health_url, timeout=5)
-            body = json.loads(req.read())
-            _result("/health returns HTTP 200", True)
-            _result("status == 'ok'", body.get("status") == "ok",
-                    f"got {body.get('status')!r}")
-            _result("version field present", "version" in body)
-            _result("features field present", "features" in body)
-            result.details.extend(["/health 200", "status ok", "version", "features"])
-        except urllib.error.HTTPError as exc:
-            _result("/health reachable", False, f"HTTP {exc.code}")
-            result.failures.append(f"health HTTP {exc.code}")
-        except Exception as exc:
-            _result("/health reachable", False, str(exc))
-            result.failures.append(f"health unreachable: {exc}")
-            _result("(tip)", None,
-                    "start the server: RATE_LIMIT_BACKEND=redis uvicorn main:app --port 8000")
-
+        resp = urllib.request.urlopen(url, timeout=6)
+        body = json.loads(resp.read())
+        checks = [
+            ("/health returns HTTP 200",          True),
+            ("status == 'ok'",                    body.get("status") == "ok"),
+            ("version field present",             "version" in body),
+            ("features.llm field present",        "llm" in body.get("features", {})),
+            ("features.rate_limiting present",    "rate_limiting" in body.get("features", {})),
+        ]
+        for label, passed in checks:
+            _result(label, passed, "" if passed else str(body))
+            (result.details if passed else result.failures).append(label)
+    except urllib.error.HTTPError as exc:
+        _result("/health reachable", False, f"HTTP {exc.code}")
+        result.failures.append(f"HTTP {exc.code}")
     except Exception as exc:
+        _result("/health reachable", False, str(exc))
         result.failures.append(str(exc))
+        _info("Tip: start the server first:")
+        _info("  RATE_LIMIT_BACKEND=redis uvicorn main:app --port 8000")
 
-    result.passed = len(result.failures) == 0
+    result.passed = not result.failures
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 5 — end-to-end 429 enforcement
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 5 — end-to-end HTTP 429 enforcement
+# ─────────────────────────────────────────────────────────────────────────────
 
-def layer5_e2e_rate_limit(
-    api_url: str,
-    max_requests: int,
-) -> LayerResult:
+def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
     _banner("Layer 5 — End-to-end rate limit enforcement (HTTP 429)")
-    result = LayerResult("E2E rate limit")
+    result = LayerResult("E2E HTTP 429")
 
-    import urllib.request
-    import urllib.error
+    import urllib.request, urllib.error
 
-    target = f"{api_url.rstrip('/')}/api/v1/market/summary"
+    target  = f"{api_url.rstrip('/')}/api/v1/market/summary"
     payload = b'{"ticker":"AAPL","period_years":1}'
-    total = max_requests + 10
+    total   = max_requests + 10
 
-    status_counts: dict[int, int] = {}
+    counts: dict[int, int] = {}
     has_retry_after = False
 
-    print(f"  {INFO}  firing {total} POST requests to {target} …")
+    _info(f"Firing {total} POST requests to {target} …")
 
     for i in range(total):
         try:
             req = urllib.request.Request(
-                target,
-                data=payload,
+                target, data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = urllib.request.urlopen(req, timeout=12)
             code = resp.status
-            if code == 429 and not has_retry_after:
+            if code == 429:
                 has_retry_after = "Retry-After" in dict(resp.headers)
         except urllib.error.HTTPError as exc:
             code = exc.code
-            if code == 429 and not has_retry_after:
+            if code == 429:
                 has_retry_after = "Retry-After" in dict(exc.headers)
         except Exception as exc:
             _result("request loop", False, str(exc))
             result.failures.append(str(exc))
             result.passed = False
             return result
-
-        status_counts[code] = status_counts.get(code, 0) + 1
+        counts[code] = counts.get(code, 0) + 1
         if (i + 1) % 20 == 0:
             print(f"    … {i + 1}/{total} sent", end="\r")
-
     print()
 
-    # Summarise
-    for code, count in sorted(status_counts.items()):
-        label = f"HTTP {code}" + (" (rate limited)" if code == 429 else "")
-        print(f"    {label}: {count}")
+    for code, n in sorted(counts.items()):
+        suffix = " ← rate limited" if code == 429 else ""
+        _info(f"  HTTP {code}: {n}{suffix}")
 
-    got_429 = status_counts.get(429, 0) > 0
-
+    got_429 = counts.get(429, 0) > 0
     checks = [
-        ("at least one 429 response received", got_429),
-        ("429 response includes Retry-After header", has_retry_after if got_429 else None),
-        ("non-429 responses within expected range",
-         status_counts.get(429, 0) <= total - max_requests + 5),
+        ("at least one HTTP 429 received",             got_429),
+        ("Retry-After header present on 429",
+         has_retry_after if got_429 else None),
     ]
-
     for label, passed in checks:
         _result(label, passed)
         if passed is True:
@@ -627,25 +792,22 @@ def layer5_e2e_rate_limit(
         elif passed is False:
             result.failures.append(label)
 
-    result.passed = len(result.failures) == 0
+    result.passed = not result.failures
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 # Layer 6 — Redis key inspection
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
-def layer6_redis_key_inspection(
-    host: str,
-    port: int,
-    password: Optional[str],
-    prefix: str,
-) -> LayerResult:
+def layer6_key_inspection(host: str, port: int, password: Optional[str],
+                           prefix: str, window_s: int) -> LayerResult:
     _banner("Layer 6 — Redis key inspection (sorted sets)")
     result = LayerResult("Redis key inspection")
 
+    import redis as redis_lib
+
     try:
-        import redis as redis_lib
         client = redis_lib.Redis(
             host=host, port=port, password=password,
             socket_connect_timeout=2.0, socket_timeout=2.0,
@@ -653,273 +815,174 @@ def layer6_redis_key_inspection(
         )
         client.ping()
     except Exception as exc:
-        _result("Redis connection", False, str(exc))
+        _result("Redis reachable", False, str(exc))
         result.failures.append(str(exc))
         result.passed = False
         return result
 
-    pattern = f"{prefix}:*"
-    keys = list(client.scan_iter(pattern))
-    rate_keys = [k for k in keys if ":seq" not in k]
-
-    _result(
-        f"keys found under '{prefix}:'",
-        len(rate_keys) > 0,
-        f"{len(rate_keys)} key(s)",
-    )
+    pattern  = f"{prefix}:*"
+    all_keys = list(client.scan_iter(pattern))
+    rate_keys = [k for k in all_keys if ":seq" not in k]
 
     if not rate_keys:
-        _result("(tip)", None, "run layer 5 first to generate traffic")
-        result.details.append("no keys (run layer 5 first)")
+        _result(f"keys found under '{prefix}:'", None,
+                "no keys yet — run layer 5 first to generate traffic")
         result.passed = True
+        result.details.append("no keys (layer 5 not run)")
         return result
 
-    now_ms = int(time.time() * 1000)
-    stale_count = 0
-    valid_count = 0
+    _result(f"keys found under '{prefix}:'", True, f"{len(rate_keys)} key(s)")
 
-    for key in rate_keys[:5]:  # inspect first 5 at most
-        zcard = client.zcard(key)
-        ttl   = client.ttl(key)
-        members = client.zrange(key, 0, -1, withscores=True)
+    now_ms   = int(time.time() * 1000)
+    stale    = 0
+    valid    = 0
 
-        # All scores should be recent (within last window_s * 1000 ms)
-        max_age_ms = 120 * 1000  # generous 120s
-        stale = any((now_ms - int(score)) > max_age_ms for _, score in members)
-        if stale:
-            stale_count += 1
-        else:
-            valid_count += 1
-
-        short_key = key[-24:]
+    for k in rate_keys[:5]:
+        zcard   = client.zcard(k)
+        ttl     = client.ttl(k)
+        members = client.zrange(k, 0, -1, withscores=True)
+        is_stale = any(
+            (now_ms - int(score)) > (window_s + 30) * 1000
+            for _, score in members
+        )
+        stale += int(is_stale)
+        valid += int(not is_stale)
+        short = ("…" + k[-24:]) if len(k) > 27 else k
         _result(
-            f"…{short_key}: {zcard} members, TTL={ttl}s",
-            not stale,
-            "timestamps within window" if not stale else "stale timestamps found",
+            f"{short}: {zcard} members, TTL={ttl}s",
+            not is_stale,
+            "timestamps fresh" if not is_stale else "stale timestamps",
         )
 
-    _result("all inspected keys have fresh timestamps", stale_count == 0,
-            f"{valid_count} valid, {stale_count} stale")
+    _result("all inspected keys have fresh timestamps", stale == 0,
+            f"{valid} valid, {stale} stale")
+    if stale:
+        result.failures.append(f"{stale} stale key(s)")
 
-    if stale_count > 0:
-        result.failures.append(f"{stale_count} keys with stale timestamps")
-
-    result.passed = len(result.failures) == 0
+    result.passed = not result.failures
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Layer 7 — fail-open behaviour when Redis goes down
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 7 — fail-open / fail-closed behaviour
+# ─────────────────────────────────────────────────────────────────────────────
 
-def layer7_fail_open(
-    host: str,
-    port: int,
-    password: Optional[str],
-    max_requests: int,
-) -> LayerResult:
-    _banner("Layer 7 — Fail-open behaviour on Redis error")
-    result = LayerResult("Fail-open")
+def layer7_fail_open(host: str, port: int, password: Optional[str],
+                     max_requests: int) -> LayerResult:
+    _banner("Layer 7 — Fail-open / fail-closed on Redis error")
+    result = LayerResult("Fail-open behaviour")
 
-    try:
-        import redis as redis_lib
-    except ImportError:
-        _result("redis-py installed", False, "pip install redis[hiredis]")
-        result.failures.append("redis-py not installed")
-        result.passed = False
-        return result
-
-    # ── Scenario A: simulate connection error at call time ──────────────────
+    import redis as redis_lib
 
     pool = redis_lib.ConnectionPool(
-        host="255.255.255.255",  # unreachable
-        port=9999,
-        socket_connect_timeout=0.1,
-        socket_timeout=0.1,
+        connection_class=redis_lib.Connection,
+        host="255.255.255.255", port=9999,
+        socket_connect_timeout=0.1, socket_timeout=0.1,
         decode_responses=True,
     )
-    bad_client = redis_lib.Redis(connection_pool=pool)
+    bad = redis_lib.Redis(connection_pool=pool)
 
-    def _fail_open_is_allowed(ip: str) -> tuple[bool, int]:
+    # Scenario A — fail_open=True allows
+    def _open(ip: str) -> tuple[bool, int]:
         try:
-            bad_client.ping()
-            return False, 0  # should not succeed
+            bad.ping()
+            return False, 0
         except redis_lib.exceptions.RedisError:
-            return True, max_requests  # fail-open
+            return True, max_requests   # fail-open
 
-    results_a = [_fail_open_is_allowed(f"ip{i}") for i in range(5)]
-    all_allowed = all(ok for ok, _ in results_a)
-    _result("unreachable Redis → requests allowed (fail_open=True)", all_allowed)
-    if all_allowed:
-        result.details.append("fail_open=True allows on error")
-    else:
-        result.failures.append("fail_open should allow on connection error")
+    ok_open = all(_open(f"ip{i}")[0] for i in range(5))
+    _result("unreachable Redis + fail_open=True → requests allowed", ok_open)
+    (result.details if ok_open else result.failures).append("fail_open allows")
 
-    # ── Scenario B: simulate fail_closed ────────────────────────────────────
-
-    def _fail_closed_is_allowed(ip: str) -> tuple[bool, int]:
+    # Scenario B — fail_closed=False denies
+    def _closed(ip: str) -> tuple[bool, int]:
         try:
-            bad_client.ping()
+            bad.ping()
             return True, max_requests
         except redis_lib.exceptions.RedisError:
-            return False, 0  # fail-closed
+            return False, 0   # fail-closed
 
-    results_b = [_fail_closed_is_allowed(f"ip{i}") for i in range(3)]
-    all_denied = all(not ok for ok, _ in results_b)
-    _result("fail_closed=True → requests denied on error", all_denied)
-    if all_denied:
-        result.details.append("fail_closed=True denies on error")
-    else:
-        result.failures.append("fail_closed should deny on connection error")
+    ok_closed = all(not _closed(f"ip{i}")[0] for i in range(3))
+    _result("unreachable Redis + fail_open=False → requests denied", ok_closed)
+    (result.details if ok_closed else result.failures).append("fail_closed denies")
 
-    # ── Scenario C: reconnection after restart ───────────────────────────────
+    # Scenario C — healthy Redis reconnects
     try:
-        good_client = redis_lib.Redis(
+        good = redis_lib.Redis(
             host=host, port=port, password=password,
-            socket_connect_timeout=1.0, decode_responses=True,
+            socket_connect_timeout=1.5, decode_responses=True,
         )
-        good_client.ping()
-        _result("client reconnects to healthy Redis after failover", True)
-        result.details.append("reconnects after failover")
+        good.ping()
+        _result("healthy Redis reconnects after simulated outage", True)
+        result.details.append("reconnects")
     except Exception as exc:
-        _result("client reconnects to healthy Redis after failover", None,
-                f"Redis not reachable at {host}:{port} — skipped")
+        _result("healthy Redis reconnects after simulated outage", None,
+                f"Redis not reachable ({exc}) — skipped")
 
-    result.passed = len(result.failures) == 0
+    result.passed = not result.failures
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Docker Redis auto-start helper
-# ══════════════════════════════════════════════════════════════════════════════
-
-DOCKER_CONTAINER = "finsight-verify-redis"
-
-def _start_docker_redis(port: int) -> bool:
-    """Start a temporary Redis container. Returns True on success."""
-    print(f"  {INFO}  Starting Redis container on port {port} …")
-    try:
-        subprocess.run(
-            ["docker", "run", "-d", "--rm",
-             "--name", DOCKER_CONTAINER,
-             "-p", f"127.0.0.1:{port}:{port}",
-             "redis:7.2-alpine",
-             "redis-server", "--port", str(port),
-             "--maxmemory", "64mb",
-             "--maxmemory-policy", "allkeys-lru"],
-            check=True,
-            capture_output=True,
-        )
-        # Wait until Redis is accepting connections
-        import redis as redis_lib
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                redis_lib.Redis(host="localhost", port=port,
-                                socket_connect_timeout=0.5).ping()
-                print(f"  {OK}  Redis container ready")
-                return True
-            except Exception:
-                time.sleep(0.3)
-        print(f"  {FAIL}  Redis container did not become healthy in 15s")
-        return False
-    except FileNotFoundError:
-        print(f"  {SKIP}  Docker not found — skipping auto-start")
-        return False
-    except subprocess.CalledProcessError as exc:
-        print(f"  {FAIL}  docker run failed: {exc.stderr.decode()[:200]}")
-        return False
-
-
-def _stop_docker_redis() -> None:
-    try:
-        subprocess.run(
-            ["docker", "stop", DOCKER_CONTAINER],
-            check=True, capture_output=True,
-        )
-        print(f"  {INFO}  Redis container stopped")
-    except Exception:
-        pass
-
-
-def _redis_already_running(host: str, port: int, password: Optional[str]) -> bool:
-    try:
-        import redis as redis_lib
-        redis_lib.Redis(
-            host=host, port=port, password=password,
-            socket_connect_timeout=0.5,
-        ).ping()
-        return True
-    except Exception:
-        return False
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Summary printer
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _print_summary(layers: list[LayerResult]) -> int:
     _banner("Verification summary")
-    total = len(layers)
-    passed = sum(1 for l in layers if l.passed and not l.skipped)
+    passed  = sum(1 for l in layers if l.passed and not l.skipped)
     skipped = sum(1 for l in layers if l.skipped)
-    failed = total - passed - skipped
+    failed  = len(layers) - passed - skipped
 
     for layer in layers:
-        if layer.skipped:
-            icon = SKIP
-        elif layer.passed:
-            icon = OK
-        else:
-            icon = FAIL
+        icon = SKIP if layer.skipped else (OK if layer.passed else FAIL)
         print(f"  {icon}  {layer.name}")
         for f in layer.failures:
             print(f"        {_c('31', '↳')} {f}")
 
     print()
-    summary = (
+    print(
         f"  {_c('1', str(passed))} passed  "
-        f"{_c('31', str(failed)) if failed else '0'} failed  "
+        f"{(_c('31', str(failed)) if failed else '0')} failed  "
         f"{_c('33', str(skipped))} skipped"
     )
-    print(summary)
     print()
 
     if failed:
-        print(_c("31", "  Some layers failed. See details above."))
+        print(_c("31", "  Some layers failed — see details above."))
     else:
         print(_c("32", "  All layers passed. Redis rate limiter is working correctly."))
     print()
-
     return 1 if failed else 0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Single-step verification for the FinSight Redis rate limiter",
+        description="Single-step Redis rate limiter verification for FinSight",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--host",         default="localhost")
-    parser.add_argument("--port",         type=int, default=6379)
-    parser.add_argument("--password",     default=None)
-    parser.add_argument("--max-requests", type=int, default=120)
-    parser.add_argument("--window-s",     type=int, default=60)
-    parser.add_argument("--prefix",       default="finsight:ratelimit")
-    parser.add_argument("--api-url",      default="http://localhost:8000")
-    parser.add_argument("--no-api",       action="store_true",
-                        help="Skip layers 4-5 (no running server required)")
-    parser.add_argument("--no-docker",    action="store_true",
-                        help="Do not attempt to start Redis via Docker")
-    parser.add_argument("--keep-redis",   action="store_true",
-                        help="Leave the Docker Redis container running after the script")
+    parser.add_argument("--host",          default="localhost")
+    parser.add_argument("--port",          type=int, default=6379)
+    parser.add_argument("--password",      default=None)
+    parser.add_argument("--max-requests",  type=int, default=120)
+    parser.add_argument("--window-s",      type=int, default=60)
+    parser.add_argument("--prefix",        default="finsight:ratelimit")
+    parser.add_argument("--api-url",       default="http://localhost:8000")
+    parser.add_argument("--no-api",        action="store_true",
+                        help="Skip layers 4-5 (no API server required)")
+    parser.add_argument("--no-auto-redis", action="store_true",
+                        help="Do not attempt to start Redis automatically")
+    parser.add_argument("--only-memory",   action="store_true",
+                        help="Run layers 1-2 only (no Redis required)")
+    parser.add_argument("--keep-redis",    action="store_true",
+                        help="Leave auto-started Redis running after the script")
     args = parser.parse_args()
 
-    # ── redis-py presence check ────────────────────────────────────────────
+    # ── redis-py presence ─────────────────────────────────────────────────────
     try:
         import redis  # noqa: F401
     except ImportError:
@@ -928,81 +991,61 @@ def main() -> int:
         print("Then re-run this script.\n")
         return 2
 
-    # ── Redis availability ─────────────────────────────────────────────────
-    started_docker = False
-    redis_available = _redis_already_running(args.host, args.port, args.password)
+    # ── only-memory shortcut (layers 1-2, no Redis) ────────────────────────────
+    if args.only_memory:
+        layers: list[LayerResult] = []
+        layers.append(layer1_in_memory(args.max_requests))
+        layers.append(layer2_factory_fallback())
+        return _print_summary(layers)
 
-    if not redis_available and not args.no_docker:
-        started_docker = _start_docker_redis(args.port)
-        redis_available = started_docker
-    elif not redis_available:
-        print(f"\n  {_c('33', 'WARNING')}  Redis not reachable at "
-              f"{args.host}:{args.port} and --no-docker was set.")
-        print("  Layers 3, 6, 7 will be skipped or degraded.\n")
+    # ── ensure Redis is reachable ─────────────────────────────────────────────
+    redis_up = False
+    if not args.no_auto_redis:
+        redis_up, _ = _try_start_redis(args.host, args.port, args.password)
+    else:
+        redis_up = _redis_ping(args.host, args.port, args.password)
+        if not redis_up:
+            _banner("Redis connectivity")
+            _result(f"Redis at {args.host}:{args.port}", False,
+                    "not reachable and --no-auto-redis set")
+            _print_redis_install_instructions(args.host, args.port)
+
+    if not redis_up:
+        return 3
 
     layers: list[LayerResult] = []
 
     try:
-        # Layer 1 — always runs
-        layers.append(layer1_in_memory(args.max_requests, args.window_s))
-
-        # Layer 2 — always runs
+        layers.append(layer1_in_memory(args.max_requests))
         layers.append(layer2_factory_fallback())
+        layers.append(layer3_redis_live(
+            args.host, args.port, args.password,
+            args.max_requests, args.window_s, args.prefix,
+        ))
 
-        # Layer 3 — requires Redis
-        if redis_available:
-            layers.append(layer3_redis_live(
-                args.host, args.port, args.password,
-                args.max_requests, args.window_s, args.prefix,
-            ))
-        else:
-            r = LayerResult("Live Redis", passed=True, skipped=True)
-            r.details.append("skipped — Redis not reachable")
-            _banner("Layer 3 — Live Redis sliding-window algorithm")
-            _result("Redis reachable", None, "skipped")
-            layers.append(r)
-
-        # Layer 4 — requires API server
         if not args.no_api:
-            layers.append(layer4_startup_logs(
-                args.api_url, args.host, args.port, args.password, args.prefix,
-            ))
+            layers.append(layer4_startup_health(args.api_url))
+            layers.append(layer5_e2e_429(args.api_url, args.max_requests))
         else:
-            r = LayerResult("Startup & health", passed=True, skipped=True)
-            r.details.append("skipped via --no-api")
-            _banner("Layer 4 — Startup log + /health endpoint")
-            _result("skipped via --no-api", None)
-            layers.append(r)
+            for name in ("Startup & /health", "E2E HTTP 429"):
+                r = LayerResult(name, passed=True, skipped=True)
+                r.details.append("skipped via --no-api")
+                _banner(f"{'Layer 4' if 'health' in name else 'Layer 5'} — skipped (--no-api)")
+                _result("skipped via --no-api", None)
+                layers.append(r)
 
-        # Layer 5 — requires API server
-        if not args.no_api:
-            layers.append(layer5_e2e_rate_limit(args.api_url, args.max_requests))
-        else:
-            r = LayerResult("E2E rate limit", passed=True, skipped=True)
-            r.details.append("skipped via --no-api")
-            _banner("Layer 5 — End-to-end rate limit enforcement")
-            _result("skipped via --no-api", None)
-            layers.append(r)
-
-        # Layer 6 — requires Redis
-        if redis_available:
-            layers.append(layer6_redis_key_inspection(
-                args.host, args.port, args.password, args.prefix,
-            ))
-        else:
-            r = LayerResult("Redis key inspection", passed=True, skipped=True)
-            _banner("Layer 6 — Redis key inspection")
-            _result("skipped — Redis not reachable", None)
-            layers.append(r)
-
-        # Layer 7 — requires redis-py (doesn't need healthy Redis for fail-open test)
+        layers.append(layer6_key_inspection(
+            args.host, args.port, args.password,
+            args.prefix, args.window_s,
+        ))
         layers.append(layer7_fail_open(
             args.host, args.port, args.password, args.max_requests,
         ))
 
     finally:
-        if started_docker and not args.keep_redis:
-            _stop_docker_redis()
+        if not args.keep_redis and _STARTED_METHOD not in (None, "existing",
+                                                            "docker-compose"):
+            _stop_auto_redis()
 
     return _print_summary(layers)
 

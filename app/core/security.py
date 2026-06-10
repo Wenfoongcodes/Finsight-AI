@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import logging
 import os
 import threading
 import time
@@ -110,13 +109,6 @@ class _InMemoryRateLimiter(RateLimiterBase):
 # Returns: { current_count, max_requests }
 #   current_count is the count AFTER potentially adding the new entry.
 #   When current_count > max_requests the entry was NOT added (request denied).
-#
-# Algorithm (all within a single atomic Lua call):
-#   1. Remove members with score < (now_ms - window_ms)   [evict stale]
-#   2. Count remaining members                             [current load]
-#   3. If count < max → add now_ms as a new member        [record request]
-#   4. Set key TTL to window_s                            [auto-cleanup]
-#   5. Return { new_count, max_requests }
 
 _SLIDING_WINDOW_LUA = """
 local key        = KEYS[1]
@@ -125,26 +117,60 @@ local window_ms  = tonumber(ARGV[2])
 local max_reqs   = tonumber(ARGV[3])
 local ttl_s      = tonumber(ARGV[4])
 
--- 1. Evict timestamps outside the current window
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
 
--- 2. Count requests still inside the window
 local count = redis.call('ZCARD', key)
 
--- 3. Conditionally record this request
 if count < max_reqs then
-    -- Use a unique member to handle burst requests arriving at the same ms.
-    -- Appending a random 8-char suffix avoids ZADD deduplication.
     local member = tostring(now_ms) .. ':' .. redis.call('INCR', key .. ':seq')
     redis.call('ZADD', key, now_ms, member)
     count = count + 1
 end
 
--- 4. Refresh TTL so inactive keys self-clean
 redis.call('EXPIRE', key, ttl_s)
 
 return { count, max_reqs }
 """
+
+
+def _detect_hiredis() -> bool:
+    """
+    Detect whether hiredis is active for the current redis-py installation.
+
+    Compatibility matrix
+    --------------------
+    redis-py < 5   ``redis.connection.HiredisParser`` exists as a public class.
+                   We check for it via getattr to avoid an ImportError.
+
+    redis-py >= 5  ``HiredisParser`` was privatised and moved to
+                   ``redis._parsers._HiredisParser``.  When hiredis is
+                   installed redis-py v5+ selects it automatically as the
+                   ``DefaultParser`` — no explicit ``parser_class`` kwarg
+                   is needed or useful.
+
+    Returns True when hiredis is active (either version), False otherwise.
+    Logs the outcome at DEBUG level for startup diagnostics.
+    """
+    import redis.connection as rc
+
+    # redis-py >= 5: check DefaultParser identity
+    try:
+        from redis._parsers import _HiredisParser
+        if getattr(rc, "DefaultParser", None) is _HiredisParser:
+            logger.debug(
+                "hiredis detected (redis-py >= 5, DefaultParser=_HiredisParser)"
+            )
+            return True
+    except ImportError:
+        pass
+
+    # redis-py < 5: check the legacy public attribute
+    if getattr(rc, "HiredisParser", None) is not None:
+        logger.debug("hiredis detected (redis-py < 5, HiredisParser present)")
+        return True
+
+    logger.debug("hiredis not active — using pure-Python parser")
+    return False
 
 
 class _RedisRateLimiter(RateLimiterBase):
@@ -154,17 +180,33 @@ class _RedisRateLimiter(RateLimiterBase):
     Correct for any number of workers, instances, or replicas — all share
     the same Redis state.  Rate limit state survives application restarts.
 
-    The sliding window is implemented as an atomic Lua script (see
-    ``_SLIDING_WINDOW_LUA`` above) so there are no race conditions between
-    the read-check and write steps.
+    The sliding window is implemented as an atomic Lua script so there are
+    no race conditions between the read-check and write steps.
+
+    redis-py compatibility
+    ----------------------
+    Compatible with redis-py v4, v5, v6, and beyond:
+
+    * **v4 and below**: ``HiredisParser`` is a public class on
+      ``redis.connection``.  The old code tried to set ``parser_class``
+      explicitly, which worked but was unnecessary — redis-py already picks
+      hiredis automatically when installed.
+
+    * **v5 and above**: ``HiredisParser`` was removed from the public API
+      and privatised as ``redis._parsers._HiredisParser``.  The
+      ``ConnectionPool`` selects hiredis automatically via ``DefaultParser``
+      when hiredis is installed; passing ``parser_class`` is still accepted
+      but is redundant.
+
+    This implementation **never passes ``parser_class``** — it lets redis-py
+    choose the parser automatically in all versions, and logs the outcome at
+    startup via ``_detect_hiredis()``.
 
     Failure behaviour
     -----------------
-    If Redis is unreachable (network partition, restart, misconfiguration)
-    the limiter **allows** the request and logs a WARNING rather than
-    rejecting traffic.  This is a deliberate availability-over-consistency
-    trade-off: a brief Redis outage should degrade gracefully, not take the
-    API offline.  To change this behaviour, set ``fail_open=False``.
+    When Redis is unreachable the limiter **allows** the request and logs a
+    WARNING rather than rejecting traffic (``fail_open=True``).  Set
+    ``fail_open=False`` to reject on Redis error instead.
 
     Parameters
     ----------
@@ -186,7 +228,7 @@ class _RedisRateLimiter(RateLimiterBase):
         self.key_prefix = key_prefix
         self.fail_open = fail_open
         self._pool = self._build_pool()
-        self._script_sha: Optional[str] = None  # loaded lazily on first use
+        self._script_sha: Optional[str] = None
 
     # ── Pool construction ─────────────────────────────────────────────────────
 
@@ -194,6 +236,16 @@ class _RedisRateLimiter(RateLimiterBase):
     def _build_pool():
         """
         Build a Redis connection pool from application settings.
+
+        Intentionally does NOT pass ``parser_class``.  redis-py selects the
+        best available parser automatically:
+          - hiredis installed  → uses hiredis parser (all versions)
+          - hiredis absent     → uses pure-Python parser (all versions)
+
+        Explicitly setting ``parser_class`` with the old
+        ``redis.connection.HiredisParser`` reference raises an
+        ``AttributeError`` on redis-py >= 5 because that attribute no longer
+        exists.  Omitting it is correct for all supported versions.
 
         Raises ImportError when redis-py is not installed — caught at
         factory time so the application falls back to in-memory.
@@ -206,26 +258,41 @@ class _RedisRateLimiter(RateLimiterBase):
                 "pip install redis[hiredis]"
             ) from exc
 
-        pool_kwargs = dict(
+        # redis-py v5+ requires SSL to be specified via SSLConnection class
+        # rather than an ssl= kwarg on ConnectionPool, which raises:
+        #   AbstractConnection.__init__() got an unexpected keyword argument 'ssl'
+        # Using connection_class= is the canonical approach for all versions.
+        conn_kwargs: dict = dict(
             host=settings.REDIS_HOST,
             port=settings.REDIS_PORT,
             db=settings.REDIS_DB,
             password=settings.REDIS_PASSWORD,
-            ssl=settings.REDIS_SSL,
             socket_timeout=settings.REDIS_SOCKET_TIMEOUT_S,
             socket_connect_timeout=settings.REDIS_CONNECT_TIMEOUT_S,
-            max_connections=settings.REDIS_MAX_CONNECTIONS,
             decode_responses=True,
+            # parser_class is intentionally omitted — see docstring above.
         )
-        # hiredis parser is optional but strongly recommended for throughput
-        try:
-            import hiredis  # noqa: F401
-            pool_kwargs["parser_class"] = redis_lib.connection.HiredisParser
-            logger.info("Redis rate limiter: hiredis parser enabled")
-        except ImportError:
-            logger.debug("Redis rate limiter: hiredis not installed, using PythonParser")
 
-        return redis_lib.ConnectionPool(**pool_kwargs)
+        connection_class = (
+            redis_lib.SSLConnection if settings.REDIS_SSL else redis_lib.Connection
+        )
+
+        pool = redis_lib.ConnectionPool(
+            connection_class=connection_class,
+            max_connections=settings.REDIS_MAX_CONNECTIONS,
+            **conn_kwargs,
+        )
+
+        # Log hiredis status after the pool is built (detection is read-only).
+        hiredis_active = _detect_hiredis()
+        logger.info(
+            "Redis connection pool created (host=%s:%d ssl=%s hiredis=%s)",
+            settings.REDIS_HOST,
+            settings.REDIS_PORT,
+            settings.REDIS_SSL,
+            hiredis_active,
+        )
+        return pool
 
     # ── Script loading ────────────────────────────────────────────────────────
 
@@ -237,7 +304,7 @@ class _RedisRateLimiter(RateLimiterBase):
         """
         SCRIPT LOAD the Lua script and cache its SHA1.
 
-        Redis EVALSHA is faster than EVAL because the server has already
+        redis-py EVALSHA is faster than EVAL because the server has already
         parsed and compiled the script.  We load it once and reuse the SHA.
         If the server flushes its script cache (SCRIPT FLUSH / restart),
         the next EVALSHA will return NOSCRIPT and we reload transparently.
@@ -245,7 +312,8 @@ class _RedisRateLimiter(RateLimiterBase):
         if self._script_sha is None:
             self._script_sha = client.script_load(_SLIDING_WINDOW_LUA)
             logger.info(
-                "Redis sliding-window Lua script loaded (sha=%s…)", self._script_sha[:8]
+                "Redis sliding-window Lua script loaded (sha=%s…)",
+                self._script_sha[:8],
             )
         return self._script_sha
 
@@ -265,8 +333,7 @@ class _RedisRateLimiter(RateLimiterBase):
         """
         import redis as redis_lib
 
-        # Build the Redis key: prefix:sha8(ip) — hashing avoids storing raw
-        # IP addresses in Redis, providing a lightweight privacy benefit.
+        # Hash the IP before storing in Redis — lightweight privacy benefit.
         ip_hash = hashlib.sha256(key.encode()).hexdigest()[:16]
         redis_key = f"{self.key_prefix}:{ip_hash}"
 
@@ -339,12 +406,12 @@ def _build_rate_limiter() -> RateLimiterBase:
     """
     Construct the appropriate rate limiter based on ``RATE_LIMIT_BACKEND``.
 
-    ``"redis"``   → ``_RedisRateLimiter``  (distributed, production)
-    ``"memory"``  → ``_InMemoryRateLimiter`` (default, local dev)
+    ``"redis"``  → ``_RedisRateLimiter``    (distributed, production)
+    ``"memory"`` → ``_InMemoryRateLimiter`` (default, local dev)
 
     Falls back to in-memory with a WARNING when:
-    - Backend is "redis" but redis-py is not installed.
-    - Backend is "redis" but the initial connection probe fails.
+    - Backend is ``"redis"`` but redis-py is not installed.
+    - Backend is ``"redis"`` but the Redis probe (PING) fails.
     - An unknown backend name is configured.
     """
     backend = getattr(settings, "RATE_LIMIT_BACKEND", "memory").lower().strip()
@@ -359,12 +426,10 @@ def _build_rate_limiter() -> RateLimiterBase:
                 ),
                 fail_open=True,
             )
-            # Probe connectivity eagerly so misconfiguration is caught at
-            # startup rather than on the first live request.
             _probe_redis(limiter)
             logger.info(
-                "Rate limiter backend: Redis (host=%s:%d db=%d prefix=%s "
-                "max=%d window=%ds)",
+                "Rate limiter backend: Redis  (host=%s:%d  db=%d  "
+                "prefix=%s  max=%d  window=%ds)",
                 settings.REDIS_HOST,
                 settings.REDIS_PORT,
                 settings.REDIS_DB,
@@ -373,6 +438,7 @@ def _build_rate_limiter() -> RateLimiterBase:
                 settings.RATE_LIMIT_WINDOW_S,
             )
             return limiter
+
         except ImportError:
             logger.warning(
                 "RATE_LIMIT_BACKEND=redis but redis-py is not installed. "
@@ -389,13 +455,13 @@ def _build_rate_limiter() -> RateLimiterBase:
 
     elif backend != "memory":
         logger.warning(
-            "Unknown RATE_LIMIT_BACKEND=%r. Valid values: 'memory', 'redis'. "
+            "Unknown RATE_LIMIT_BACKEND=%r — valid values: 'memory', 'redis'. "
             "Falling back to in-memory.",
             backend,
         )
 
     logger.info(
-        "Rate limiter backend: in-memory (max=%d window=%ds)",
+        "Rate limiter backend: in-memory  (max=%d  window=%ds)",
         settings.RATE_LIMIT_MAX_REQUESTS,
         settings.RATE_LIMIT_WINDOW_S,
     )
@@ -407,7 +473,7 @@ def _build_rate_limiter() -> RateLimiterBase:
 
 def _probe_redis(limiter: _RedisRateLimiter) -> None:
     """
-    Perform a lightweight PING to verify Redis connectivity.
+    Perform a lightweight PING to verify Redis connectivity at startup.
 
     Raises on any connection failure so ``_build_rate_limiter`` can fall
     back to in-memory gracefully.
