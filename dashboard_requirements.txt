@@ -7,6 +7,9 @@
 requests==2.32.3
 httpx==0.27.0
 
+# ── Streaming (SSE consumer for /predict/stream and /agent/stream) ─────────
+sseclient-py>=1.8.0
+
 # ── Frontend ───────────────────────────────────────────────────────────────
 streamlit==1.36.0
 plotly==5.22.0

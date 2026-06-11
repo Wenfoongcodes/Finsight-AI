@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from app.core.exceptions import PredictionError
 from app.core.formatting import (
@@ -26,6 +26,14 @@ from app.services.signal_fusion import FusedSignal, SignalFusionService
 from configs.settings import settings
 
 logger = get_logger("prediction_service")
+
+# Type alias for the optional progress callback.
+# Signature: (stage: str, message: str, pct: int) -> None
+ProgressCallback = Callable[[str, str, int], None]
+
+
+def _noop(stage: str, message: str, pct: int = 0) -> None:
+    """Default no-op progress callback used when no callback is supplied."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,6 +79,19 @@ class PredictionService:
     """
     End-to-end prediction pipeline:
       ModelSelector → (train all models if needed) → best model → SHAP → SignalFusion
+
+    The ``progress_callback`` parameter allows callers to receive stage-by-stage
+    progress notifications without coupling the service to any specific transport.
+    The callback is invoked with ``(stage: str, message: str, pct: int)`` at each
+    major pipeline checkpoint.  When no callback is supplied the default no-op
+    is used so all existing call sites continue to work unchanged.
+
+    Example (streaming endpoint)::
+
+        def my_callback(stage, message, pct):
+            queue.put_nowait(sse_event("progress", {...}))
+
+        svc.predict("AAPL", progress_callback=my_callback)
     """
 
     def __init__(self) -> None:
@@ -86,6 +107,7 @@ class PredictionService:
         use_cache: bool = True,
         run_fusion: bool = True,
         apply_feature_selection: bool = False,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> PredictionResponse:
         """
         Run the full prediction pipeline for *ticker* / *horizon*.
@@ -93,9 +115,23 @@ class PredictionService:
         When no artifacts exist the service trains all models in
         ALL_TRAINING_MODELS before selecting the best one by AUC.
 
+        Parameters
+        ----------
+        ticker:             Stock ticker symbol.
+        horizon:            Prediction horizon key.
+        use_cache:          Whether to use cached market data.
+        run_fusion:         Whether to run LLM signal fusion.
+        apply_feature_selection: Whether to apply FeatureSelector.
+        progress_callback:  Optional ``(stage, message, pct) -> None`` callback
+                            invoked at each major pipeline stage.  When
+                            ``None`` (default), a no-op is used so all existing
+                            call sites are unaffected.
+
         Raises:
             PredictionError: On any unrecoverable failure.
         """
+        cb: ProgressCallback = progress_callback or _noop
+
         ticker = ticker.upper().strip()
         horizon = horizon.strip()
 
@@ -108,14 +144,27 @@ class PredictionService:
             logger.info("Prediction pipeline: ticker=%s horizon=%s", ticker, horizon)
 
             # ── 1. Ingest ─────────────────────────────────────────────────────
+            cb("ingest", f"Fetching market data for {ticker}…", 5)
             raw_df = ingest_market_data(ticker, use_cache=use_cache)
+            cb(
+                "ingest",
+                f"Loaded {len(raw_df):,} rows of market data for {ticker}",
+                10,
+            )
 
             # ── 2. Feature engineering ────────────────────────────────────────
+            cb("features", f"Engineering features from {len(raw_df):,} rows…", 15)
             feature_df = self.engineer.build_features(raw_df)
             X, y = self.engineer.split_X_y(feature_df, horizon=horizon)
+            cb(
+                "features",
+                f"Built {X.shape[1]} features × {X.shape[0]} rows",
+                22,
+            )
 
             # ── 3. Optional feature selection ─────────────────────────────────
             if apply_feature_selection:
+                cb("features", "Applying feature selection…", 25)
                 fs = FeatureSelector()
                 X = fs.fit_transform(X, y)
                 logger.info(
@@ -124,6 +173,7 @@ class PredictionService:
                     horizon,
                     X.shape[1],
                 )
+                cb("features", f"{X.shape[1]} features retained after selection", 27)
 
             # ── 4. Model selection ────────────────────────────────────────────
             sel = self.selector.select(ticker, horizon=horizon)
@@ -137,8 +187,52 @@ class PredictionService:
                     len(ALL_TRAINING_MODELS),
                     ALL_TRAINING_MODELS,
                 )
+                cb(
+                    "training",
+                    f"No trained models found — training {len(ALL_TRAINING_MODELS)} "
+                    f"models for {ticker}/{horizon}…",
+                    30,
+                )
+
                 best_result = None
-                for model_name in ALL_TRAINING_MODELS:
+                n_models = len(ALL_TRAINING_MODELS)
+
+                for model_idx, model_name in enumerate(ALL_TRAINING_MODELS):
+                    pct_start = 30 + model_idx * (40 // n_models)
+                    pct_end = 30 + (model_idx + 1) * (40 // n_models)
+
+                    # Emit per-fold progress via a nested callback injected into
+                    # the trainer.  We approximate fold progress within the
+                    # model's pct range.
+                    n_folds = settings.WALK_FORWARD_FOLDS
+
+                    def _make_fold_cb(m_name, p_start, p_end, n_f):
+                        _fold_counter = [0]
+
+                        def _fold_cb(fold_result):
+                            _fold_counter[0] += 1
+                            fold_num = _fold_counter[0]
+                            pct = p_start + int(
+                                (fold_num / n_f) * (p_end - p_start)
+                            )
+                            cb(
+                                "training",
+                                f"Training {m_name} — fold {fold_num}/{n_f} complete "
+                                f"(AUC {fold_result.roc_auc:.4f})",
+                                pct,
+                            )
+
+                        return _fold_cb
+
+                    fold_cb = _make_fold_cb(
+                        model_name, pct_start, pct_end, n_folds
+                    )
+
+                    cb(
+                        "training",
+                        f"[{model_idx + 1}/{n_models}] Training {model_name}…",
+                        pct_start,
+                    )
                     try:
                         _, train_result = self.trainer.train(
                             model_name=model_name,
@@ -147,6 +241,7 @@ class PredictionService:
                             ticker=ticker,
                             horizon=horizon,
                             trigger_reason="no_artifacts_train_all",
+                            fold_callback=fold_cb,
                         )
                         logger.info(
                             "[%s/%s] Trained %s: AUC=%.4f",
@@ -154,6 +249,11 @@ class PredictionService:
                             horizon,
                             model_name,
                             train_result.mean_roc_auc,
+                        )
+                        cb(
+                            "training",
+                            f"{model_name} trained — AUC {train_result.mean_roc_auc:.4f}",
+                            pct_end,
                         )
                         if (
                             best_result is None
@@ -168,6 +268,11 @@ class PredictionService:
                             model_name,
                             exc,
                         )
+                        cb(
+                            "training",
+                            f"{model_name} training failed — skipping",
+                            pct_end,
+                        )
 
                 if best_result is None:
                     raise PredictionError(
@@ -176,6 +281,11 @@ class PredictionService:
 
                 auto_trained = True
                 sel = self.selector.select(ticker, horizon=horizon)
+                cb(
+                    "training",
+                    f"Best model: {sel.model_name} (AUC {sel.auc:.4f})",
+                    72,
+                )
                 logger.info(
                     "[%s/%s] Post-training selection: %s (AUC=%.4f, reason=%s)",
                     ticker,
@@ -193,6 +303,12 @@ class PredictionService:
                     sel.model_name,
                     sel.auc,
                 )
+                cb(
+                    "model_select",
+                    f"Using {sel.model_name} (AUC {sel.auc:.4f} — below threshold, "
+                    f"confidence degraded)",
+                    35,
+                )
             else:
                 logger.info(
                     "[%s/%s] Auto-selected: '%s' (AUC=%.4f).",
@@ -201,10 +317,16 @@ class PredictionService:
                     sel.model_name,
                     sel.auc,
                 )
+                cb(
+                    "model_select",
+                    f"Auto-selected {sel.model_name} (AUC {sel.auc:.4f})",
+                    35,
+                )
 
             confidence_degraded = sel.reason != REASON_LEADERBOARD
 
             # ── 5. Load or retrain on artifact issues ─────────────────────────
+            cb("model_load", f"Loading {sel.model_name} model artifact…", 75)
             model, feature_columns, train_result_incr = self.trainer.load_or_train(
                 ticker=ticker,
                 model_name=sel.model_name,
@@ -214,12 +336,10 @@ class PredictionService:
             )
             if train_result_incr is not None:
                 auto_trained = True
-                logger.info(
-                    "[%s/%s] Incremental retrain: AUC=%.4f trigger='%s'",
-                    ticker,
-                    horizon,
-                    train_result_incr.mean_roc_auc,
-                    train_result_incr.trigger_reason,
+                cb(
+                    "training",
+                    f"Incremental retrain complete — AUC {train_result_incr.mean_roc_auc:.4f}",
+                    75,
                 )
 
             # ── 6. Align features ─────────────────────────────────────────────
@@ -232,6 +352,7 @@ class PredictionService:
             X_aligned = X[feature_columns]
 
             # ── 7. Inference ──────────────────────────────────────────────────
+            cb("inference", f"Running inference with {sel.model_name}…", 80)
             X_latest = X_aligned.iloc[[-1]]
             pred = int(model.predict(X_latest)[0])
 
@@ -240,6 +361,7 @@ class PredictionService:
             prob = round_prob(p_bullish if pred == 1 else p_bearish)
 
             # ── 8. SHAP ───────────────────────────────────────────────────────
+            cb("shap", "Running SHAP analysis…", 84)
             explainer = SHAPExplainer(model, feature_columns, X_background=X_aligned)
             shap_exp = explainer.local_explanation(X_latest)
 
@@ -269,7 +391,7 @@ class PredictionService:
                 probability=prob,
                 p_bullish=p_bullish,
                 p_bearish=p_bearish,
-                confidence_label=confidence_label(p_bullish),  # shared implementation
+                confidence_label=confidence_label(p_bullish),
                 shap_explanation=shap_exp,
                 narrative=narrative,
                 latest_close=latest_close,
@@ -278,28 +400,44 @@ class PredictionService:
                 auto_trained=auto_trained,
             )
 
-            # ── 11. Signal fusion (best-effort — horizon-aware) ───────────────
+            # ── 11. Signal fusion ─────────────────────────────────────────────
             if run_fusion and settings.OPENAI_API_KEY:
+                cb("news", "Retrieving news intelligence…", 88)
                 try:
                     fused = self.fusion_service.fuse(
                         ticker,
                         response,
-                        horizon=horizon,  # ← propagated in v7
+                        horizon=horizon,
                     )
                     response.fused_signal = fused
+
+                    if fused.fusion_applied:
+                        cb(
+                            "fusion",
+                            f"LLM signal fusion complete — {fused.final_direction} "
+                            f"({fused.final_confidence})",
+                            95,
+                        )
+                    else:
+                        cb(
+                            "fusion",
+                            f"Rule-based fusion — {fused.final_direction}",
+                            95,
+                        )
+
                     logger.info(
-                        "[%s/%s] Fusion: %s → %s (applied=%s, recency=%s)",
+                        "[%s/%s] Fusion: %s → %s (applied=%s)",
                         ticker,
                         horizon,
                         "BULLISH" if pred else "BEARISH",
                         fused.final_direction,
                         fused.fusion_applied,
-                        fused.recency_note,
                     )
                 except Exception as exc:
                     logger.warning(
                         "[%s/%s] Signal fusion skipped: %s", ticker, horizon, exc
                     )
+                    cb("fusion", "Signal fusion skipped — using ML-only signal", 95)
             else:
                 logger.info(
                     "[%s/%s] Fusion skipped (run_fusion=%s, api_key=%s)",
@@ -308,6 +446,15 @@ class PredictionService:
                     run_fusion,
                     bool(settings.OPENAI_API_KEY),
                 )
+                cb("fusion", "Signal fusion skipped", 95)
+
+            cb(
+                "complete",
+                f"Prediction complete — "
+                f"{'BULLISH' if pred else 'BEARISH'} "
+                f"(p={p_bullish:.1%}, conf={response.confidence_label})",
+                100,
+            )
 
             logger.info(
                 "Prediction complete: %s/%s → %s "

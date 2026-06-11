@@ -14,7 +14,10 @@ from app.api.v1.endpoints.routes import (
     prediction_router,
     rag_router,
     training_router,
+
 )
+from app.api.v1.endpoints.streaming import streaming_router
+
 from app.core.exceptions import (
     DataIngestionError,
     FinSightBaseError,
@@ -217,6 +220,7 @@ def create_app() -> FastAPI:
     app.include_router(market_router, prefix=api_prefix)
     app.include_router(rag_router, prefix=api_prefix)
     app.include_router(agent_router, prefix=api_prefix)
+    app.include_router(streaming_router, prefix=api_prefix)
 
     return app
 

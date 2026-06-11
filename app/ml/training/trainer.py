@@ -5,7 +5,7 @@ import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional  # ← Callable added
 
 import numpy as np
 import pandas as pd
@@ -95,14 +95,6 @@ class TrainingResult:
         )
 
     def to_dict(self) -> dict:
-        """
-        Serialise to a JSON-safe dict.
-
-        All float values use canonical precision:
-        - Metrics          → round_metric() = 4 d.p.
-        - Duration         → DURATION_DECIMAL_PLACES = 2 d.p.
-        - Timestamp        → utc_now_iso() format (stored in ``trained_at``)
-        """
         return {
             "model_name": self.model_name,
             "ticker": self.ticker,
@@ -269,20 +261,15 @@ class ModelTrainer:
     """
     Trains a model with walk-forward validation and persists artifacts.
 
-    Multi-horizon support
-    ---------------------
-    Artifacts are named ``{TICKER}_{model}_{horizon}.pkl`` so each
-    prediction horizon has fully independent parameters, features, and
-    metrics.
+    Changes vs original
+    -------------------
+    ``train()`` and ``load_or_train()`` accept an optional ``fold_callback``
+    parameter of type ``Optional[Callable[[FoldResult], None]]``.  It is
+    called once per completed fold with the ``FoldResult`` object.  Exceptions
+    raised by the callback are silently swallowed so a bad callback can never
+    abort a training run.
 
-    Automatic recovery
-    ------------------
-    ``load_or_train()`` checks artifact existence, integrity, and feature
-    column alignment; triggers a fresh training run on any failure.
-
-    sklearn compatibility
-    --------------------
-    ``CalibratedClassifierCV`` uses ``estimator=`` keyword (sklearn ≥ 1.2).
+    All existing call sites pass no callback and continue to work unchanged.
     """
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
@@ -318,6 +305,7 @@ class ModelTrainer:
         run_hpo: bool = False,
         hpo_trials: int = 30,
         calibrate: bool = True,
+        fold_callback: Optional[Callable[[FoldResult], None]] = None,  # ← NEW
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
         trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
 
@@ -343,6 +331,7 @@ class ModelTrainer:
             hpo_trials=hpo_trials,
             calibrate=calibrate,
             trigger_reason=trigger,
+            fold_callback=fold_callback,  # ← forwarded
         )
         return model, result.feature_columns, result
 
@@ -400,12 +389,18 @@ class ModelTrainer:
         hpo_trials: int = 30,
         calibrate: bool = True,
         trigger_reason: str = TRIGGER_MANUAL,
+        fold_callback: Optional[Callable[[FoldResult], None]] = None,  # ← NEW
     ) -> tuple[Any, "TrainingResult"]:
         """
         Train with walk-forward validation and persist artifacts.
 
-        Timestamps use ``utc_now_iso()`` for consistency with the rest of
-        the pipeline.  All metric values are rounded via ``round_metric()``.
+        ``fold_callback``, when supplied, is called after each fold completes
+        with the ``FoldResult`` for that fold.  This enables streaming
+        endpoints to emit per-fold progress events without coupling the
+        trainer to any transport mechanism.
+
+        Exceptions raised by ``fold_callback`` are silently swallowed so a
+        misbehaving callback cannot abort a training run.
         """
         try:
             t_start = time.perf_counter()
@@ -430,7 +425,7 @@ class ModelTrainer:
                 model_name=model_name,
                 ticker=ticker,
                 horizon=horizon,
-                trained_at=utc_now_iso(),  # canonical UTC ISO-8601
+                trained_at=utc_now_iso(),
                 n_features=X.shape[1],
                 trigger_reason=trigger_reason,
                 best_params=best_params,
@@ -449,16 +444,21 @@ class ModelTrainer:
                 y_prob = fold_model.predict_proba(X_te)[:, 1]
                 metrics = compute_metrics(y_te.values, y_pred, y_prob)
 
-                result.fold_results.append(
-                    FoldResult(
-                        fold=fold_idx + 1,
-                        train_size=len(X_tr),
-                        test_size=len(X_te),
-                        **metrics,
-                    )
+                fold_result = FoldResult(
+                    fold=fold_idx + 1,
+                    train_size=len(X_tr),
+                    test_size=len(X_te),
+                    **metrics,
                 )
+                result.fold_results.append(fold_result)
 
-                # Logging at 4 d.p. — consistent with to_dict() output
+                # ── NEW: invoke optional per-fold streaming callback ───────
+                if fold_callback is not None:
+                    try:
+                        fold_callback(fold_result)
+                    except Exception:
+                        pass  # never let a callback failure abort training
+
                 logger.info(
                     "[%s/%s/%s] Fold %d/%d — Acc=%.4f F1=%.4f AUC=%.4f",
                     ticker,

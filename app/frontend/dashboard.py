@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from typing import Optional
+from streaming_signal import render_streaming_signal_tab
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -640,24 +641,13 @@ tab_predict, tab_market, tab_chat, tab_agent = st.tabs(
 # ═════════════════════════════════════════════════════════════════════════════
 
 with tab_predict:
-    run_col, _ = st.columns([2, 6])
-    with run_col:
-        run_clicked = st.button(
-            "▶  Analyse Signal", type="primary", use_container_width=True
-        )
-
-    if run_clicked:
-        with st.spinner(f"Running analysis for {selected_ticker} / {horizon_label}…"):
-            result = api_post(
-                "/predict/",
-                {
-                    "ticker": selected_ticker,
-                    "horizon": selected_horizon,
-                    "use_cache": True,
-                },
-            )
-            if result:
-                st.session_state.last_prediction = result
+    render_streaming_signal_tab(
+        selected_ticker=selected_ticker,
+        selected_horizon=selected_horizon,
+        horizon_label=horizon_label,
+        api_base=API_BASE,
+        api_key=_API_KEY,
+    )
 
     pred = st.session_state.last_prediction
 
