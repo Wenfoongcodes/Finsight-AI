@@ -16,6 +16,7 @@ from app.api.v1.endpoints.routes import (
     training_router,
 )
 from app.api.v1.endpoints.streaming import streaming_router
+from app.api.v1.endpoints.versioning import versioning_router
 
 from app.core.exceptions import (
     DataIngestionError,
@@ -220,6 +221,7 @@ def create_app() -> FastAPI:
     app.include_router(rag_router, prefix=api_prefix)
     app.include_router(agent_router, prefix=api_prefix)
     app.include_router(streaming_router, prefix=api_prefix)
+    app.include_router(versioning_router, prefix=api_prefix)
 
     return app
 

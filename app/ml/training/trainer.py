@@ -5,7 +5,7 @@ import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional  # ← Callable added
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,13 @@ from app.core.formatting import (
 )
 from app.core.logging_config import get_logger
 from app.ml.models.model_factory import get_model
+from app.ml.training.versioning import (
+    DEFAULT_AUC_IMPROVEMENT_THRESHOLD,
+    DEFAULT_KEEP_LAST,
+    VersionedArtifactStore,
+    _build_registry_entry,
+    make_version_id,
+)
 from configs.settings import settings
 
 logger = get_logger("training")
@@ -77,6 +84,8 @@ class TrainingResult:
     best_params: dict = field(default_factory=dict)
     feature_columns: list[str] = field(default_factory=list)
     training_duration_s: float = 0.0
+    # Version identifier assigned after artifact save
+    version_id: str = ""
 
     def compute_aggregates(self) -> None:
         """Compute mean metrics with canonical precision."""
@@ -113,6 +122,7 @@ class TrainingResult:
             "best_params": self.best_params,
             "n_folds": len(self.fold_results),
             "feature_columns": self.feature_columns,
+            "version_id": self.version_id,
         }
 
 
@@ -259,38 +269,35 @@ def optimize_hyperparameters(
 
 class ModelTrainer:
     """
-    Trains a model with walk-forward validation and persists artifacts.
+    Trains a model with walk-forward validation and persists versioned artifacts.
 
-    Changes vs original
-    -------------------
-    ``train()`` and ``load_or_train()`` accept an optional ``fold_callback``
-    parameter of type ``Optional[Callable[[FoldResult], None]]``.  It is
-    called once per completed fold with the ``FoldResult`` object.  Exceptions
-    raised by the callback are silently swallowed so a bad callback can never
-    abort a training run.
+    Versioning behaviour
+    --------------------
+    Each call to ``train()`` creates a new version directory under
+    ``{models_dir}/{TICKER}/{model}/{horizon}/versions/{version_id}/``.
+    Old versions are never overwritten.
 
-    All existing call sites pass no callback and continue to work unchanged.
+    ``promote=True`` (default) immediately makes the new version active.
+    ``auto_promote_if_better=True`` only promotes if the new AUC exceeds
+    the current active version by at least ``auc_threshold``.
+
+    Rollback
+    --------
+    ``rollback()`` promotes the previous active version.  The full history
+    is available via ``list_versions()``.
+
+    Legacy compatibility
+    --------------------
+    On first access for a ticker/model/horizon that has a legacy flat
+    artifact (``{TICKER}_{model}_{horizon}.pkl``), the artifact is
+    transparently migrated into the versioned layout and the flat file
+    is removed.  All existing call sites continue to work unchanged.
     """
 
     def __init__(self, model_dir: Optional[Path] = None) -> None:
         self.model_dir = Path(model_dir or settings.MODELS_DIR)
         self.model_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Artifact paths ────────────────────────────────────────────────────────
-
-    def _artifact_slug(self, ticker: str, model_name: str, horizon: str) -> str:
-        return f"{ticker.upper()}_{model_name}_{horizon}"
-
-    def _model_path(self, ticker: str, model_name: str, horizon: str) -> Path:
-        return (
-            self.model_dir / f"{self._artifact_slug(ticker, model_name, horizon)}.pkl"
-        )
-
-    def _meta_path(self, ticker: str, model_name: str, horizon: str) -> Path:
-        return (
-            self.model_dir
-            / f"{self._artifact_slug(ticker, model_name, horizon)}_meta.json"
-        )
+        self._store = VersionedArtifactStore(self.model_dir)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -305,7 +312,7 @@ class ModelTrainer:
         run_hpo: bool = False,
         hpo_trials: int = 30,
         calibrate: bool = True,
-        fold_callback: Optional[Callable[[FoldResult], None]] = None,  # ← NEW
+        fold_callback: Optional[Callable[[FoldResult], None]] = None,
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
         trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
 
@@ -331,51 +338,9 @@ class ModelTrainer:
             hpo_trials=hpo_trials,
             calibrate=calibrate,
             trigger_reason=trigger,
-            fold_callback=fold_callback,  # ← forwarded
+            fold_callback=fold_callback,
         )
         return model, result.feature_columns, result
-
-    def _detect_trigger(
-        self,
-        ticker: str,
-        model_name: str,
-        horizon: str,
-        current_feature_cols: list[str],
-    ) -> Optional[str]:
-        path = self._model_path(ticker, model_name, horizon)
-
-        if not path.exists():
-            return TRIGGER_MISSING
-
-        try:
-            with open(path, "rb") as f:
-                artifact = pickle.load(f)
-        except Exception as exc:
-            logger.warning(
-                "[%s/%s/%s] Artifact corrupt (%s) — will retrain.",
-                ticker,
-                model_name,
-                horizon,
-                exc,
-            )
-            return TRIGGER_CORRUPT
-
-        saved_cols = set(artifact.get("feature_columns", []))
-        current_cols = set(current_feature_cols)
-        if saved_cols != current_cols:
-            added = current_cols - saved_cols
-            removed = saved_cols - current_cols
-            logger.warning(
-                "[%s/%s/%s] Feature mismatch — added=%d removed=%d — retraining.",
-                ticker,
-                model_name,
-                horizon,
-                len(added),
-                len(removed),
-            )
-            return TRIGGER_MISMATCH
-
-        return None
 
     def train(
         self,
@@ -389,18 +354,26 @@ class ModelTrainer:
         hpo_trials: int = 30,
         calibrate: bool = True,
         trigger_reason: str = TRIGGER_MANUAL,
-        fold_callback: Optional[Callable[[FoldResult], None]] = None,  # ← NEW
+        fold_callback: Optional[Callable[[FoldResult], None]] = None,
+        promote: bool = True,
+        auto_promote_if_better: bool = False,
+        auc_threshold: float = DEFAULT_AUC_IMPROVEMENT_THRESHOLD,
     ) -> tuple[Any, "TrainingResult"]:
         """
-        Train with walk-forward validation and persist artifacts.
+        Train with walk-forward validation and persist a versioned artifact.
 
-        ``fold_callback``, when supplied, is called after each fold completes
-        with the ``FoldResult`` for that fold.  This enables streaming
-        endpoints to emit per-fold progress events without coupling the
-        trainer to any transport mechanism.
-
-        Exceptions raised by ``fold_callback`` are silently swallowed so a
-        misbehaving callback cannot abort a training run.
+        Parameters
+        ----------
+        promote:
+            If True (default), immediately promote the new version to active.
+        auto_promote_if_better:
+            If True, only promote when the new AUC exceeds the current active
+            version's AUC by at least ``auc_threshold``.  Overrides ``promote``
+            when set to True.
+        auc_threshold:
+            Minimum AUC improvement required for auto-promotion.
+        fold_callback:
+            Optional per-fold callback ``(FoldResult) -> None``.
         """
         try:
             t_start = time.perf_counter()
@@ -409,10 +382,7 @@ class ModelTrainer:
             if run_hpo and not hyperparams:
                 logger.info(
                     "[%s/%s/%s] Running HPO (%d trials)…",
-                    ticker,
-                    model_name,
-                    horizon,
-                    hpo_trials,
+                    ticker, model_name, horizon, hpo_trials,
                 )
                 best_params = optimize_hyperparameters(
                     model_name, X, y, n_trials=hpo_trials
@@ -452,23 +422,17 @@ class ModelTrainer:
                 )
                 result.fold_results.append(fold_result)
 
-                # ── NEW: invoke optional per-fold streaming callback ───────
                 if fold_callback is not None:
                     try:
                         fold_callback(fold_result)
                     except Exception:
-                        pass  # never let a callback failure abort training
+                        pass
 
                 logger.info(
                     "[%s/%s/%s] Fold %d/%d — Acc=%.4f F1=%.4f AUC=%.4f",
-                    ticker,
-                    model_name,
-                    horizon,
-                    fold_idx + 1,
-                    len(splits),
-                    metrics["accuracy"],
-                    metrics["f1"],
-                    metrics["roc_auc"],
+                    ticker, model_name, horizon,
+                    fold_idx + 1, len(splits),
+                    metrics["accuracy"], metrics["f1"], metrics["roc_auc"],
                 )
 
             result.compute_aggregates()
@@ -479,9 +443,7 @@ class ModelTrainer:
             if should_calibrate:
                 logger.info(
                     "[%s/%s/%s] Applying Platt scaling (cv=3)…",
-                    ticker,
-                    model_name,
-                    horizon,
+                    ticker, model_name, horizon,
                 )
                 base_estimator = get_model(model_name, **best_params)
                 final_model = CalibratedClassifierCV(
@@ -495,19 +457,46 @@ class ModelTrainer:
             result.training_duration_s = round(
                 time.perf_counter() - t_start, DURATION_DECIMAL_PLACES
             )
-            self._save_artifacts(final_model, result, ticker, model_name, horizon)
+
+            # ── Generate version identifier ────────────────────────────────
+            from datetime import datetime, timezone
+            ts = datetime.strptime(
+                result.trained_at[:19], "%Y-%m-%dT%H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
+            version_id = make_version_id(result.feature_columns, best_params, ts)
+            result.version_id = version_id
+
+            # ── Persist versioned artifacts ────────────────────────────────
+            self._save_versioned_artifacts(final_model, result, ticker, model_name, horizon)
+
+            # ── Promotion logic ────────────────────────────────────────────
+            should_promote = promote
+            if auto_promote_if_better:
+                should_promote = self._should_promote(
+                    ticker, model_name, horizon, result.mean_roc_auc, auc_threshold
+                )
+
+            if should_promote:
+                self._store.set_active_version_id(ticker, model_name, horizon, version_id)
+                self._store.update_registry_active_flags(
+                    ticker, model_name, horizon, version_id
+                )
+                # Also write legacy-compatible flat meta.json for ModelSelector
+                self._write_legacy_meta(result, ticker, model_name, horizon)
+            else:
+                logger.info(
+                    "[%s/%s/%s] New version %s NOT promoted "
+                    "(auto_promote_if_better=True, AUC %.4f not better enough)",
+                    ticker, model_name, horizon, version_id, result.mean_roc_auc,
+                )
 
             logger.info(
                 "[%s/%s/%s] Training complete in %.2fs | "
-                "Acc=%.4f F1=%.4f AUC=%.4f | trigger=%s",
-                ticker,
-                model_name,
-                horizon,
+                "Acc=%.4f F1=%.4f AUC=%.4f | trigger=%s | version=%s",
+                ticker, model_name, horizon,
                 result.training_duration_s,
-                result.mean_accuracy,
-                result.mean_f1,
-                result.mean_roc_auc,
-                trigger_reason,
+                result.mean_accuracy, result.mean_f1, result.mean_roc_auc,
+                trigger_reason, version_id,
             )
             return final_model, result
 
@@ -518,53 +507,45 @@ class ModelTrainer:
                 f"Training failed for {model_name}/{horizon}: {exc}"
             ) from exc
 
-    def _save_artifacts(
-        self,
-        model: Any,
-        result: TrainingResult,
-        ticker: str,
-        model_name: str,
-        horizon: str,
-    ) -> None:
-        slug = self._artifact_slug(ticker, model_name, horizon)
-        model_path = self.model_dir / f"{slug}.pkl"
-        meta_path = self.model_dir / f"{slug}_meta.json"
-
-        with open(model_path, "wb") as f:
-            pickle.dump(
-                {
-                    "model": model,
-                    "feature_columns": result.feature_columns,
-                    "horizon": horizon,
-                    "trained_at": result.trained_at,
-                },
-                f,
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
-
-        with open(meta_path, "w") as f:
-            json.dump(result.to_dict(), f, indent=2)
-
-        logger.info("Artifacts saved: %s", model_path)
-
     def load_model(
         self,
         ticker: str,
         model_name: str,
         horizon: str = "1d",
+        version_id: Optional[str] = None,
     ) -> tuple[Any, list[str]]:
         """
-        Load a persisted model artifact.
+        Load a model artifact.
+
+        Parameters
+        ----------
+        version_id:
+            Specific version to load.  If None, loads the active version.
+            Pass ``version_id`` explicitly for point-in-time loading or
+            rollback-preview without changing the active pointer.
 
         Raises:
             ModelNotFoundError: If no artifact exists.
         """
-        path = self._model_path(ticker, model_name, horizon)
+        # ── Legacy migration ───────────────────────────────────────────────
+        if self._store.has_legacy_artifact(ticker, model_name, horizon):
+            self._migrate_legacy(ticker, model_name, horizon)
 
+        # ── Resolve version ────────────────────────────────────────────────
+        if version_id is None:
+            version_id = self._store.get_active_version_id(ticker, model_name, horizon)
+
+        if version_id is None:
+            raise ModelNotFoundError(
+                f"No active model version for {ticker}/{model_name}/{horizon}",
+                detail="Train first or check the version registry.",
+            )
+
+        path = self._store.model_path(ticker, model_name, horizon, version_id)
         if not path.exists():
             raise ModelNotFoundError(
-                f"No model artifact at {path}",
-                detail=f"Train first: ticker={ticker}, model={model_name}, horizon={horizon}",
+                f"Model artifact not found: {path}",
+                detail=f"Version {version_id} may have been pruned.",
             )
 
         try:
@@ -573,8 +554,342 @@ class ModelTrainer:
         except Exception as exc:
             raise ModelNotFoundError(
                 f"Artifact corrupt at {path}: {exc}",
-                detail="Delete the file and retrain.",
+                detail="Delete the version and retrain.",
             ) from exc
 
-        logger.info("Model loaded: %s", path)
+        logger.info(
+            "[%s/%s/%s] Loaded version %s", ticker, model_name, horizon, version_id
+        )
         return artifact["model"], artifact["feature_columns"]
+
+    def promote_version(
+        self, ticker: str, model_name: str, horizon: str, version_id: str
+    ) -> None:
+        """
+        Explicitly promote a specific version to active.
+
+        This is the primary rollback mechanism: call with the desired
+        previous version ID to revert to it.
+
+        Raises:
+            ModelNotFoundError: If the version does not exist on disk.
+        """
+        if not self._store.version_exists(ticker, model_name, horizon, version_id):
+            raise ModelNotFoundError(
+                f"Version {version_id} not found for {ticker}/{model_name}/{horizon}",
+                detail="Check list_versions() for available version IDs.",
+            )
+
+        previous_active = self._store.get_active_version_id(
+            ticker, model_name, horizon
+        )
+        self._store.set_active_version_id(ticker, model_name, horizon, version_id)
+        self._store.update_registry_active_flags(ticker, model_name, horizon, version_id)
+
+        # Update the legacy-compatible flat meta so ModelSelector picks it up
+        meta_path = self._store.meta_path(ticker, model_name, horizon, version_id)
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                self._write_legacy_meta_from_dict(meta, ticker, model_name, horizon)
+            except Exception as exc:
+                logger.warning("Could not update legacy meta after promotion: %s", exc)
+
+        logger.info(
+            "[%s/%s/%s] Version promoted: %s → %s",
+            ticker, model_name, horizon, previous_active, version_id,
+        )
+
+    def rollback(
+        self, ticker: str, model_name: str, horizon: str
+    ) -> str:
+        """
+        Roll back to the version that was active before the current one.
+
+        Returns the version ID that was restored.
+
+        Raises:
+            ModelNotFoundError: If there is no previous version to roll back to.
+        """
+        entries = self._store.load_registry(ticker, model_name, horizon)
+        if not entries:
+            raise ModelNotFoundError(
+                f"No version history for {ticker}/{model_name}/{horizon}",
+                detail="No rollback target available.",
+            )
+
+        current_active = self._store.get_active_version_id(
+            ticker, model_name, horizon
+        )
+
+        # Find the most recent version that is NOT the current active one
+        # and still exists on disk
+        candidates = [
+            e for e in reversed(entries)
+            if e.get("version_id") != current_active
+            and self._store.version_exists(
+                ticker, model_name, horizon, e["version_id"]
+            )
+        ]
+
+        if not candidates:
+            raise ModelNotFoundError(
+                f"No previous version available for rollback "
+                f"({ticker}/{model_name}/{horizon})",
+                detail=f"Current active: {current_active}. "
+                       "Only one version exists or all others have been pruned.",
+            )
+
+        target_version = candidates[0]["version_id"]
+        self.promote_version(ticker, model_name, horizon, target_version)
+
+        logger.info(
+            "[%s/%s/%s] Rolled back: %s → %s",
+            ticker, model_name, horizon, current_active, target_version,
+        )
+        return target_version
+
+    def list_versions(
+        self, ticker: str, model_name: str, horizon: str
+    ) -> list[dict]:
+        """
+        Return full version history from the registry, enriched with
+        on-disk existence status.
+
+        Entries are sorted chronologically (oldest first).
+        """
+        # Migrate legacy artifact first so it shows up in the registry
+        if self._store.has_legacy_artifact(ticker, model_name, horizon):
+            self._migrate_legacy(ticker, model_name, horizon)
+
+        entries = self._store.load_registry(ticker, model_name, horizon)
+        active_id = self._store.get_active_version_id(ticker, model_name, horizon)
+
+        result = []
+        for e in entries:
+            vid = e.get("version_id", "")
+            enriched = dict(e)
+            enriched["is_active"] = vid == active_id
+            enriched["exists_on_disk"] = self._store.version_exists(
+                ticker, model_name, horizon, vid
+            )
+            result.append(enriched)
+        return result
+
+    def prune_versions(
+        self,
+        ticker: str,
+        model_name: str,
+        horizon: str,
+        keep_last: int = DEFAULT_KEEP_LAST,
+    ) -> list[str]:
+        """
+        Delete old version directories, keeping the ``keep_last`` most recent
+        and always preserving the active version.
+
+        Returns the list of deleted version IDs.
+        """
+        deleted = self._store.prune(ticker, model_name, horizon, keep_last)
+        logger.info(
+            "[%s/%s/%s] Pruned %d versions (keep_last=%d)",
+            ticker, model_name, horizon, len(deleted), keep_last,
+        )
+        return deleted
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _detect_trigger(
+        self,
+        ticker: str,
+        model_name: str,
+        horizon: str,
+        current_feature_cols: list[str],
+    ) -> Optional[str]:
+        """
+        Determine whether retraining is needed.  Returns a trigger reason string
+        or None (meaning: load the existing active version).
+
+        Checks both the versioned layout and legacy flat files.
+        """
+        # ── Check versioned active pointer first ───────────────────────────
+        active_id = self._store.get_active_version_id(ticker, model_name, horizon)
+
+        if active_id is None:
+            # Check for legacy flat artifact
+            if self._store.has_legacy_artifact(ticker, model_name, horizon):
+                # Migrate and consider it a valid artifact
+                self._migrate_legacy(ticker, model_name, horizon)
+                active_id = self._store.get_active_version_id(
+                    ticker, model_name, horizon
+                )
+                if active_id is None:
+                    return TRIGGER_MISSING
+            else:
+                return TRIGGER_MISSING
+
+        # ── Verify the active version's artifact exists ────────────────────
+        if not self._store.version_exists(ticker, model_name, horizon, active_id):
+            logger.warning(
+                "[%s/%s/%s] Active version %s missing from disk — retraining.",
+                ticker, model_name, horizon, active_id,
+            )
+            return TRIGGER_CORRUPT
+
+        # ── Load the active version's pkl to check feature columns ─────────
+        path = self._store.model_path(ticker, model_name, horizon, active_id)
+        try:
+            with open(path, "rb") as f:
+                artifact = pickle.load(f)
+        except Exception as exc:
+            logger.warning(
+                "[%s/%s/%s] Artifact corrupt (%s) — will retrain.",
+                ticker, model_name, horizon, exc,
+            )
+            return TRIGGER_CORRUPT
+
+        saved_cols = set(artifact.get("feature_columns", []))
+        current_cols = set(current_feature_cols)
+        if saved_cols != current_cols:
+            added = current_cols - saved_cols
+            removed = saved_cols - current_cols
+            logger.warning(
+                "[%s/%s/%s] Feature mismatch — added=%d removed=%d — retraining.",
+                ticker, model_name, horizon, len(added), len(removed),
+            )
+            return TRIGGER_MISMATCH
+
+        return None
+
+    def _save_versioned_artifacts(
+        self,
+        model: Any,
+        result: TrainingResult,
+        ticker: str,
+        model_name: str,
+        horizon: str,
+    ) -> None:
+        version_id = result.version_id
+        vdir = self._store.version_dir(ticker, model_name, horizon, version_id)
+        vdir.mkdir(parents=True, exist_ok=True)
+
+        model_path = self._store.model_path(ticker, model_name, horizon, version_id)
+        meta_path = self._store.meta_path(ticker, model_name, horizon, version_id)
+
+        with open(model_path, "wb") as f:
+            pickle.dump(
+                {
+                    "model": model,
+                    "feature_columns": result.feature_columns,
+                    "horizon": horizon,
+                    "trained_at": result.trained_at,
+                    "version_id": version_id,
+                },
+                f,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+
+        result_dict = result.to_dict()
+        with open(meta_path, "w") as f:
+            json.dump(result_dict, f, indent=2)
+
+        # Add to registry
+        entry = _build_registry_entry(
+            version_id, result_dict, result.feature_columns, is_active=False
+        )
+        self._store.add_registry_entry(ticker, model_name, horizon, entry)
+
+        logger.info(
+            "[%s/%s/%s] Version artifact saved: %s", ticker, model_name, horizon, version_id
+        )
+
+    def _write_legacy_meta(
+        self, result: TrainingResult, ticker: str, model_name: str, horizon: str
+    ) -> None:
+        """Write a legacy-compatible flat meta.json so ModelSelector still works."""
+        meta_path = (
+            self.model_dir / f"{ticker.upper()}_{model_name}_{horizon}_meta.json"
+        )
+        with open(meta_path, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+
+    def _write_legacy_meta_from_dict(
+        self, meta: dict, ticker: str, model_name: str, horizon: str
+    ) -> None:
+        meta_path = (
+            self.model_dir / f"{ticker.upper()}_{model_name}_{horizon}_meta.json"
+        )
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+
+    def _should_promote(
+        self,
+        ticker: str,
+        model_name: str,
+        horizon: str,
+        new_auc: float,
+        threshold: float,
+    ) -> bool:
+        """Return True if new_auc is sufficiently better than the current active AUC."""
+        active_id = self._store.get_active_version_id(ticker, model_name, horizon)
+        if active_id is None:
+            return True  # No current active version — always promote
+
+        entries = self._store.load_registry(ticker, model_name, horizon)
+        current_entry = next(
+            (e for e in entries if e.get("version_id") == active_id), None
+        )
+        if current_entry is None:
+            return True
+
+        current_auc = float(current_entry.get("mean_roc_auc", 0.0))
+        improvement = new_auc - current_auc
+        if improvement >= threshold:
+            logger.info(
+                "[%s/%s/%s] Auto-promote: new AUC %.4f > current %.4f + threshold %.4f",
+                ticker, model_name, horizon, new_auc, current_auc, threshold,
+            )
+            return True
+        logger.info(
+            "[%s/%s/%s] No auto-promote: improvement %.4f < threshold %.4f",
+            ticker, model_name, horizon, improvement, threshold,
+        )
+        return False
+
+    def _migrate_legacy(
+        self, ticker: str, model_name: str, horizon: str
+    ) -> None:
+        """Transparently migrate a legacy flat artifact into the versioned layout."""
+        legacy_pkl = self._store.legacy_model_path(ticker, model_name, horizon)
+        legacy_meta_path = self._store.legacy_meta_path(ticker, model_name, horizon)
+
+        if not legacy_pkl.exists():
+            return
+
+        # Load feature_columns from the pkl
+        try:
+            with open(legacy_pkl, "rb") as f:
+                artifact = pickle.load(f)
+            feature_columns = artifact.get("feature_columns", [])
+        except Exception as exc:
+            logger.warning(
+                "[%s/%s/%s] Cannot migrate legacy artifact (corrupt): %s",
+                ticker, model_name, horizon, exc,
+            )
+            return
+
+        # Load meta if it exists
+        meta: dict = {}
+        if legacy_meta_path.exists():
+            try:
+                meta = json.loads(legacy_meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        version_id = self._store.migrate_legacy_artifact(
+            ticker, model_name, horizon, feature_columns, meta
+        )
+        if version_id:
+            logger.info(
+                "[%s/%s/%s] Legacy artifact migrated → version %s",
+                ticker, model_name, horizon, version_id,
+            )

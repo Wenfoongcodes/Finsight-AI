@@ -63,6 +63,13 @@ class ModelSelector:
     """
     Stateless leaderboard-based model selector with multi-horizon support.
 
+    Meta-file resolution order (newest first)
+    ------------------------------------------
+    1. Versioned active version's meta.json under
+       ``{models_dir}/{TICKER}/{model}/{horizon}/versions/{version_id}/meta.json``
+    2. Legacy flat file ``{models_dir}/{TICKER}_{model}_{horizon}_meta.json``
+       (written by ModelTrainer for backward compatibility)
+
     When no artifacts exist, ``select()`` returns REASON_NO_ARTIFACTS with
     the first model in ALL_TRAINING_MODELS.  The caller (PredictionService)
     is responsible for iterating ALL_TRAINING_MODELS, training each one, and
@@ -89,11 +96,7 @@ class ModelSelector:
             best_name, best_auc = eligible[0]
             logger.info(
                 "[%s/%s] Model selected: %s (AUC=%.4f, candidates=%d)",
-                ticker,
-                horizon,
-                best_name,
-                best_auc,
-                len(eligible),
+                ticker, horizon, best_name, best_auc, len(eligible),
             )
             return SelectionResult(
                 model_name=best_name,
@@ -107,11 +110,7 @@ class ModelSelector:
             logger.warning(
                 "[%s/%s] No model meets MIN_AUC %.2f. "
                 "Best available: %s (AUC=%.4f). Proceeding with degraded confidence.",
-                ticker,
-                horizon,
-                MIN_AUC,
-                best_name,
-                best_auc,
+                ticker, horizon, MIN_AUC, best_name, best_auc,
             )
             return SelectionResult(
                 model_name=best_name,
@@ -120,14 +119,11 @@ class ModelSelector:
                 from_leaderboard=False,
             )
 
-        # No artifacts at all — caller must train all models first
         logger.warning(
             "[%s/%s] No trained artifacts found. "
             "Caller should train all models in ALL_TRAINING_MODELS=%s, "
             "then call select() again.",
-            ticker,
-            horizon,
-            ALL_TRAINING_MODELS,
+            ticker, horizon, ALL_TRAINING_MODELS,
         )
         return SelectionResult(
             model_name=ALL_TRAINING_MODELS[0],
@@ -155,6 +151,7 @@ class ModelSelector:
                         "accuracy": round(meta.get("mean_accuracy", 0.0), 4),
                         "f1": round(meta.get("mean_f1", 0.0), 4),
                         "trained_at": meta.get("trained_at", ""),
+                        "version_id": meta.get("version_id", ""),
                     }
                 )
         return result
@@ -185,11 +182,7 @@ class ModelSelector:
             else:
                 logger.debug(
                     "[%s/%s/%s] AUC %.4f < MIN_AUC %.2f",
-                    ticker,
-                    model_name,
-                    horizon,
-                    auc,
-                    MIN_AUC,
+                    ticker, model_name, horizon, auc, MIN_AUC,
                 )
 
         eligible.sort(key=lambda x: x[1], reverse=True)
@@ -197,12 +190,55 @@ class ModelSelector:
         return eligible, all_entries
 
     def _load_meta(self, ticker: str, model_name: str, horizon: str) -> Optional[dict]:
+        """
+        Load meta.json, checking the versioned layout first, then legacy flat.
+        """
+        # ── 1. Versioned layout: active version's meta.json ────────────────
+        versioned_meta = self._load_versioned_meta(ticker, model_name, horizon)
+        if versioned_meta is not None:
+            return versioned_meta
+
+        # ── 2. Legacy flat file (written by trainer for compatibility) ─────
+        return self._load_legacy_meta(ticker, model_name, horizon)
+
+    def _load_versioned_meta(
+        self, ticker: str, model_name: str, horizon: str
+    ) -> Optional[dict]:
+        """Load meta from the active version directory."""
+        active_json = (
+            self._model_dir / ticker / model_name / horizon / "active.json"
+        )
+        if not active_json.exists():
+            return None
+        try:
+            data = json.loads(active_json.read_text(encoding="utf-8"))
+            version_id = data.get("version_id")
+            if not version_id:
+                return None
+            meta_path = (
+                self._model_dir
+                / ticker / model_name / horizon
+                / "versions" / version_id / "meta.json"
+            )
+            if not meta_path.exists():
+                return None
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "Failed to load versioned meta for %s/%s/%s: %s",
+                ticker, model_name, horizon, exc,
+            )
+            return None
+
+    def _load_legacy_meta(
+        self, ticker: str, model_name: str, horizon: str
+    ) -> Optional[dict]:
+        """Load the old-style flat meta.json."""
         meta_path = self._model_dir / f"{ticker}_{model_name}_{horizon}_meta.json"
         if not meta_path.exists():
             return None
         try:
-            with open(meta_path) as f:
-                return json.load(f)
+            return json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", meta_path.name, exc)
             return None
