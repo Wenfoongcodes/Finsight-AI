@@ -14,7 +14,6 @@ from app.api.v1.endpoints.routes import (
     prediction_router,
     rag_router,
     training_router,
-
 )
 from app.api.v1.endpoints.streaming import streaming_router
 

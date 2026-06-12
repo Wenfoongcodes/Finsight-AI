@@ -10,12 +10,11 @@ Redis tests are skipped automatically when a Redis server is not reachable
 
 import os
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from app.core.security import (
-    RateLimiterBase,
     _InMemoryRateLimiter,
     _RedisRateLimiter,
     _build_rate_limiter,
@@ -31,7 +30,10 @@ def _redis_available() -> bool:
     """Return True when a local Redis server is reachable."""
     try:
         import redis as redis_lib
-        client = redis_lib.Redis(host="localhost", port=6379, socket_connect_timeout=0.5)
+
+        client = redis_lib.Redis(
+            host="localhost", port=6379, socket_connect_timeout=0.5
+        )
         client.ping()
         return True
     except Exception:
@@ -107,9 +109,7 @@ class TestInMemoryRateLimiter(RateLimiterContractMixin):
     @pytest.fixture(autouse=True)
     def setup(self):
         # Use a very short window (2s) so expiry tests are fast.
-        self.limiter = _InMemoryRateLimiter(
-            max_requests=self.max_requests, window_s=2
-        )
+        self.limiter = _InMemoryRateLimiter(max_requests=self.max_requests, window_s=2)
 
     def test_window_expiry_allows_again(self):
         """After the window expires the bucket resets and requests are allowed."""
@@ -162,7 +162,6 @@ class TestRedisRateLimiter(RateLimiterContractMixin):
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        import redis as redis_lib
 
         # Use a unique key prefix per test run to avoid cross-test contamination.
         prefix = f"finsight:test:{os.urandom(4).hex()}"
@@ -199,7 +198,6 @@ class TestRedisRateLimiter(RateLimiterContractMixin):
         When Redis flushes its script cache the limiter should reload
         the Lua script and retry transparently.
         """
-        import redis as redis_lib
 
         # Force a NOSCRIPT condition by clearing the cached SHA.
         self.limiter._script_sha = "0" * 40  # invalid SHA
@@ -270,9 +268,7 @@ class TestBuildRateLimiter:
             assert isinstance(limiter, _InMemoryRateLimiter)
 
     def test_falls_back_to_memory_on_unknown_backend(self, monkeypatch):
-        monkeypatch.setattr(
-            "configs.settings.settings.RATE_LIMIT_BACKEND", "cassandra"
-        )
+        monkeypatch.setattr("configs.settings.settings.RATE_LIMIT_BACKEND", "cassandra")
         limiter = _build_rate_limiter()
         assert isinstance(limiter, _InMemoryRateLimiter)
 

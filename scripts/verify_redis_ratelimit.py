@@ -43,20 +43,20 @@ EXIT CODES
   2  redis-py not installed
   3  Redis could not be started and is not reachable
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Colour helpers
@@ -64,14 +64,17 @@ from typing import Optional, Tuple
 
 _NO_COLOR = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
 
+
 def _c(code: str, text: str) -> str:
     return text if _NO_COLOR else f"\033[{code}m{text}\033[0m"
 
-OK   = _c("32", "✓ PASS")
+
+OK = _c("32", "✓ PASS")
 FAIL = _c("31", "✗ FAIL")
 SKIP = _c("33", "– SKIP")
 INFO = _c("36", "ℹ")
 WARN = _c("33", "⚠")
+
 
 def _banner(text: str) -> None:
     w = 70
@@ -80,6 +83,7 @@ def _banner(text: str) -> None:
     print(_c("1", f"  {text}"))
     print(_c("1", "─" * w))
 
+
 def _result(label: str, passed: bool | None, detail: str = "") -> None:
     icon = {True: OK, False: FAIL, None: SKIP}[passed]
     line = f"  {icon}  {label}"
@@ -87,8 +91,10 @@ def _result(label: str, passed: bool | None, detail: str = "") -> None:
         line += f"  │  {_c('2', detail)}"
     print(line)
 
+
 def _info(msg: str) -> None:
     print(f"  {INFO}  {msg}")
+
 
 def _warn(msg: str) -> None:
     print(f"  {WARN}  {msg}")
@@ -97,6 +103,7 @@ def _warn(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer result accumulator
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class LayerResult:
@@ -111,21 +118,32 @@ class LayerResult:
 # Redis connectivity probe
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _redis_ping(host: str, port: int, password: Optional[str],
-                timeout: float = 1.5) -> bool:
+
+def _redis_ping(
+    host: str, port: int, password: Optional[str], timeout: float = 1.5
+) -> bool:
     try:
         import redis as redis_lib
+
         redis_lib.Redis(
-            host=host, port=port, password=password,
-            socket_connect_timeout=timeout, socket_timeout=timeout,
+            host=host,
+            port=port,
+            password=password,
+            socket_connect_timeout=timeout,
+            socket_timeout=timeout,
         ).ping()
         return True
     except Exception:
         return False
 
 
-def _wait_for_redis(host: str, port: int, password: Optional[str],
-                    deadline: float, interval: float = 0.4) -> bool:
+def _wait_for_redis(
+    host: str,
+    port: int,
+    password: Optional[str],
+    deadline: float,
+    interval: float = 0.4,
+) -> bool:
     while time.time() < deadline:
         if _redis_ping(host, port, password):
             return True
@@ -137,12 +155,12 @@ def _wait_for_redis(host: str, port: int, password: Optional[str],
 # Redis auto-start  —  tries multiple methods, explains every failure
 # ─────────────────────────────────────────────────────────────────────────────
 
-_STARTED_METHOD: Optional[str] = None   # set by whichever method succeeds
-_STARTED_PROC:   Optional[subprocess.Popen] = None  # for redis-server cleanup
+_STARTED_METHOD: Optional[str] = None  # set by whichever method succeeds
+_STARTED_PROC: Optional[subprocess.Popen] = None  # for redis-server cleanup
 _DOCKER_CONTAINER = "finsight-verify-redis"
 
-def _try_start_redis(host: str, port: int,
-                     password: Optional[str]) -> tuple[bool, str]:
+
+def _try_start_redis(host: str, port: int, password: Optional[str]) -> tuple[bool, str]:
     """
     Try every available method to start Redis.
 
@@ -171,16 +189,25 @@ def _try_start_redis(host: str, port: int,
             )
             subprocess.run(
                 [
-                    "docker", "run", "-d", "--rm",
-                    "--name", _DOCKER_CONTAINER,
-                    "-p", f"127.0.0.1:{port}:6379",
+                    "docker",
+                    "run",
+                    "-d",
+                    "--rm",
+                    "--name",
+                    _DOCKER_CONTAINER,
+                    "-p",
+                    f"127.0.0.1:{port}:6379",
                     "redis:7.2-alpine",
                     "redis-server",
-                    "--maxmemory", "64mb",
-                    "--maxmemory-policy", "allkeys-lru",
-                    "--save", "",
+                    "--maxmemory",
+                    "64mb",
+                    "--maxmemory-policy",
+                    "allkeys-lru",
+                    "--save",
+                    "",
                 ],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             if _wait_for_redis(host, port, password, time.time() + 15):
                 _result("Docker redis:7.2-alpine container started", True)
@@ -196,7 +223,7 @@ def _try_start_redis(host: str, port: int,
 
     # ── Method 2: docker-compose ─────────────────────────────────────────────
     compose_files = ["docker-compose.yml", "docker-compose.yaml"]
-    compose_cmd   = None
+    compose_cmd = None
     for cf in compose_files:
         if os.path.exists(cf):
             for cmd in (["docker", "compose"], ["docker-compose"]):
@@ -226,10 +253,17 @@ def _try_start_redis(host: str, port: int,
         _info("redis-server binary found — starting in background …")
         try:
             proc = subprocess.Popen(
-                ["redis-server", "--port", str(port),
-                 "--maxmemory", "64mb",
-                 "--maxmemory-policy", "allkeys-lru",
-                 "--save", ""],
+                [
+                    "redis-server",
+                    "--port",
+                    str(port),
+                    "--maxmemory",
+                    "64mb",
+                    "--maxmemory-policy",
+                    "allkeys-lru",
+                    "--save",
+                    "",
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -261,12 +295,17 @@ def _try_start_redis(host: str, port: int,
 def _try_windows_redis(port: int) -> None:
     """Attempt to start Redis on Windows via Chocolatey, Scoop, or winget."""
     for mgr, install_cmd, start_cmd in [
-        ("choco",  ["choco", "install", "redis", "-y"],
-                   ["redis-server", "--port", str(port)]),
-        ("scoop",  ["scoop", "install", "redis"],
-                   ["redis-server", "--port", str(port)]),
-        ("winget", ["winget", "install", "Redis.Redis"],
-                   ["redis-server", "--port", str(port)]),
+        (
+            "choco",
+            ["choco", "install", "redis", "-y"],
+            ["redis-server", "--port", str(port)],
+        ),
+        ("scoop", ["scoop", "install", "redis"], ["redis-server", "--port", str(port)]),
+        (
+            "winget",
+            ["winget", "install", "Redis.Redis"],
+            ["redis-server", "--port", str(port)],
+        ),
     ]:
         if shutil.which(mgr):
             _info(f"Trying {mgr} install …")
@@ -289,8 +328,8 @@ def _print_redis_install_instructions(host: str, port: int) -> None:
 
     print()
     print(_c("1;31", "  Redis could not be started automatically."))
-    print(_c("1",    "  Start Redis manually using one of the options below,"))
-    print(_c("1",    "  then re-run this script."))
+    print(_c("1", "  Start Redis manually using one of the options below,"))
+    print(_c("1", "  then re-run this script."))
     print()
 
     if os_name == "Windows":
@@ -311,9 +350,9 @@ def _print_redis_install_instructions(host: str, port: int) -> None:
         print()
         print(_c("1", "  Option E — Upstash (managed, no install)"))
         print("    https://upstash.com  →  create free Redis database")
-        print(f"    python scripts/verify_redis_ratelimit.py \\")
-        print(f"        --host <your-endpoint>.upstash.io --port 6380 \\")
-        print(f"        --password <your-token> --no-auto-redis")
+        print("    python scripts/verify_redis_ratelimit.py \\")
+        print("        --host <your-endpoint>.upstash.io --port 6380 \\")
+        print("        --password <your-token> --no-auto-redis")
 
     elif os_name == "Darwin":  # macOS
         print(_c("1", "  Option A — Docker Desktop (recommended)"))
@@ -325,9 +364,9 @@ def _print_redis_install_instructions(host: str, port: int) -> None:
         print()
         print(_c("1", "  Option C — Upstash (managed, no install)"))
         print("    https://upstash.com  →  create free Redis database")
-        print(f"    python scripts/verify_redis_ratelimit.py \\")
-        print(f"        --host <endpoint>.upstash.io --port 6380 \\")
-        print(f"        --password <token> --no-auto-redis")
+        print("    python scripts/verify_redis_ratelimit.py \\")
+        print("        --host <endpoint>.upstash.io --port 6380 \\")
+        print("        --password <token> --no-auto-redis")
 
     else:  # Linux
         print(_c("1", "  Option A — Docker (recommended)"))
@@ -346,12 +385,12 @@ def _print_redis_install_instructions(host: str, port: int) -> None:
         print()
         print(_c("1", "  Option E — Upstash (managed, no install)"))
         print("    https://upstash.com  →  create free Redis database")
-        print(f"    python scripts/verify_redis_ratelimit.py \\")
-        print(f"        --host <endpoint>.upstash.io --port 6380 \\")
-        print(f"        --password <token> --no-auto-redis")
+        print("    python scripts/verify_redis_ratelimit.py \\")
+        print("        --host <endpoint>.upstash.io --port 6380 \\")
+        print("        --password <token> --no-auto-redis")
 
     print()
-    print(_c("2", f"  After starting Redis, re-run:"))
+    print(_c("2", "  After starting Redis, re-run:"))
     print(f"    python scripts/verify_redis_ratelimit.py --host {host} --port {port}")
     print()
 
@@ -364,7 +403,8 @@ def _stop_auto_redis() -> None:
         try:
             subprocess.run(
                 ["docker", "stop", _DOCKER_CONTAINER],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             _info("Docker Redis container stopped")
         except Exception:
@@ -405,14 +445,16 @@ return { count, max_reqs }
 
 def _lua_call(client, key: str, limit: int, win_s: int) -> tuple[int, int]:
     now_ms = int(time.time() * 1000)
-    r = client.eval(_LUA, 1, key, str(now_ms), str(win_s * 1000),
-                    str(limit), str(win_s))
+    r = client.eval(
+        _LUA, 1, key, str(now_ms), str(win_s * 1000), str(limit), str(win_s)
+    )
     return int(r[0]), int(r[1])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 1 — in-memory backend (no Redis required)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def layer1_in_memory(max_requests: int) -> LayerResult:
     _banner("Layer 1 — In-memory backend (no Redis required)")
@@ -426,6 +468,7 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
             self.window_s = w
             self._b: dict = defaultdict(deque)
             self._lock = threading.Lock()
+
         def is_allowed(self, k):
             now = time.monotonic()
             with self._lock:
@@ -438,30 +481,43 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
                 return True, self.max_requests - len(b)
 
     checks = [
-        ("returns (bool, int) tuple",
-         lambda: (lambda l: isinstance(l.is_allowed("t"), tuple)
-                  and len(l.is_allowed("t")) == 2)(_Lim(5, 60))),
-
-        ("allows N requests under limit",
-         lambda: all(_Lim(5, 60).is_allowed(f"ip{i}")[0] for i in range(5))),
-
-        ("blocks at max + 1",
-         lambda: (lambda l: [l.is_allowed("ip") for _ in range(5)]
-                  and not l.is_allowed("ip")[0])(_Lim(5, 60))),
-
-        ("remaining decrements correctly",
-         lambda: (lambda l: l.is_allowed("ip")[1] > l.is_allowed("ip")[1])
-                 (_Lim(10, 60))),
-
-        ("independent IPs do not share buckets",
-         lambda: (lambda l: [l.is_allowed("x") for _ in range(6)]
-                  and l.is_allowed("y")[0])(_Lim(5, 60))),
-
-        ("window expiry resets bucket",
-         lambda: _check_expiry(_Lim(3, 1))),
-
-        ("thread safety — 20 concurrent threads",
-         lambda: _check_thread_safety(_Lim(5, 60))),
+        (
+            "returns (bool, int) tuple",
+            lambda: (
+                lambda l: (
+                    isinstance(l.is_allowed("t"), tuple) and len(l.is_allowed("t")) == 2
+                )
+            )(_Lim(5, 60)),
+        ),
+        (
+            "allows N requests under limit",
+            lambda: all(_Lim(5, 60).is_allowed(f"ip{i}")[0] for i in range(5)),
+        ),
+        (
+            "blocks at max + 1",
+            lambda: (
+                lambda l: (
+                    [l.is_allowed("ip") for _ in range(5)] and not l.is_allowed("ip")[0]
+                )
+            )(_Lim(5, 60)),
+        ),
+        (
+            "remaining decrements correctly",
+            lambda: (lambda l: l.is_allowed("ip")[1] > l.is_allowed("ip")[1])(
+                _Lim(10, 60)
+            ),
+        ),
+        (
+            "independent IPs do not share buckets",
+            lambda: (
+                lambda l: [l.is_allowed("x") for _ in range(6)] and l.is_allowed("y")[0]
+            )(_Lim(5, 60)),
+        ),
+        ("window expiry resets bucket", lambda: _check_expiry(_Lim(3, 1))),
+        (
+            "thread safety — 20 concurrent threads",
+            lambda: _check_thread_safety(_Lim(5, 60)),
+        ),
     ]
 
     for label, fn in checks:
@@ -481,7 +537,7 @@ def _check_expiry(lim) -> bool:
     for _ in range(lim.max_requests):
         lim.is_allowed("ip-e")
     if lim.is_allowed("ip-e")[0]:
-        return False       # should still be blocked
+        return False  # should still be blocked
     time.sleep(1.15)
     return lim.is_allowed("ip-e")[0]
 
@@ -489,13 +545,17 @@ def _check_expiry(lim) -> bool:
 def _check_thread_safety(lim) -> bool:
     results: list[bool] = []
     lock = threading.Lock()
+
     def worker():
         ok, _ = lim.is_allowed("ip-t")
         with lock:
             results.append(ok)
+
     threads = [threading.Thread(target=worker) for _ in range(20)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     return sum(results) == lim.max_requests
 
 
@@ -503,17 +563,18 @@ def _check_thread_safety(lim) -> bool:
 # Layer 2 — factory fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def layer2_factory_fallback() -> LayerResult:
     _banner("Layer 2 — Factory fallback behaviour (no Redis required)")
     result = LayerResult("Factory fallback")
 
-    import redis as redis_lib
-
     checks = {
-        "unreachable host → falls back silently":
-            lambda: _check_fallback("255.255.255.255", 9999),
-        "unknown backend name → falls back":
-            lambda: True,   # we verify the concept; real test in layer 3
+        "unreachable host → falls back silently": lambda: _check_fallback(
+            "255.255.255.255", 9999
+        ),
+        "unknown backend name → falls back": lambda: (
+            True
+        ),  # we verify the concept; real test in layer 3
     }
 
     for label, fn in checks.items():
@@ -531,24 +592,33 @@ def layer2_factory_fallback() -> LayerResult:
 
 def _check_fallback(host: str, port: int) -> bool:
     import redis as redis_lib
+
     try:
         client = redis_lib.Redis(
-            host=host, port=port,
-            socket_connect_timeout=0.3, socket_timeout=0.3,
+            host=host,
+            port=port,
+            socket_connect_timeout=0.3,
+            socket_timeout=0.3,
         )
         client.ping()
-        return True   # connected — not a fallback scenario, pass anyway
+        return True  # connected — not a fallback scenario, pass anyway
     except Exception:
-        return True   # connection failed as expected → fallback works
+        return True  # connection failed as expected → fallback works
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 3 — live Redis algorithm
 # ─────────────────────────────────────────────────────────────────────────────
 
-def layer3_redis_live(host: str, port: int, password: Optional[str],
-                      max_requests: int, window_s: int,
-                      prefix: str) -> LayerResult:
+
+def layer3_redis_live(
+    host: str,
+    port: int,
+    password: Optional[str],
+    max_requests: int,
+    window_s: int,
+    prefix: str,
+) -> LayerResult:
     _banner("Layer 3 — Live Redis sliding-window algorithm")
     result = LayerResult("Live Redis algorithm")
 
@@ -556,8 +626,11 @@ def layer3_redis_live(host: str, port: int, password: Optional[str],
 
     try:
         client = redis_lib.Redis(
-            host=host, port=port, password=password,
-            socket_connect_timeout=2.0, socket_timeout=2.0,
+            host=host,
+            port=port,
+            password=password,
+            socket_connect_timeout=2.0,
+            socket_timeout=2.0,
             decode_responses=True,
         )
         client.ping()
@@ -579,32 +652,33 @@ def layer3_redis_live(host: str, port: int, password: Optional[str],
         return count <= m, max(0, m - count)
 
     checks = [
-        ("Lua script executes without error",
-         lambda: call("smoke")[0] is True or True),
-
-        ("allows requests under limit",
-         lambda: all(call(f"u{i}")[0] for i in range(5))),
-
-        ("blocks at max + 1",
-         lambda: _l3_blocks(client, run_prefix)),
-
-        ("remaining count decrements",
-         lambda: _l3_remaining(client, run_prefix)),
-
-        ("different IPs are independent",
-         lambda: _l3_ip_independence(client, run_prefix, max_requests)),
-
-        ("key TTL is set and within window",
-         lambda: _l3_ttl(client, run_prefix, window_s)),
-
-        ("sorted set members are timestamped",
-         lambda: _l3_zset_populated(client, run_prefix)),
-
-        ("NOSCRIPT error triggers transparent reload",
-         lambda: _l3_noscript_recovery(client)),
-
-        ("window expiry allows requests again (1s window)",
-         lambda: _l3_expiry(client, run_prefix)),
+        ("Lua script executes without error", lambda: call("smoke")[0] is True or True),
+        (
+            "allows requests under limit",
+            lambda: all(call(f"u{i}")[0] for i in range(5)),
+        ),
+        ("blocks at max + 1", lambda: _l3_blocks(client, run_prefix)),
+        ("remaining count decrements", lambda: _l3_remaining(client, run_prefix)),
+        (
+            "different IPs are independent",
+            lambda: _l3_ip_independence(client, run_prefix, max_requests),
+        ),
+        (
+            "key TTL is set and within window",
+            lambda: _l3_ttl(client, run_prefix, window_s),
+        ),
+        (
+            "sorted set members are timestamped",
+            lambda: _l3_zset_populated(client, run_prefix),
+        ),
+        (
+            "NOSCRIPT error triggers transparent reload",
+            lambda: _l3_noscript_recovery(client),
+        ),
+        (
+            "window expiry allows requests again (1s window)",
+            lambda: _l3_expiry(client, run_prefix),
+        ),
     ]
 
     for label, fn in checks:
@@ -673,15 +747,21 @@ def _l3_zset_populated(client, prefix: str) -> bool:
 
 def _l3_noscript_recovery(client) -> bool:
     import redis as redis_lib
+
     try:
         client.evalsha("0" * 40, 0)
         return False
     except redis_lib.exceptions.NoScriptError:
         sha = client.script_load(_LUA)
-        r = client.evalsha(sha, 1,
-                           f"noscript:{os.urandom(4).hex()}",
-                           str(int(time.time() * 1000)),
-                           "60000", "5", "60")
+        r = client.evalsha(
+            sha,
+            1,
+            f"noscript:{os.urandom(4).hex()}",
+            str(int(time.time() * 1000)),
+            "60000",
+            "5",
+            "60",
+        )
         return int(r[0]) >= 1
 
 
@@ -697,7 +777,7 @@ def _l3_expiry(client, prefix: str) -> bool:
         _lua_call(client, k, limit, 1)
     count, m = _lua_call(client, k, limit, 1)
     if count < m:
-        return False   # not yet blocked — unexpected
+        return False  # not yet blocked — unexpected
     time.sleep(1.15)
     count2, m2 = _lua_call(client, k, limit, 1)
     return count2 < m2 + 1  # after expiry, one new request → count2=1 <= m2
@@ -707,22 +787,28 @@ def _l3_expiry(client, prefix: str) -> bool:
 # Layer 4 — startup logs + /health
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def layer4_startup_health(api_url: str) -> LayerResult:
     _banner("Layer 4 — API startup + /health endpoint")
     result = LayerResult("Startup & /health")
 
-    import urllib.request, urllib.error, json
+    import urllib.request
+    import urllib.error
+    import json
 
     url = f"{api_url.rstrip('/')}/health"
     try:
         resp = urllib.request.urlopen(url, timeout=6)
         body = json.loads(resp.read())
         checks = [
-            ("/health returns HTTP 200",          True),
-            ("status == 'ok'",                    body.get("status") == "ok"),
-            ("version field present",             "version" in body),
-            ("features.llm field present",        "llm" in body.get("features", {})),
-            ("features.rate_limiting present",    "rate_limiting" in body.get("features", {})),
+            ("/health returns HTTP 200", True),
+            ("status == 'ok'", body.get("status") == "ok"),
+            ("version field present", "version" in body),
+            ("features.llm field present", "llm" in body.get("features", {})),
+            (
+                "features.rate_limiting present",
+                "rate_limiting" in body.get("features", {}),
+            ),
         ]
         for label, passed in checks:
             _result(label, passed, "" if passed else str(body))
@@ -744,11 +830,13 @@ def layer4_startup_health(api_url: str) -> LayerResult:
 # Layer 5 — end-to-end HTTP 429 enforcement
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
     _banner("Layer 5 — End-to-end rate limit enforcement (HTTP 429)")
     result = LayerResult("E2E HTTP 429")
 
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
 
     # Use /api/v1/train/ (POST, non-exempt, returns 422 fast without a model)
     # as a fallback if market/summary is slow. The rate limiter fires BEFORE
@@ -763,21 +851,24 @@ def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
     #   The rate limiter sees 130 requests in ~1s and correctly blocks after 120.
     #   No server-side changes needed.
 
-    target  = f"{api_url.rstrip('/')}/api/v1/market/summary"
+    target = f"{api_url.rstrip('/')}/api/v1/market/summary"
     payload = b'{"ticker":"AAPL","period_years":1}'
-    total   = max_requests + 10
+    total = max_requests + 10
 
     counts: dict[int, int] = {}
     counts_lock = threading.Lock()
     retry_after_seen: list[bool] = [False]
 
     _info(f"Firing {total} concurrent POST requests to {target} …")
-    _info(f"(concurrent burst ensures all requests land within one {max_requests}/60s window)")
+    _info(
+        f"(concurrent burst ensures all requests land within one {max_requests}/60s window)"
+    )
 
     def _fire(_: int) -> None:
         try:
             req = urllib.request.Request(
-                target, data=payload,
+                target,
+                data=payload,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -804,9 +895,8 @@ def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
 
     got_429 = counts.get(429, 0) > 0
     checks = [
-        ("at least one HTTP 429 received",        got_429),
-        ("Retry-After header present on 429",
-         retry_after_seen[0] if got_429 else None),
+        ("at least one HTTP 429 received", got_429),
+        ("Retry-After header present on 429", retry_after_seen[0] if got_429 else None),
     ]
     for label, passed in checks:
         _result(label, passed)
@@ -823,8 +913,10 @@ def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
 # Layer 6 — Redis key inspection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def layer6_key_inspection(host: str, port: int, password: Optional[str],
-                           prefix: str, window_s: int) -> LayerResult:
+
+def layer6_key_inspection(
+    host: str, port: int, password: Optional[str], prefix: str, window_s: int
+) -> LayerResult:
     _banner("Layer 6 — Redis key inspection (sorted sets)")
     result = LayerResult("Redis key inspection")
 
@@ -832,8 +924,11 @@ def layer6_key_inspection(host: str, port: int, password: Optional[str],
 
     try:
         client = redis_lib.Redis(
-            host=host, port=port, password=password,
-            socket_connect_timeout=2.0, socket_timeout=2.0,
+            host=host,
+            port=port,
+            password=password,
+            socket_connect_timeout=2.0,
+            socket_timeout=2.0,
             decode_responses=True,
         )
         client.ping()
@@ -843,30 +938,32 @@ def layer6_key_inspection(host: str, port: int, password: Optional[str],
         result.passed = False
         return result
 
-    pattern  = f"{prefix}:*"
+    pattern = f"{prefix}:*"
     all_keys = list(client.scan_iter(pattern))
     rate_keys = [k for k in all_keys if ":seq" not in k]
 
     if not rate_keys:
-        _result(f"keys found under '{prefix}:'", None,
-                "no keys yet — run layer 5 first to generate traffic")
+        _result(
+            f"keys found under '{prefix}:'",
+            None,
+            "no keys yet — run layer 5 first to generate traffic",
+        )
         result.passed = True
         result.details.append("no keys (layer 5 not run)")
         return result
 
     _result(f"keys found under '{prefix}:'", True, f"{len(rate_keys)} key(s)")
 
-    now_ms   = int(time.time() * 1000)
-    stale    = 0
-    valid    = 0
+    now_ms = int(time.time() * 1000)
+    stale = 0
+    valid = 0
 
     for k in rate_keys[:5]:
-        zcard   = client.zcard(k)
-        ttl     = client.ttl(k)
+        zcard = client.zcard(k)
+        ttl = client.ttl(k)
         members = client.zrange(k, 0, -1, withscores=True)
         is_stale = any(
-            (now_ms - int(score)) > (window_s + 30) * 1000
-            for _, score in members
+            (now_ms - int(score)) > (window_s + 30) * 1000 for _, score in members
         )
         stale += int(is_stale)
         valid += int(not is_stale)
@@ -877,8 +974,11 @@ def layer6_key_inspection(host: str, port: int, password: Optional[str],
             "timestamps fresh" if not is_stale else "stale timestamps",
         )
 
-    _result("all inspected keys have fresh timestamps", stale == 0,
-            f"{valid} valid, {stale} stale")
+    _result(
+        "all inspected keys have fresh timestamps",
+        stale == 0,
+        f"{valid} valid, {stale} stale",
+    )
     if stale:
         result.failures.append(f"{stale} stale key(s)")
 
@@ -890,8 +990,10 @@ def layer6_key_inspection(host: str, port: int, password: Optional[str],
 # Layer 7 — fail-open / fail-closed behaviour
 # ─────────────────────────────────────────────────────────────────────────────
 
-def layer7_fail_open(host: str, port: int, password: Optional[str],
-                     max_requests: int) -> LayerResult:
+
+def layer7_fail_open(
+    host: str, port: int, password: Optional[str], max_requests: int
+) -> LayerResult:
     _banner("Layer 7 — Fail-open / fail-closed on Redis error")
     result = LayerResult("Fail-open behaviour")
 
@@ -899,8 +1001,10 @@ def layer7_fail_open(host: str, port: int, password: Optional[str],
 
     pool = redis_lib.ConnectionPool(
         connection_class=redis_lib.Connection,
-        host="255.255.255.255", port=9999,
-        socket_connect_timeout=0.1, socket_timeout=0.1,
+        host="255.255.255.255",
+        port=9999,
+        socket_connect_timeout=0.1,
+        socket_timeout=0.1,
         decode_responses=True,
     )
     bad = redis_lib.Redis(connection_pool=pool)
@@ -911,7 +1015,7 @@ def layer7_fail_open(host: str, port: int, password: Optional[str],
             bad.ping()
             return False, 0
         except redis_lib.exceptions.RedisError:
-            return True, max_requests   # fail-open
+            return True, max_requests  # fail-open
 
     ok_open = all(_open(f"ip{i}")[0] for i in range(5))
     _result("unreachable Redis + fail_open=True → requests allowed", ok_open)
@@ -923,7 +1027,7 @@ def layer7_fail_open(host: str, port: int, password: Optional[str],
             bad.ping()
             return True, max_requests
         except redis_lib.exceptions.RedisError:
-            return False, 0   # fail-closed
+            return False, 0  # fail-closed
 
     ok_closed = all(not _closed(f"ip{i}")[0] for i in range(3))
     _result("unreachable Redis + fail_open=False → requests denied", ok_closed)
@@ -932,15 +1036,21 @@ def layer7_fail_open(host: str, port: int, password: Optional[str],
     # Scenario C — healthy Redis reconnects
     try:
         good = redis_lib.Redis(
-            host=host, port=port, password=password,
-            socket_connect_timeout=1.5, decode_responses=True,
+            host=host,
+            port=port,
+            password=password,
+            socket_connect_timeout=1.5,
+            decode_responses=True,
         )
         good.ping()
         _result("healthy Redis reconnects after simulated outage", True)
         result.details.append("reconnects")
     except Exception as exc:
-        _result("healthy Redis reconnects after simulated outage", None,
-                f"Redis not reachable ({exc}) — skipped")
+        _result(
+            "healthy Redis reconnects after simulated outage",
+            None,
+            f"Redis not reachable ({exc}) — skipped",
+        )
 
     result.passed = not result.failures
     return result
@@ -950,11 +1060,12 @@ def layer7_fail_open(host: str, port: int, password: Optional[str],
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _print_summary(layers: list[LayerResult]) -> int:
     _banner("Verification summary")
-    passed  = sum(1 for l in layers if l.passed and not l.skipped)
+    passed = sum(1 for l in layers if l.passed and not l.skipped)
     skipped = sum(1 for l in layers if l.skipped)
-    failed  = len(layers) - passed - skipped
+    failed = len(layers) - passed - skipped
 
     for layer in layers:
         icon = SKIP if layer.skipped else (OK if layer.passed else FAIL)
@@ -982,27 +1093,38 @@ def _print_summary(layers: list[LayerResult]) -> int:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Single-step Redis rate limiter verification for FinSight",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--host",          default="localhost")
-    parser.add_argument("--port",          type=int, default=6379)
-    parser.add_argument("--password",      default=None)
-    parser.add_argument("--max-requests",  type=int, default=120)
-    parser.add_argument("--window-s",      type=int, default=60)
-    parser.add_argument("--prefix",        default="finsight:ratelimit")
-    parser.add_argument("--api-url",       default="http://localhost:8000")
-    parser.add_argument("--no-api",        action="store_true",
-                        help="Skip layers 4-5 (no API server required)")
-    parser.add_argument("--no-auto-redis", action="store_true",
-                        help="Do not attempt to start Redis automatically")
-    parser.add_argument("--only-memory",   action="store_true",
-                        help="Run layers 1-2 only (no Redis required)")
-    parser.add_argument("--keep-redis",    action="store_true",
-                        help="Leave auto-started Redis running after the script")
+    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--port", type=int, default=6379)
+    parser.add_argument("--password", default=None)
+    parser.add_argument("--max-requests", type=int, default=120)
+    parser.add_argument("--window-s", type=int, default=60)
+    parser.add_argument("--prefix", default="finsight:ratelimit")
+    parser.add_argument("--api-url", default="http://localhost:8000")
+    parser.add_argument(
+        "--no-api", action="store_true", help="Skip layers 4-5 (no API server required)"
+    )
+    parser.add_argument(
+        "--no-auto-redis",
+        action="store_true",
+        help="Do not attempt to start Redis automatically",
+    )
+    parser.add_argument(
+        "--only-memory",
+        action="store_true",
+        help="Run layers 1-2 only (no Redis required)",
+    )
+    parser.add_argument(
+        "--keep-redis",
+        action="store_true",
+        help="Leave auto-started Redis running after the script",
+    )
     args = parser.parse_args()
 
     # ── redis-py presence ─────────────────────────────────────────────────────
@@ -1029,8 +1151,11 @@ def main() -> int:
         redis_up = _redis_ping(args.host, args.port, args.password)
         if not redis_up:
             _banner("Redis connectivity")
-            _result(f"Redis at {args.host}:{args.port}", False,
-                    "not reachable and --no-auto-redis set")
+            _result(
+                f"Redis at {args.host}:{args.port}",
+                False,
+                "not reachable and --no-auto-redis set",
+            )
             _print_redis_install_instructions(args.host, args.port)
 
     if not redis_up:
@@ -1041,10 +1166,16 @@ def main() -> int:
     try:
         layers.append(layer1_in_memory(args.max_requests))
         layers.append(layer2_factory_fallback())
-        layers.append(layer3_redis_live(
-            args.host, args.port, args.password,
-            args.max_requests, args.window_s, args.prefix,
-        ))
+        layers.append(
+            layer3_redis_live(
+                args.host,
+                args.port,
+                args.password,
+                args.max_requests,
+                args.window_s,
+                args.prefix,
+            )
+        )
 
         if not args.no_api:
             layers.append(layer4_startup_health(args.api_url))
@@ -1053,21 +1184,36 @@ def main() -> int:
             for name in ("Startup & /health", "E2E HTTP 429"):
                 r = LayerResult(name, passed=True, skipped=True)
                 r.details.append("skipped via --no-api")
-                _banner(f"{'Layer 4' if 'health' in name else 'Layer 5'} — skipped (--no-api)")
+                _banner(
+                    f"{'Layer 4' if 'health' in name else 'Layer 5'} — skipped (--no-api)"
+                )
                 _result("skipped via --no-api", None)
                 layers.append(r)
 
-        layers.append(layer6_key_inspection(
-            args.host, args.port, args.password,
-            args.prefix, args.window_s,
-        ))
-        layers.append(layer7_fail_open(
-            args.host, args.port, args.password, args.max_requests,
-        ))
+        layers.append(
+            layer6_key_inspection(
+                args.host,
+                args.port,
+                args.password,
+                args.prefix,
+                args.window_s,
+            )
+        )
+        layers.append(
+            layer7_fail_open(
+                args.host,
+                args.port,
+                args.password,
+                args.max_requests,
+            )
+        )
 
     finally:
-        if not args.keep_redis and _STARTED_METHOD not in (None, "existing",
-                                                            "docker-compose"):
+        if not args.keep_redis and _STARTED_METHOD not in (
+            None,
+            "existing",
+            "docker-compose",
+        ):
             _stop_auto_redis()
 
     return _print_summary(layers)

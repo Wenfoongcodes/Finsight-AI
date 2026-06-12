@@ -76,16 +76,16 @@ def render_streaming_signal_tab(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _STAGE_LABELS: dict[str, str] = {
-    "ingest":       "Fetching market data",
-    "features":     "Engineering features",
-    "training":     "Training models",
+    "ingest": "Fetching market data",
+    "features": "Engineering features",
+    "training": "Training models",
     "model_select": "Selecting best model",
-    "model_load":   "Loading model artifact",
-    "inference":    "Running inference",
-    "shap":         "Running SHAP analysis",
-    "news":         "Retrieving news intelligence",
-    "fusion":       "LLM signal fusion",
-    "complete":     "Complete",
+    "model_load": "Loading model artifact",
+    "inference": "Running inference",
+    "shap": "Running SHAP analysis",
+    "news": "Retrieving news intelligence",
+    "fusion": "LLM signal fusion",
+    "complete": "Complete",
 }
 
 
@@ -111,7 +111,7 @@ def _iter_sse_events(response) -> Iterator[str]:
             continue
         line = raw_line.strip()
         if line.startswith("data:"):
-            yield line[len("data:"):].strip()
+            yield line[len("data:") :].strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,25 +152,21 @@ def _run_streaming_prediction(
             url,
             json=body,
             headers=headers,
-            stream=True,   # keep the socket open for SSE
+            stream=True,  # keep the socket open for SSE
             timeout=180,
         ) as resp:
-
             if resp.status_code == 401:
                 status_ph.error("Authentication required. Check FINSIGHT_API_KEY.")
                 progress_ph.empty()
                 return
 
             if resp.status_code != 200:
-                status_ph.error(
-                    f"API error {resp.status_code}: {resp.text[:300]}"
-                )
+                status_ph.error(f"API error {resp.status_code}: {resp.text[:300]}")
                 progress_ph.empty()
                 return
 
             # Iterate the raw SSE stream without sseclient
             for data_str in _iter_sse_events(resp):
-
                 # Stream sentinel
                 if data_str == "[DONE]":
                     break
@@ -197,8 +193,8 @@ def _run_streaming_prediction(
                         f'<div style="font-family:var(--font-mono);font-size:0.78rem;'
                         f'color:var(--text-secondary);padding:0.35rem 0;">'
                         f'<span style="color:var(--accent-cyan);">◈</span> '
-                        f'<strong>{label}</strong>'
-                        f'{"  —  " + message if message else ""}'
+                        f"<strong>{label}</strong>"
+                        f"{'  —  ' + message if message else ''}"
                         f"</div>",
                         unsafe_allow_html=True,
                     )
@@ -264,10 +260,7 @@ def _render_stale_guard(selected_ticker: str, selected_horizon: str) -> None:
         )
         return
 
-    if (
-        pred.get("ticker") != selected_ticker
-        or pred.get("horizon") != selected_horizon
-    ):
+    if pred.get("ticker") != selected_ticker or pred.get("horizon") != selected_horizon:
         st.markdown(
             """
             <div class="placeholder-state">

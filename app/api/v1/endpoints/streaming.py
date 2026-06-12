@@ -45,13 +45,12 @@ import asyncio
 import json
 import traceback
 from collections.abc import AsyncIterator
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas import AgentRequest, PredictionRequest
-from app.core.exceptions import PredictionError
 from app.core.logging_config import get_logger
 
 logger = get_logger("api.streaming")
@@ -213,7 +212,6 @@ def _serialise_prediction_response(resp, ticker: str, horizon: str) -> dict:
     Convert a PredictionResponse dataclass to a JSON-safe dict that matches
     the PredictionResult Pydantic schema.
     """
-    from app.api.schemas import NewsItemSchema, SHAPFeature
 
     fused = resp.fused_signal
     if fused:
@@ -312,7 +310,6 @@ async def _agent_event_generator(request: AgentRequest) -> AsyncIterator[str]:
         loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def _run_agent():
-        from app.agents.financial_agent import FinancialAgent, FinancialAgentTools
         from app.rag.llm_chat import FinancialChatSystem
         from app.rag.rag_pipeline import RAGPipeline
 

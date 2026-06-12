@@ -17,6 +17,7 @@ from app.services.news_recency import (
     DEFAULT_MAX_AGE_DAYS,
     NewsRecencyFilter,
 )
+from app.services.ticker_resolver import AssetProfile, resolve_ticker
 
 logger = get_logger("news_retrieval")
 
@@ -45,6 +46,12 @@ TIER1_SOURCES: dict[str, float] = {
     "investopedia.com": 0.72,
     "thestreet.com": 0.78,
     "zacks.com": 0.80,
+    # Crypto-specific Tier-1 sources
+    "coindesk.com": 0.90,
+    "cointelegraph.com": 0.88,
+    "theblock.co": 0.88,
+    "decrypt.co": 0.82,
+    "cryptoslate.com": 0.75,
 }
 
 TIER2_SOURCES: dict[str, float] = {
@@ -57,12 +64,13 @@ TIER2_SOURCES: dict[str, float] = {
     "fortune.com": 0.72,
     "forbes.com": 0.70,
     "techcrunch.com": 0.65,
+    # Crypto-specific Tier-2
+    "cryptobriefing.com": 0.70,
+    "bitcoinist.com": 0.65,
+    "newsbtc.com": 0.62,
 }
 
 # Domains blocked regardless of article classification.
-# Kept intentionally short — the news endpoint already excludes price-data
-# aggregators categorically.  This list only needs to cover sources that DDG
-# sometimes mis-classifies as news (e.g. aggregator landing pages, forums).
 BLOCKED_DOMAINS: set[str] = {
     "wikipedia.org",
     "en.wikipedia.org",
@@ -107,6 +115,14 @@ BULLISH_KEYWORDS: frozenset[str] = frozenset(
         "strong demand",
         "expansion",
         "breakout",
+        # Crypto-specific bullish
+        "adoption",
+        "all-time high",
+        "ath",
+        "halving",
+        "accumulation",
+        "institutional buying",
+        "etf approval",
     }
 )
 
@@ -140,6 +156,16 @@ BEARISH_KEYWORDS: frozenset[str] = frozenset(
         "lowered guidance",
         "weak demand",
         "contraction",
+        # Crypto-specific bearish
+        "hack",
+        "exploit",
+        "rug pull",
+        "ban",
+        "crackdown",
+        "delisting",
+        "liquidation",
+        "exchange collapse",
+        "regulatory action",
     }
 )
 
@@ -160,6 +186,14 @@ SEVERITY_KEYWORDS: frozenset[str] = frozenset(
         "ipo",
         "guidance",
         "restatement",
+        # Crypto-specific severity
+        "sec",
+        "cftc",
+        "etf",
+        "halving",
+        "hard fork",
+        "hack",
+        "exploit",
     }
 )
 
@@ -168,10 +202,6 @@ _MAX_RETRIES: int = 2
 _RETRY_DELAY_S: float = 1.5
 _DEFAULT_CREDIBILITY: float = 0.55
 _SUMMARY_SNIPPET_CHARS: int = 180
-
-# Minimum words a body snippet must have.  News articles always produce
-# multi-sentence snippets; the few non-article pages that slip through the
-# news endpoint tend to return very short fragments.
 _MIN_SNIPPET_WORDS: int = 10
 
 
@@ -194,6 +224,77 @@ def _horizon_to_ddg_timelimit(horizon: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Asset-class-aware query template builder
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_queries(profile: AssetProfile) -> list[str]:
+    """
+    Return three complementary DDG news search queries tailored to the
+    asset class of *profile*.
+
+    Design principles
+    -----------------
+    - Use ``profile.display_name`` (e.g. "Bitcoin", "Apple Inc.") rather than
+      the raw ticker (e.g. "BTC-USD", "AAPL") because publishers write the name,
+      not the yfinance data-feed symbol.
+    - Tailor vocabulary to the asset class so every query is semantically valid:
+      * CRYPTOCURRENCY — on-chain metrics, regulation, network activity
+      * ETF / MUTUALFUND — fund flows, NAV, underlying index
+      * INDEX / FUTURE  — macro drivers, contract activity
+      * EQUITY (default) — earnings, analyst coverage, corporate actions
+
+    The raw ticker symbol is included as a secondary search term in the first
+    query so that results for tickers whose display name is ambiguous
+    (e.g. "Meta" could match many things) remain precise.
+    """
+    name = profile.display_name
+    ticker = profile.ticker  # raw symbol for disambiguation
+
+    if profile.is_crypto:
+        return [
+            f'"{name}" cryptocurrency price',
+            f'"{name}" crypto regulation adoption',
+            f'"{name}" blockchain network market',
+        ]
+
+    if profile.asset_class == "ETF":
+        return [
+            f'"{name}" {ticker} ETF',
+            f'"{name}" fund flows NAV performance',
+            f'"{name}" ETF market outlook',
+        ]
+
+    if profile.asset_class == "MUTUALFUND":
+        return [
+            f'"{name}" {ticker} fund',
+            f'"{name}" fund performance holdings',
+            f'"{name}" mutual fund outlook',
+        ]
+
+    if profile.asset_class in ("INDEX", "FUTURE"):
+        return [
+            f'"{name}" market index',
+            f'"{name}" economic outlook macro',
+            f'"{name}" trading futures market',
+        ]
+
+    if profile.asset_class == "CURRENCY":
+        return [
+            f'"{name}" {ticker} currency forex',
+            f'"{name}" exchange rate central bank',
+            f'"{name}" currency market outlook',
+        ]
+
+    # Default: EQUITY (covers unknown types too — safest template set)
+    return [
+        f'"{name}" {ticker} stock',
+        f'"{name}" earnings analyst',
+        f'"{name}" guidance outlook',
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Data classes
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -208,9 +309,6 @@ class NewsItem:
     severity_score: float = 0.0
     credibility_score: float = _DEFAULT_CREDIBILITY
     final_weight: float = 0.5
-    # Raw metadata from the search result.
-    # The DDG news endpoint returns a structured "date" string; storing it here
-    # lets ArticleDateExtractor find it without falling back to regex parsing.
     metadata: dict = field(default_factory=dict)
 
     @property
@@ -287,19 +385,15 @@ class NewsRetriever:
     absent — they are never classified as news — so the root cause is
     eliminated at retrieval time rather than patched downstream.
 
-    The .news() result dict has slightly different field names from .text():
-        .text()  → {"title", "href",  "body", "date", ...}
-        .news()  → {"title", "url",   "body", "date", "source", ...}
-
-    _parse_news_result() normalises both shapes into a common dict so the
-    rest of the pipeline is unaffected.
-
-    Remaining post-retrieval filters
-    ---------------------------------
-    The domain blocklist and snippet word-count check are kept as a
-    lightweight safety net for the rare cases where DDG mis-classifies a
-    non-article page as news (e.g. aggregator landing pages, press-release
-    syndication services with very short copy).
+    Ticker resolution
+    -----------------
+    Raw yfinance tickers like ``BTC-USD`` or ``ETH-USD`` are data-feed
+    conventions that publishers never write.  ``TickerResolver`` converts
+    them to canonical names (e.g. "Bitcoin", "Ethereum") using
+    ``yfinance.Ticker.info`` — the same API already called during market
+    data ingestion — and selects query vocabulary appropriate to the asset
+    class (CRYPTOCURRENCY vs EQUITY vs ETF etc.).  Results are process-cached
+    so the resolver incurs zero extra HTTP round-trips after the first call.
     """
 
     def __init__(self, top_k: int = 8) -> None:
@@ -311,22 +405,25 @@ class NewsRetriever:
 
         Parameters
         ----------
-        ticker:  Stock ticker symbol (e.g. "AAPL").
+        ticker:  Stock ticker symbol (e.g. "AAPL", "BTC-USD").
         horizon: Prediction horizon key — selects DDG timelimit bucket and
                  is forwarded to the recency filter for lookback window.
         """
+        # ── Resolve ticker to canonical name + asset class ────────────────────
+        profile = resolve_ticker(ticker)
         timelimit = _horizon_to_ddg_timelimit(horizon)
 
-        # Three complementary queries targeting different editorial angles.
-        # Quoting the ticker prevents DDG from broadening to unrelated results.
-        # The news endpoint already restricts to article content, so
-        # -site: exclusions and keyword anchors like "news" are not needed —
-        # concise queries produce better recall from the news index.
-        queries = [
-            f'"{ticker}" stock',
-            f'"{ticker}" earnings analyst',
-            f'"{ticker}" guidance SEC filing',
-        ]
+        # ── Build asset-class-aware queries ───────────────────────────────────
+        queries = _build_queries(profile)
+
+        logger.info(
+            "[%s] Resolved: display_name=%r asset_class=%s source=%s",
+            ticker,
+            profile.display_name,
+            profile.asset_class,
+            profile.source,
+        )
+        logger.debug("[%s] Search queries: %s", ticker, queries)
 
         seen_fps: set[str] = set()
         items: list[NewsItem] = []
@@ -347,8 +444,6 @@ class NewsRetriever:
                         continue
 
                     # ── Safety net 2: snippet word-count ──────────────────────
-                    # News articles always produce multi-sentence snippets.
-                    # Very short snippets are a signal of mis-classified pages.
                     if len(item.snippet.split()) < _MIN_SNIPPET_WORDS:
                         logger.debug(
                             "Snippet too short (%d words): %s",
@@ -373,11 +468,13 @@ class NewsRetriever:
         result = items[: self.top_k]
         logger.info(
             "[%s] Retrieved %d news articles via DDG news endpoint "
-            "(horizon=%s timelimit=%s)",
+            "(horizon=%s timelimit=%s display_name=%r asset_class=%s)",
             ticker,
             len(result),
             horizon,
             timelimit,
+            profile.display_name,
+            profile.asset_class,
         )
         return result
 
@@ -410,8 +507,6 @@ class NewsRetriever:
             url=url,
         )
 
-        # Persist structured date so ArticleDateExtractor finds it immediately
-        # on the metadata lookup path rather than falling back to regex parsing.
         raw_date = r.get("date") or r.get("published")
         if raw_date:
             item.metadata["date"] = str(raw_date)
@@ -459,9 +554,6 @@ class NewsRetriever:
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 with DDGS() as ddgs:
-                    # .news() is the key change from all previous iterations.
-                    # It is available on both the ddgs and duckduckgo_search
-                    # packages and accepts the same timelimit parameter.
                     return list(
                         ddgs.news(
                             query,
@@ -640,16 +732,19 @@ class FinancialIntelligenceService:
 
     Always returns an ``IntelligenceBrief``; never raises.
 
+    Ticker resolution
+    -----------------
+    ``TickerResolver`` maps raw yfinance symbols (e.g. ``BTC-USD``) to their
+    canonical market names (e.g. ``Bitcoin``) and asset classes
+    (``CRYPTOCURRENCY``, ``EQUITY``, ``ETF``, …) by querying
+    ``yfinance.Ticker.info`` once per unique ticker per process lifetime.
+    ``NewsRetriever`` then uses ``_build_queries()`` to produce
+    asset-class-appropriate DDG search queries, so crypto tickers get
+    blockchain/regulation vocabulary instead of earnings/SEC language.
+
     Content quality is enforced at the retrieval primitive level — by using
     DDG's news endpoint instead of its text search endpoint — rather than by
-    post-hoc filtering.  This is the correct architectural approach: the news
-    endpoint only indexes pages DDG has classified as news articles, so
-    price-data pages, screeners, and financial data aggregators are
-    categorically absent from the result set regardless of query phrasing.
-
-    A lightweight domain blocklist and snippet word-count check are retained
-    as a safety net for the rare cases where DDG mis-classifies a non-article
-    page as news.
+    post-hoc filtering.
 
     Recency enforcement
     --------------------
@@ -665,8 +760,7 @@ class FinancialIntelligenceService:
         Maximum articles to retrieve per query set.
     unknown_date_policy:
         Policy for articles whose publish date cannot be parsed.
-        Defaults to "reject". The news endpoint reliably returns a structured
-        "date" field, so date-less results are genuinely anomalous.
+        Defaults to "reject".
     """
 
     def __init__(
@@ -689,7 +783,7 @@ class FinancialIntelligenceService:
 
         Parameters
         ----------
-        ticker:  Stock ticker symbol.
+        ticker:  Stock ticker symbol (e.g. "AAPL", "BTC-USD", "ETH-USD").
         horizon: Prediction horizon key — forwarded to both the retriever
                  (timelimit selection) and the recency filter (lookback window).
         """

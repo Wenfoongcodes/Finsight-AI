@@ -212,9 +212,7 @@ class PredictionService:
                         def _fold_cb(fold_result):
                             _fold_counter[0] += 1
                             fold_num = _fold_counter[0]
-                            pct = p_start + int(
-                                (fold_num / n_f) * (p_end - p_start)
-                            )
+                            pct = p_start + int((fold_num / n_f) * (p_end - p_start))
                             cb(
                                 "training",
                                 f"Training {m_name} — fold {fold_num}/{n_f} complete "
@@ -224,9 +222,7 @@ class PredictionService:
 
                         return _fold_cb
 
-                    fold_cb = _make_fold_cb(
-                        model_name, pct_start, pct_end, n_folds
-                    )
+                    fold_cb = _make_fold_cb(model_name, pct_start, pct_end, n_folds)
 
                     cb(
                         "training",

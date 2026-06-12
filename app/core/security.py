@@ -156,6 +156,7 @@ def _detect_hiredis() -> bool:
     # redis-py >= 5: check DefaultParser identity
     try:
         from redis._parsers import _HiredisParser
+
         if getattr(rc, "DefaultParser", None) is _HiredisParser:
             logger.debug(
                 "hiredis detected (redis-py >= 5, DefaultParser=_HiredisParser)"
@@ -254,8 +255,7 @@ class _RedisRateLimiter(RateLimiterBase):
             import redis as redis_lib
         except ImportError as exc:
             raise ImportError(
-                "redis is required for Redis rate limiting: "
-                "pip install redis[hiredis]"
+                "redis is required for Redis rate limiting: pip install redis[hiredis]"
             ) from exc
 
         # redis-py v5+ requires SSL to be specified via SSLConnection class
@@ -298,6 +298,7 @@ class _RedisRateLimiter(RateLimiterBase):
 
     def _get_client(self):
         import redis as redis_lib
+
         return redis_lib.Redis(connection_pool=self._pool)
 
     def _load_script(self, client) -> str:
@@ -421,9 +422,7 @@ def _build_rate_limiter() -> RateLimiterBase:
             limiter = _RedisRateLimiter(
                 max_requests=settings.RATE_LIMIT_MAX_REQUESTS,
                 window_s=settings.RATE_LIMIT_WINDOW_S,
-                key_prefix=getattr(
-                    settings, "REDIS_KEY_PREFIX", "finsight:ratelimit"
-                ),
+                key_prefix=getattr(settings, "REDIS_KEY_PREFIX", "finsight:ratelimit"),
                 fail_open=True,
             )
             _probe_redis(limiter)
@@ -555,9 +554,8 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
         # ── 1. API Key authentication ─────────────────────────────────────────
         if settings.API_KEY_ENABLED and path not in _AUTH_EXEMPT_PATHS:
-            provided = (
-                request.headers.get("X-API-Key")
-                or request.query_params.get("api_key")
+            provided = request.headers.get("X-API-Key") or request.query_params.get(
+                "api_key"
             )
             if not _verify_api_key(provided):
                 logger.warning(
