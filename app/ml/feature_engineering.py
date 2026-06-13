@@ -16,7 +16,6 @@ logger = get_logger("features")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ── Safety sentinel — keep False in production; set True only in scripts/notebooks ──
-# This cannot be modified via an API request parameter, only by direct module access.
 _HURST_ALLOWED: bool = False
 
 
@@ -33,7 +32,7 @@ HORIZONS: dict[str, int] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Indicator Primitives
+# Indicator Primitives (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -94,13 +93,7 @@ def compute_garman_klass_vol(
     close: pd.Series,
     period: int = 20,
 ) -> pd.Series:
-    """
-    Garman-Klass volatility estimator.
-
-    More efficient than close-to-close realized vol because it uses the
-    full OHLC price path.  Formula:
-        σ² = 0.5(ln(H/L))² − (2ln2−1)(ln(C/O))²
-    """
+    """Garman-Klass volatility estimator."""
     hl_log = np.log(high / low.replace(0, np.nan))
     co_log = np.log(close / open_.replace(0, np.nan))
     gk = 0.5 * hl_log**2 - (2 * np.log(2) - 1) * co_log**2
@@ -115,15 +108,8 @@ def compute_hurst(series: pd.Series, lags: int = 20) -> pd.Series:
     """
     Rolling Hurst exponent (R/S method, window=lags*2).
 
-    H > 0.5 → trending (momentum persists)
-    H < 0.5 → mean-reverting
-    H ≈ 0.5 → random walk
-
-    **Performance note:** This is an O(n × lags) Python-level rolling
-    computation — approximately 2-4 seconds per 1 000 rows.  It must never
-    be called from a live API request handler.  Guard via ``_HURST_ALLOWED``
-    or use the ``compute_hurst_exp=True`` constructor argument only from
-    offline scripts and notebooks.
+    **Performance note:** ~2-4 seconds per 1 000 rows. Guarded by
+    ``_HURST_ALLOWED`` — never call from a live API request handler.
     """
     log_ret = np.log(series / series.shift(1))
 
@@ -147,12 +133,7 @@ def compute_amihud_illiquidity(
     volume: pd.Series,
     period: int = 20,
 ) -> pd.Series:
-    """
-    Amihud (2002) illiquidity ratio — |return| / dollar_volume.
-
-    Higher values indicate more price impact per dollar traded.
-    Scaled by 1e6 for readability.
-    """
+    """Amihud (2002) illiquidity ratio."""
     abs_ret = close.pct_change().abs()
     dollar_vol = close * volume
     illiq = (abs_ret / dollar_vol.replace(0, np.nan)) * 1e6
@@ -190,13 +171,7 @@ def compute_ema(series: pd.Series, span: int) -> pd.Series:
 
 
 def compute_vol_regime(realized_vol: pd.Series, lookback: int = 252) -> pd.Series:
-    """
-    Volatility regime percentile rank over ``lookback`` bars.
-
-    Returns a value in [0, 1]:
-      - Near 0 → historically low volatility regime
-      - Near 1 → historically high volatility regime
-    """
+    """Volatility regime percentile rank over ``lookback`` bars."""
     return realized_vol.rolling(lookback, min_periods=60).rank(pct=True)
 
 
@@ -205,9 +180,7 @@ def compute_trend_regime(
     fast: int = 50,
     slow: int = 200,
 ) -> pd.Series:
-    """
-    Simple trend-regime indicator: +1 (uptrend), -1 (downtrend), 0 (neutral).
-    """
+    """Simple trend-regime indicator: +1 (uptrend), -1 (downtrend), 0 (neutral)."""
     sma_fast = compute_sma(close, fast)
     sma_slow = compute_sma(close, slow)
     diff = (sma_fast - sma_slow) / sma_slow.replace(0, np.nan)
@@ -223,11 +196,7 @@ def compute_volume_imbalance(
     volume: pd.Series,
     period: int = 20,
 ) -> pd.Series:
-    """
-    Volume imbalance — buy pressure proxy.
-
-    Positive close relative to open suggests buyer-initiated volume.
-    """
+    """Volume imbalance — buy pressure proxy."""
     body_pct = (close - open_) / (close + open_).replace(0, np.nan)
     imbalance = body_pct * volume
     return imbalance.rolling(period, min_periods=period).mean()
@@ -250,19 +219,14 @@ def compute_momentum_persistence(
     short: int = 5,
     long: int = 20,
 ) -> pd.Series:
-    """
-    Momentum persistence: ratio of short-term to long-term momentum.
-
-    > 1 → short-term outperforming long-term (momentum accelerating)
-    < 1 → deceleration / reversal pressure
-    """
+    """Momentum persistence: ratio of short-term to long-term momentum."""
     mom_short = compute_momentum(close, short)
     mom_long = compute_momentum(close, long)
     return mom_short / mom_long.replace(0, np.nan)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature Selector
+# Feature Selector (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -274,6 +238,10 @@ class FeatureSelector:
     1. Variance thresholding — remove near-constant features.
     2. Correlation filtering — remove one of each highly-correlated pair.
     3. Mutual-information ranking — keep top-N features by MI with target.
+
+    With 100-120 features (technical + fundamental + macro), the selector
+    is more important than ever. It is activated by default in
+    PredictionService when ``include_fundamentals=True``.
     """
 
     def __init__(
@@ -338,7 +306,7 @@ class FeatureSelector:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature Engineer
+# Feature Engineer  (Improvement 4: fundamental integration)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -347,62 +315,84 @@ class FeatureEngineer:
     Stateful feature engineering pipeline.
 
     Builds a comprehensive feature matrix from raw OHLCV data.
+    When ``include_fundamentals=True``, also fetches and merges
+    fundamental and macroeconomic features from yfinance.
 
     Parameters
     ----------
-    rolling_windows: list[int]
+    rolling_windows : list[int]
         Window sizes for SMA, EMA, and range statistics.
-    compute_hurst_exp: bool
-        Whether to compute the Hurst exponent.
-
-        **Important:** This is an expensive O(n×lags) Python-level rolling
-        computation (~2-4 s per 1 000 rows).  It is disabled by default and
-        is additionally guarded by the module-level ``_HURST_ALLOWED``
-        sentinel.  When ``_HURST_ALLOWED`` is ``False`` (production default),
-        setting ``compute_hurst_exp=True`` is silently ignored with a warning
-        so that no API request can accidentally trigger the computation.
-
-        To enable it for offline scripts/notebooks::
-
-            import app.ml.feature_engineering as fe_mod
-            fe_mod._HURST_ALLOWED = True
-            engineer = FeatureEngineer(compute_hurst_exp=True)
+    compute_hurst_exp : bool
+        Whether to compute the Hurst exponent (expensive; disabled by default).
+    include_fundamentals : bool
+        Whether to fetch and merge fundamental + macro features.
+        Default False — backward-compatible with all existing call sites.
+        Set True to enable the Improvement 4 feature set.
+        Requires an internet connection; adds ~3-5 yfinance HTTP calls.
+    ticker : str | None
+        Ticker symbol — required when ``include_fundamentals=True``.
+        Ignored otherwise.
+    fundamental_engineer : FundamentalFeatureEngineer | None
+        Pre-constructed fundamental engineer. If None and
+        ``include_fundamentals=True``, one is created automatically.
     """
 
     def __init__(
         self,
         rolling_windows: Optional[list[int]] = None,
         compute_hurst_exp: bool = False,
+        include_fundamentals: bool = False,
+        ticker: Optional[str] = None,
+        fundamental_engineer=None,  # FundamentalFeatureEngineer | None
     ) -> None:
         self.rolling_windows = rolling_windows or settings.ROLLING_WINDOWS
+        self.include_fundamentals = include_fundamentals
+        self.ticker = ticker.upper().strip() if ticker else None
 
-        # Enforce the production guard — runtime enablement via API is blocked.
+        # Enforce the production guard on Hurst
         if compute_hurst_exp and not _HURST_ALLOWED:
             logger.warning(
                 "compute_hurst_exp=True was requested but _HURST_ALLOWED is False "
-                "(production guard). Hurst computation will be skipped. "
-                "Set app.ml.feature_engineering._HURST_ALLOWED = True in offline "
-                "scripts to enable."
+                "(production guard). Hurst computation will be skipped."
             )
             self.compute_hurst_exp = False
         else:
             self.compute_hurst_exp = compute_hurst_exp
 
+        # Lazily import to avoid mandatory dependency when fundamentals are off
+        self._fundamental_engineer = fundamental_engineer
+        if self.include_fundamentals and self._fundamental_engineer is None:
+            from app.ml.fundamental_features import FundamentalFeatureEngineer
+            self._fundamental_engineer = FundamentalFeatureEngineer()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def build_features(
+        self,
+        df: pd.DataFrame,
+        ticker: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Compute all features from a raw OHLCV DataFrame.
 
-        Args:
-            df: OHLCV DataFrame with DatetimeIndex.
+        Parameters
+        ----------
+        df : pd.DataFrame
+            OHLCV DataFrame with DatetimeIndex.
+        ticker : str | None
+            Ticker symbol. Required only when ``include_fundamentals=True``
+            and not already set in the constructor. Constructor value takes
+            precedence when both are supplied.
 
-        Returns:
+        Returns
+        -------
+        pd.DataFrame
             Feature matrix with NaN warm-up rows dropped.
 
-        Raises:
-            FeatureEngineeringError: On computation failure.
-            InsufficientDataError:   If result is empty after NaN drop.
+        Raises
+        ------
+        FeatureEngineeringError : On computation failure.
+        InsufficientDataError   : If result is empty after NaN drop.
         """
         try:
             feat = df.copy()
@@ -417,6 +407,17 @@ class FeatureEngineer:
             feat = self._higher_moment_features(feat)
             feat = self._candlestick_features(feat)
             feat = self._target_labels(feat)
+
+            # ── Fundamental + macro features (Improvement 4) ──────────────────
+            if self.include_fundamentals and self._fundamental_engineer is not None:
+                resolved_ticker = self.ticker or (ticker.upper().strip() if ticker else None)
+                if resolved_ticker:
+                    feat = self._merge_fundamental_features(feat, resolved_ticker)
+                else:
+                    logger.warning(
+                        "include_fundamentals=True but no ticker supplied — "
+                        "fundamental features skipped."
+                    )
 
             logger.info(
                 "Feature matrix built: %d features × %d rows",
@@ -441,7 +442,12 @@ class FeatureEngineer:
             raise FeatureEngineeringError(f"Feature engineering failed: {exc}") from exc
 
     def get_feature_columns(self, df: pd.DataFrame) -> list[str]:
-        """Return feature column names (excludes OHLCV + all target columns)."""
+        """
+        Return feature column names (excludes OHLCV + all target columns).
+
+        Fundamental columns (``fund_*``, ``macro_*``) are automatically
+        included — no changes needed here.
+        """
         horizon_targets = {f"target_{h}" for h in HORIZONS}
         exclude = (
             {"Open", "High", "Low", "Close", "Volume"}
@@ -458,12 +464,16 @@ class FeatureEngineer:
         """
         Split feature matrix into X and y for the specified prediction horizon.
 
-        Args:
-            df:      Output of build_features().
-            horizon: One of '1d', '7d', '1m', '6m'.
+        Parameters
+        ----------
+        df :
+            Output of build_features().
+        horizon :
+            One of '1d', '7d', '1m', '6m'.
 
-        Returns:
-            (X DataFrame, y Series)
+        Returns
+        -------
+        (X DataFrame, y Series)
         """
         target_col = f"target_{horizon}"
         if target_col not in df.columns:
@@ -475,7 +485,67 @@ class FeatureEngineer:
         y = df[target_col].copy()
         return X, y
 
-    # ── Private feature builders ──────────────────────────────────────────────
+    # ── Fundamental merge (Improvement 4) ────────────────────────────────────
+
+    def _merge_fundamental_features(
+        self, feat: pd.DataFrame, ticker: str
+    ) -> pd.DataFrame:
+        """
+        Fetch, align, and merge fundamental + macro features into *feat*.
+
+        The merge is a left join on the DatetimeIndex so that:
+        * All technical rows are preserved.
+        * Fundamental values are forward-filled (last-known-value).
+        * Rows with no fundamental data yet (pre-IPO lookback) get NaN,
+          which is later dropped by the ``dropna`` call in build_features.
+
+        Fundamental NaN columns are imputed with the column median so that
+        tickers with partial fundamental coverage (e.g. ETFs that have no
+        P/E) do not cause entire rows to be dropped.
+        """
+        try:
+            fund_df = self._fundamental_engineer.build(
+                ticker=ticker,
+                price_index=feat.index,
+            )
+            if fund_df.empty:
+                logger.warning(
+                    "[%s] Fundamental build returned empty DataFrame — skipping merge.",
+                    ticker,
+                )
+                return feat
+
+            # Align to the same index (should already match, but be safe)
+            fund_df = fund_df.reindex(feat.index)
+
+            # Impute fundamental NaNs with column median so partial coverage
+            # doesn't eliminate trading days that otherwise have full tech data.
+            for col in fund_df.columns:
+                if fund_df[col].isna().all():
+                    continue
+                med = fund_df[col].median()
+                fund_df[col] = fund_df[col].fillna(med)
+
+            # Left-join: keep all rows from feat, add fundamental columns
+            merged = feat.join(fund_df, how="left")
+
+            n_fund = fund_df.shape[1]
+            n_valid = fund_df.notna().any(axis=0).sum()
+            logger.info(
+                "[%s] Merged %d fundamental/macro features (%d with data)",
+                ticker, n_fund, n_valid,
+            )
+            return merged
+
+        except Exception as exc:
+            logger.warning(
+                "[%s] Fundamental feature merge failed (%s) — "
+                "proceeding with technical features only.",
+                ticker, exc,
+            )
+            return feat
+
+    # ── Private feature builders (all unchanged from original) ───────────────
 
     def _price_features(self, feat: pd.DataFrame) -> pd.DataFrame:
         close = feat["Close"]
@@ -525,7 +595,6 @@ class FeatureEngineer:
             feat["Open"], high, low, close, period=20
         )
 
-        # Hurst is guarded by both the constructor flag and _HURST_ALLOWED.
         if self.compute_hurst_exp:
             feat["hurst_30"] = compute_hurst(close, lags=15)
 
@@ -636,12 +705,7 @@ class FeatureEngineer:
         return feat
 
     def _target_labels(self, feat: pd.DataFrame) -> pd.DataFrame:
-        """
-        Compute binary directional labels for all prediction horizons.
-
-        Label = 1 if price at horizon is strictly above current price.
-        Shift forward so each row's label is knowable only at that future date.
-        """
+        """Compute binary directional labels for all prediction horizons."""
         close = feat["Close"]
         for horizon_name, horizon_days in HORIZONS.items():
             feat[f"target_{horizon_name}"] = (
@@ -653,7 +717,7 @@ class FeatureEngineer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Convenience wrappers
+# Convenience wrappers (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
