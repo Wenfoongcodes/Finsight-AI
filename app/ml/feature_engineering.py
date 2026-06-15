@@ -239,9 +239,8 @@ class FeatureSelector:
     2. Correlation filtering — remove one of each highly-correlated pair.
     3. Mutual-information ranking — keep top-N features by MI with target.
 
-    With 100-120 features (technical + fundamental + macro), the selector
-    is more important than ever. It is activated by default in
-    PredictionService when ``include_fundamentals=True``.
+    With 100-135 features (technical + fundamental + sector correlation),
+    the selector is more important than ever.
     """
 
     def __init__(
@@ -307,6 +306,7 @@ class FeatureSelector:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature Engineer  (Improvement 4: fundamental integration)
+#                   (Improvement 1: sector correlation integration)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -315,8 +315,8 @@ class FeatureEngineer:
     Stateful feature engineering pipeline.
 
     Builds a comprehensive feature matrix from raw OHLCV data.
-    When ``include_fundamentals=True``, also fetches and merges
-    fundamental and macroeconomic features from yfinance.
+    Optionally merges fundamental + macro features (Improvement 4) and
+    sector & market correlation features (Improvement 1).
 
     Parameters
     ----------
@@ -325,16 +325,25 @@ class FeatureEngineer:
     compute_hurst_exp : bool
         Whether to compute the Hurst exponent (expensive; disabled by default).
     include_fundamentals : bool
-        Whether to fetch and merge fundamental + macro features.
+        Whether to fetch and merge fundamental + macro features (Improvement 4).
         Default False — backward-compatible with all existing call sites.
-        Set True to enable the Improvement 4 feature set.
-        Requires an internet connection; adds ~3-5 yfinance HTTP calls.
     ticker : str | None
-        Ticker symbol — required when ``include_fundamentals=True``.
-        Ignored otherwise.
+        Ticker symbol — required when ``include_fundamentals=True`` or
+        ``include_sector_correlation=True``.  Ignored otherwise.
     fundamental_engineer : FundamentalFeatureEngineer | None
         Pre-constructed fundamental engineer. If None and
         ``include_fundamentals=True``, one is created automatically.
+    include_sector_correlation : bool
+        Whether to fetch and merge sector ETF and market correlation features
+        (Improvement 1).  Adds ~18 features (relative returns, rolling beta,
+        sector RSI/momentum, trend regime, market breadth proxy).
+        Default False — backward-compatible with all existing call sites.
+        Requires internet; adds at most 2 yfinance calls per unique ticker per
+        process lifetime (sector ETF + SPY), both cached via parquet after the
+        first fetch.
+    sector_correlation_engineer : SectorCorrelationFeatureEngineer | None
+        Pre-constructed sector correlation engineer. If None and
+        ``include_sector_correlation=True``, one is created automatically.
     """
 
     def __init__(
@@ -343,10 +352,13 @@ class FeatureEngineer:
         compute_hurst_exp: bool = False,
         include_fundamentals: bool = False,
         ticker: Optional[str] = None,
-        fundamental_engineer=None,  # FundamentalFeatureEngineer | None
+        fundamental_engineer=None,              # FundamentalFeatureEngineer | None
+        include_sector_correlation: bool = False,
+        sector_correlation_engineer=None,       # SectorCorrelationFeatureEngineer | None
     ) -> None:
         self.rolling_windows = rolling_windows or settings.ROLLING_WINDOWS
         self.include_fundamentals = include_fundamentals
+        self.include_sector_correlation = include_sector_correlation
         self.ticker = ticker.upper().strip() if ticker else None
 
         # Enforce the production guard on Hurst
@@ -365,6 +377,12 @@ class FeatureEngineer:
             from app.ml.fundamental_features import FundamentalFeatureEngineer
             self._fundamental_engineer = FundamentalFeatureEngineer()
 
+        # Lazily import to avoid mandatory dependency when sector correlation is off
+        self._sector_correlation_engineer = sector_correlation_engineer
+        if self.include_sector_correlation and self._sector_correlation_engineer is None:
+            from app.ml.sector_correlation_features import SectorCorrelationFeatureEngineer
+            self._sector_correlation_engineer = SectorCorrelationFeatureEngineer()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def build_features(
@@ -380,9 +398,9 @@ class FeatureEngineer:
         df : pd.DataFrame
             OHLCV DataFrame with DatetimeIndex.
         ticker : str | None
-            Ticker symbol. Required only when ``include_fundamentals=True``
-            and not already set in the constructor. Constructor value takes
-            precedence when both are supplied.
+            Ticker symbol. Required only when ``include_fundamentals=True`` or
+            ``include_sector_correlation=True`` and not already set in the
+            constructor. Constructor value takes precedence when both are supplied.
 
         Returns
         -------
@@ -419,6 +437,17 @@ class FeatureEngineer:
                         "fundamental features skipped."
                     )
 
+            # ── Sector & market correlation features (Improvement 1) ──────────
+            if self.include_sector_correlation and self._sector_correlation_engineer is not None:
+                resolved_ticker = self.ticker or (ticker.upper().strip() if ticker else None)
+                if resolved_ticker:
+                    feat = self._merge_sector_correlation_features(feat, resolved_ticker)
+                else:
+                    logger.warning(
+                        "include_sector_correlation=True but no ticker supplied — "
+                        "sector correlation features skipped."
+                    )
+
             logger.info(
                 "Feature matrix built: %d features × %d rows",
                 feat.shape[1],
@@ -445,8 +474,9 @@ class FeatureEngineer:
         """
         Return feature column names (excludes OHLCV + all target columns).
 
-        Fundamental columns (``fund_*``, ``macro_*``) are automatically
-        included — no changes needed here.
+        Fundamental columns (``fund_*``, ``macro_*``) and sector correlation
+        columns (``sector_*``, ``market_*``) are automatically included because
+        they are simply present in the DataFrame and not in the exclude set.
         """
         horizon_targets = {f"target_{h}" for h in HORIZONS}
         exclude = (
@@ -542,6 +572,85 @@ class FeatureEngineer:
                 "[%s] Fundamental feature merge failed (%s) — "
                 "proceeding with technical features only.",
                 ticker, exc,
+            )
+            return feat
+
+    # ── Sector & market correlation merge (Improvement 1) ────────────────────
+
+    def _merge_sector_correlation_features(
+        self, feat: pd.DataFrame, ticker: str
+    ) -> pd.DataFrame:
+        """
+        Fetch, align, and merge sector & market correlation features into *feat*.
+
+        Uses SectorCorrelationFeatureEngineer.build() which internally calls
+        ingest_market_data() for the sector ETF and SPY.  Both calls go
+        through the full parquet caching layer so there is zero extra HTTP
+        cost after the first call on a given trading day.
+
+        Merge strategy
+        --------------
+        Left join on DatetimeIndex — all technical rows are preserved.
+        NaN cells produced by the sector builder (e.g. the first 200 rows
+        before the SMA-200 warms up) are imputed with the column median so
+        that partial-coverage rows do not get eliminated by the dropna() call
+        that immediately follows in build_features().
+
+        Requirements
+        ------------
+        *feat* must still contain a "Close" column at call time.  This is
+        always the case because _target_labels() keeps OHLCV columns in the
+        DataFrame; they are excluded from the X matrix via get_feature_columns().
+        """
+        try:
+            stock_close = feat.get("Close")
+            if stock_close is None:
+                logger.warning(
+                    "[%s] 'Close' column absent in feat — "
+                    "sector correlation features skipped.",
+                    ticker,
+                )
+                return feat
+
+            sector_df = self._sector_correlation_engineer.build(
+                ticker=ticker,
+                stock_close=stock_close,
+                price_index=feat.index,
+            )
+
+            if sector_df.empty:
+                logger.warning(
+                    "[%s] Sector correlation build returned empty DataFrame — "
+                    "skipping merge.",
+                    ticker,
+                )
+                return feat
+
+            sector_df = sector_df.reindex(feat.index)
+
+            # Impute NaNs with column median so warm-up rows (e.g. first 200 days
+            # before SMA-200 is defined) do not cascade into row drops.
+            for col in sector_df.columns:
+                if sector_df[col].isna().all():
+                    continue
+                sector_df[col] = sector_df[col].fillna(sector_df[col].median())
+
+            merged = feat.join(sector_df, how="left")
+
+            logger.info(
+                "[%s] Merged %d sector/market correlation features (%d with data)",
+                ticker,
+                sector_df.shape[1],
+                sector_df.notna().any(axis=0).sum(),
+            )
+            return merged
+
+        except Exception as exc:
+            logger.warning(
+                "[%s] Sector correlation merge failed (%s) — "
+                "proceeding with existing features only.",
+                ticker,
+                exc,
             )
             return feat
 
