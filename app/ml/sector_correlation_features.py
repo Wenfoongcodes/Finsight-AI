@@ -1,4 +1,8 @@
 """
+app/ml/sector_correlation_features.py
+=======================================
+Sector and market correlation feature engineering for FinSight AI — Improvement 1.
+
 Feature categories
 ------------------
 1. Relative return features    — stock return minus sector ETF / SPY return over
@@ -73,6 +77,9 @@ _CORR_WINDOW: int = 20
 _SECTOR_CACHE: dict[str, tuple[float, str]] = {}
 
 # ── Feature name catalogue (for documentation / FeatureSelector awareness) ───
+# Public name — use this in production code.
+# The private alias ``_SECTOR_CORRELATION_FEATURE_NAMES`` is kept below for
+# backward-compatibility with test imports.
 SECTOR_CORRELATION_FEATURE_NAMES: tuple[str, ...] = (
     # Relative return vs sector ETF
     "sector_rel_ret_5d",
@@ -99,6 +106,12 @@ SECTOR_CORRELATION_FEATURE_NAMES: tuple[str, ...] = (
     "market_above_sma200",
     "market_spy_momentum_21d",
 )
+
+# Private alias — referenced by test_sector_correlation_features.py imports.
+# Both names point to the same object; neither copies the tuple.
+_SECTOR_CORRELATION_FEATURE_NAMES = SECTOR_CORRELATION_FEATURE_NAMES
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +350,12 @@ def _market_breadth_proxy(spy_close: pd.Series) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Function aliases — used by test_sector_correlation_features.py imports.
+# Both names point to the same function object (zero overhead).
+_rolling_beta_feature        = _rolling_beta   # noqa: E221
+_rolling_correlation_feature = _rolling_corr   # noqa: E221
+
+
 class SectorCorrelationFeatureEngineer:
     """
     Builds sector and market correlation features aligned to a daily price index.
@@ -412,9 +431,11 @@ class SectorCorrelationFeatureEngineer:
         sector_name, sector_etf = _resolve_sector_etf(ticker)
 
         # ── 2. Fetch ETF closes (both via ingest_market_data cache) ───────────
-        sector_close = _fetch_etf_close(sector_etf, price_index, self.period_years)
+        # period_years is passed as a keyword argument so that test mocks using
+        # lambda (etf, idx, **kw) can absorb it without a positional-arg error.
+        sector_close = _fetch_etf_close(sector_etf, price_index, period_years=self.period_years)
         market_close = (
-            _fetch_etf_close(_SPY, price_index, self.period_years)
+            _fetch_etf_close(_SPY, price_index, period_years=self.period_years)
             if self.include_market
             else pd.Series(np.nan, index=price_index, dtype=float)
         )
