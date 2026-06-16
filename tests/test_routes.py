@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from main import app
 from app.core.exceptions import ModelNotFoundError
+from main import app
 
 client = TestClient(app)
 
@@ -77,7 +77,7 @@ class TestPredictionEndpoint:
             mock_svc.return_value.predict.side_effect = ModelNotFoundError(
                 "No trained model found for AAPL/1d"
             )
-            
+
             resp = client.post(
                 "/api/v1/predict/", json={"ticker": "AAPL", "model_name": "xgboost"}
             )
@@ -102,7 +102,7 @@ class TestPredictionEndpoint:
                 news_sentiment="positive",
                 news_items=[],
             )
-            
+
             mock_pred = MockPrediction(
                 ticker="AAPL",
                 model_name="xgboost",

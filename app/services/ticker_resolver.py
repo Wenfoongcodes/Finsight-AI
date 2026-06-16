@@ -183,9 +183,18 @@ def _resolve_cached(ticker: str) -> AssetProfile:
     Must only be called inside ``_resolver_lock`` to prevent concurrent
     cache-miss races on the same ticker.
     """
-    info = _fetch_yfinance_info(ticker)
+    try:
+        info = _fetch_yfinance_info(ticker)
+    except Exception as exc:
+        # Fallback to heuristic if _fetch_yfinance_info raises
+        logger.debug(
+            "TickerResolver: _fetch_yfinance_info failed for %s: %s — using heuristic",
+            ticker,
+            exc,
+        )
+        info = {}
 
-    # ── Display name ──────────────────────────────────────────────────────────
+    # ── Display name ────────────────────────────────────────────────────────────
     display_name: Optional[str] = info.get("shortName") or info.get("longName")
     source = "yfinance"
 
@@ -201,7 +210,7 @@ def _resolve_cached(ticker: str) -> AssetProfile:
     else:
         display_name = display_name.strip()
 
-    # ── Asset class ───────────────────────────────────────────────────────────
+    # ── Asset class ────────────────────────────────────────────────────────────
     raw_type: str = info.get("quoteType", "").upper().strip()
     asset_class = _QUOTE_TYPE_MAP.get(raw_type) or _heuristic_asset_class(ticker)
 
