@@ -45,9 +45,9 @@ TRIGGER_MANUAL = "manual_request"
 TRIGGER_STALE = "artifact_stale"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────[...]
 # Data Classes
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────[...]
 
 
 @dataclass
@@ -126,9 +126,9 @@ class TrainingResult:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 # Walk-Forward Splitter
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────���──────────────────────────────────�[...]
 
 
 class WalkForwardSplitter:
@@ -165,9 +165,9 @@ class WalkForwardSplitter:
         return splits
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 # Metrics
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 
 
 def compute_metrics(
@@ -187,9 +187,9 @@ def compute_metrics(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 # Hyperparameter Optimization
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 
 
 def optimize_hyperparameters(
@@ -262,9 +262,9 @@ def optimize_hyperparameters(
     return study.best_params
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 # Model Trainer
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────�[...]
 
 
 class ModelTrainer:
@@ -299,7 +299,7 @@ class ModelTrainer:
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self._store = VersionedArtifactStore(self.model_dir)
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # ── Public API ─────────────────────────────────────────────────────────[...]
 
     def load_or_train(
         self,
@@ -481,6 +481,9 @@ class ModelTrainer:
             self._save_versioned_artifacts(
                 final_model, result, ticker, model_name, horizon
             )
+
+            # ── Persist flat-file artifacts for backward compatibility ──────
+            self._save_flat_artifacts(final_model, result, ticker, model_name, horizon)
 
             # ── Promotion logic ────────────────────────────────────────────
             should_promote = promote
@@ -844,6 +847,34 @@ class ModelTrainer:
             horizon,
             version_id,
         )
+
+    def _save_flat_artifacts(
+        self,
+        model: Any,
+        result: TrainingResult,
+        ticker: str,
+        model_name: str,
+        horizon: str,
+    ) -> None:
+        """Save flat-file artifacts for backward compatibility with tests."""
+        flat_model_path = self.model_dir / f"{ticker}_{model_name}.pkl"
+        flat_meta_path = self.model_dir / f"{ticker}_{model_name}_meta.json"
+
+        with open(flat_model_path, "wb") as f:
+            pickle.dump(
+                {
+                    "model": model,
+                    "feature_columns": result.feature_columns,
+                    "horizon": horizon,
+                    "trained_at": result.trained_at,
+                    "version_id": result.version_id,
+                },
+                f,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+
+        with open(flat_meta_path, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
 
     def _write_legacy_meta(
         self, result: TrainingResult, ticker: str, model_name: str, horizon: str
