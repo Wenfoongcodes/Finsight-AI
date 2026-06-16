@@ -39,15 +39,26 @@ class TestPredictionEndpoint:
             mock_pred = MagicMock()
             mock_pred.ticker = "AAPL"
             mock_pred.model_name = "xgboost"
+            mock_pred.horizon = "1d"
             mock_pred.prediction = 1
+            mock_pred.prediction_label = "BULLISH"
             mock_pred.probability = 0.72
+            mock_pred.p_bullish = 0.72
+            mock_pred.p_bearish = 0.28
             mock_pred.confidence_label = "high"
+            mock_pred.confidence_degraded = False
+            mock_pred.selection_reason = "leaderboard"
             mock_pred.latest_close = 185.5
             mock_pred.narrative = "Bullish signal."
-            mock_pred.shap_explanation = {"top_features": []}
-            # Add missing required string fields
-            mock_pred.horizon = "1-month"
+            mock_pred.top_features = []
+            mock_pred.auto_trained = False
+            mock_pred.fused_direction = "BULLISH"
+            mock_pred.fused_confidence = "HIGH"
+            mock_pred.fused_probability = 0.72
+            mock_pred.fusion_narrative = "Bullish signal."
+            mock_pred.fusion_applied = False
             mock_pred.news_sentiment = "positive"
+            mock_pred.news_items = []
             mock_svc.return_value.predict.return_value = mock_pred
 
             resp = client.post(

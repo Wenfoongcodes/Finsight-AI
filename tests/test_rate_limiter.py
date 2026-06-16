@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-"""
-Tests for the distributed rate limiter backends.
-
-In-memory tests run without any external dependencies.
-Redis tests are skipped automatically when a Redis server is not reachable
-(controlled by the REDIS_AVAILABLE environment variable or a live PING).
-"""
-
 import os
 import time
 from unittest.mock import patch
@@ -19,6 +11,14 @@ from app.core.security import (
     _InMemoryRateLimiter,
     _RedisRateLimiter,
 )
+
+"""
+Tests for the distributed rate limiter backends.
+
+In-memory tests run without any external dependencies.
+Redis tests are skipped automatically when a Redis server is not reachable
+(controlled by the REDIS_AVAILABLE environment variable or a live PING).
+"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
