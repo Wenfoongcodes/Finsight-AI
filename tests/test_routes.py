@@ -1,12 +1,63 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from dataclasses import dataclass, field
+from typing import Optional
+from unittest.mock import patch, MagicMock
 
 from fastapi.testclient import TestClient
 
 from main import app
+from app.core.exceptions import ModelNotFoundError
 
 client = TestClient(app)
+
+
+@dataclass
+class MockNewsItem:
+    """Mock news item for FusedSignal."""
+    title: str
+    snippet: str
+    url: str
+    sentiment: str = "neutral"
+    final_weight: float = 0.5
+    domain: str = "example.com"
+
+
+@dataclass
+class MockFusedSignal:
+    """Mock fused signal object."""
+    final_direction: str
+    final_confidence: str
+    fusion_probability: float
+    synthesis_narrative: str
+    fusion_applied: bool
+    news_sentiment: str
+    news_items: list = field(default_factory=list)
+    ml_direction: str = ""
+    ml_probability: float = 0.5
+    generated_at: str = ""
+    recency_note: str = ""
+
+
+@dataclass
+class MockPrediction:
+    """Mock prediction object matching PredictionResponse structure."""
+    ticker: str
+    model_name: str
+    horizon: str
+    selection_reason: str
+    confidence_degraded: bool
+    prediction: int
+    probability: float
+    p_bullish: float
+    p_bearish: float
+    confidence_label: str
+    shap_explanation: dict
+    narrative: str
+    latest_close: float
+    feature_snapshot: dict
+    fused_signal: Optional[MockFusedSignal] = None
+    auto_trained: bool = False
 
 
 class TestHealthEndpoint:
@@ -21,11 +72,17 @@ class TestHealthEndpoint:
 class TestPredictionEndpoint:
     def test_predict_returns_404_without_model(self):
         """Should return 404 when no trained model artifact exists."""
-        resp = client.post(
-            "/api/v1/predict/", json={"ticker": "AAPL", "model_name": "xgboost"}
-        )
-        # Either 404 (no model) or 422 (no data) — both are valid without setup
-        assert resp.status_code in (404, 422, 500)
+        with patch("app.api.v1.endpoints.routes._get_prediction_service") as mock_svc:
+            # Mock the service to raise ModelNotFoundError
+            mock_svc.return_value.predict.side_effect = ModelNotFoundError(
+                "No trained model found for AAPL/1d"
+            )
+            
+            resp = client.post(
+                "/api/v1/predict/", json={"ticker": "AAPL", "model_name": "xgboost"}
+            )
+            # Should return 404 when ModelNotFoundError is raised
+            assert resp.status_code == 404
 
     def test_predict_validates_ticker_length(self):
         resp = client.post(
@@ -36,29 +93,34 @@ class TestPredictionEndpoint:
     def test_predict_uppercase_normalisation(self):
         """Route should accept lowercase ticker and normalise it."""
         with patch("app.api.v1.endpoints.routes._get_prediction_service") as mock_svc:
-            mock_pred = MagicMock()
-            mock_pred.ticker = "AAPL"
-            mock_pred.model_name = "xgboost"
-            mock_pred.horizon = "1d"
-            mock_pred.prediction = 1
-            mock_pred.prediction_label = "BULLISH"
-            mock_pred.probability = 0.72
-            mock_pred.p_bullish = 0.72
-            mock_pred.p_bearish = 0.28
-            mock_pred.confidence_label = "high"
-            mock_pred.confidence_degraded = False
-            mock_pred.selection_reason = "leaderboard"
-            mock_pred.latest_close = 185.5
-            mock_pred.narrative = "Bullish signal."
-            mock_pred.top_features = []
-            mock_pred.auto_trained = False
-            mock_pred.fused_direction = "BULLISH"
-            mock_pred.fused_confidence = "HIGH"
-            mock_pred.fused_probability = 0.72
-            mock_pred.fusion_narrative = "Bullish signal."
-            mock_pred.fusion_applied = False
-            mock_pred.news_sentiment = "positive"
-            mock_pred.news_items = []
+            mock_fused_signal = MockFusedSignal(
+                final_direction="BULLISH",
+                final_confidence="HIGH",
+                fusion_probability=0.72,
+                synthesis_narrative="Bullish signal.",
+                fusion_applied=False,
+                news_sentiment="positive",
+                news_items=[],
+            )
+            
+            mock_pred = MockPrediction(
+                ticker="AAPL",
+                model_name="xgboost",
+                horizon="1d",
+                selection_reason="leaderboard",
+                confidence_degraded=False,
+                prediction=1,
+                probability=0.72,
+                p_bullish=0.72,
+                p_bearish=0.28,
+                confidence_label="high",
+                shap_explanation={"top_features": []},
+                narrative="Bullish signal.",
+                latest_close=185.5,
+                feature_snapshot={},
+                fused_signal=mock_fused_signal,
+                auto_trained=False,
+            )
             mock_svc.return_value.predict.return_value = mock_pred
 
             resp = client.post(
