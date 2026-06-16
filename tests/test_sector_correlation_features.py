@@ -16,20 +16,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.ml.feature_engineering import FeatureEngineer
 from app.ml.sector_correlation_features import (
+    _SECTOR_CORRELATION_FEATURE_NAMES,
     SECTOR_ETF_MAP,
     SectorCorrelationFeatureEngineer,
-    _SECTOR_CORRELATION_FEATURE_NAMES,
     _log_returns,
     _market_breadth_proxy,
     _relative_return_features,
+    _resolve_sector_etf,
     _rolling_beta_feature,
     _rolling_correlation_feature,
-    _resolve_sector_etf,
     _sector_trend_regime,
 )
-from app.ml.feature_engineering import FeatureEngineer
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -95,9 +94,17 @@ def _make_mock_engineer(etf_close: pd.Series, spy_close: pd.Series):
 class TestSectorEtfMap:
     def test_all_eleven_gics_sectors_covered(self):
         canonical_sectors = {
-            "Technology", "Health Care", "Financials", "Consumer Discretionary",
-            "Consumer Staples", "Energy", "Industrials", "Materials",
-            "Real Estate", "Utilities", "Communication Services",
+            "Technology",
+            "Health Care",
+            "Financials",
+            "Consumer Discretionary",
+            "Consumer Staples",
+            "Energy",
+            "Industrials",
+            "Materials",
+            "Real Estate",
+            "Utilities",
+            "Communication Services",
         }
         mapped = set(SECTOR_ETF_MAP.keys())
         # All canonical sectors must be in the map
@@ -115,10 +122,19 @@ class TestSectorEtfMap:
         canonical = [
             SECTOR_ETF_MAP[s]
             for s in SECTOR_ETF_MAP
-            if s in {
-                "Technology", "Health Care", "Financials", "Consumer Discretionary",
-                "Consumer Staples", "Energy", "Industrials", "Materials",
-                "Real Estate", "Utilities", "Communication Services",
+            if s
+            in {
+                "Technology",
+                "Health Care",
+                "Financials",
+                "Consumer Discretionary",
+                "Consumer Staples",
+                "Energy",
+                "Industrials",
+                "Materials",
+                "Real Estate",
+                "Utilities",
+                "Communication Services",
             }
         ]
         assert len(canonical) == len(set(canonical)), (
@@ -134,6 +150,7 @@ class TestSectorEtfMap:
 class TestResolveSectorEtf:
     def _clear_cache(self):
         from app.ml.sector_correlation_features import _SECTOR_CACHE
+
         _SECTOR_CACHE.clear()
 
     def test_technology_resolves_to_xlk(self):
@@ -211,27 +228,23 @@ class TestRelativeReturnFeatures:
     def test_outperforming_is_positive(self):
         idx = pd.bdate_range("2020-01-01", periods=100)
         # Stock +2% all days, ETF +1% all days → relative return should be positive
-        stock = pd.Series(
-            [100.0 * (1.02 ** i) for i in range(100)], index=idx
-        )
-        etf = pd.Series(
-            [100.0 * (1.01 ** i) for i in range(100)], index=idx
-        )
+        stock = pd.Series([100.0 * (1.02**i) for i in range(100)], index=idx)
+        etf = pd.Series([100.0 * (1.01**i) for i in range(100)], index=idx)
         df = _relative_return_features(stock, etf, prefix="sector")
         valid = df["sector_rel_ret_5d"].dropna()
-        assert (valid > 0).all(), "Outperforming stock should have positive relative returns"
+        assert (valid > 0).all(), (
+            "Outperforming stock should have positive relative returns"
+        )
 
     def test_underperforming_is_negative(self):
         idx = pd.bdate_range("2020-01-01", periods=100)
-        stock = pd.Series(
-            [100.0 * (1.01 ** i) for i in range(100)], index=idx
-        )
-        etf = pd.Series(
-            [100.0 * (1.02 ** i) for i in range(100)], index=idx
-        )
+        stock = pd.Series([100.0 * (1.01**i) for i in range(100)], index=idx)
+        etf = pd.Series([100.0 * (1.02**i) for i in range(100)], index=idx)
         df = _relative_return_features(stock, etf, prefix="sector")
         valid = df["sector_rel_ret_5d"].dropna()
-        assert (valid < 0).all(), "Underperforming stock should have negative relative returns"
+        assert (valid < 0).all(), (
+            "Underperforming stock should have negative relative returns"
+        )
 
 
 class TestRollingBeta:
@@ -253,11 +266,15 @@ class TestRollingBeta:
         np.random.seed(0)
         market_rets = pd.Series(np.random.normal(0, 0.01, 200), index=idx)
         # Stock returns = 1.5 * market + small noise → beta ≈ 1.5
-        stock_rets = 1.5 * market_rets + pd.Series(np.random.normal(0, 0.001, 200), index=idx)
+        stock_rets = 1.5 * market_rets + pd.Series(
+            np.random.normal(0, 0.001, 200), index=idx
+        )
         beta = _rolling_beta_feature(stock_rets, market_rets, window=60)
         valid = beta.dropna()
         assert len(valid) > 0
-        assert (valid > 0).all(), "Beta must be positive for positively correlated series"
+        assert (valid > 0).all(), (
+            "Beta must be positive for positively correlated series"
+        )
 
     def test_first_window_minus_one_is_nan(self, stock_close, spy_close):
         stock_rets = _log_returns(stock_close)
@@ -293,7 +310,11 @@ class TestRollingCorrelation:
 class TestSectorTrendRegime:
     def test_columns_produced(self, etf_close):
         df = _sector_trend_regime(etf_close)
-        expected = {"sector_sma50_200_cross", "sector_trend_regime", "sector_close_vs_sma50"}
+        expected = {
+            "sector_sma50_200_cross",
+            "sector_trend_regime",
+            "sector_close_vs_sma50",
+        }
         assert expected.issubset(df.columns)
 
     def test_cross_is_binary(self, etf_close):
@@ -309,9 +330,7 @@ class TestSectorTrendRegime:
     def test_strong_uptrend_gives_regime_one(self):
         """Monotonically rising series → SMA50 > SMA200 → regime = 1."""
         idx = pd.bdate_range("2015-01-01", periods=500)
-        close = pd.Series(
-            [100.0 + i * 0.5 for i in range(500)], index=idx
-        )
+        close = pd.Series([100.0 + i * 0.5 for i in range(500)], index=idx)
         df = _sector_trend_regime(close)
         # After 200-day warm-up, regime should be +1
         regime_after_warmup = df["sector_trend_regime"].iloc[210:]
@@ -321,7 +340,11 @@ class TestSectorTrendRegime:
 class TestMarketBreadthProxy:
     def test_columns_produced(self, spy_close):
         df = _market_breadth_proxy(spy_close)
-        expected = {"market_spy_vs_sma200", "market_above_sma200", "market_spy_momentum_21d"}
+        expected = {
+            "market_spy_vs_sma200",
+            "market_above_sma200",
+            "market_spy_momentum_21d",
+        }
         assert expected.issubset(df.columns)
 
     def test_above_sma200_is_binary(self, spy_close):
@@ -421,9 +444,7 @@ class TestSectorCorrelationFeatureEngineerBuild:
         result = eng.build("AAPL", tiny_close, tiny_index)
         assert result.empty or len(result) == len(tiny_index)
 
-    def test_gracefully_handles_etf_fetch_failure(
-        self, stock_close, price_index
-    ):
+    def test_gracefully_handles_etf_fetch_failure(self, stock_close, price_index):
         """When ETF data is unavailable, should return empty or partial DataFrame."""
         eng = SectorCorrelationFeatureEngineer()
         with (
@@ -517,13 +538,13 @@ class TestFeatureEngineerSectorIntegration:
             index=index,
         )
 
-    def test_include_sector_correlation_false_does_not_add_columns(
-        self, sample_ohlcv
-    ):
+    def test_include_sector_correlation_false_does_not_add_columns(self, sample_ohlcv):
         """Default behaviour: no sector correlation columns."""
         eng = FeatureEngineer(include_sector_correlation=False)
         df = eng.build_features(sample_ohlcv)
-        sector_cols = [c for c in df.columns if c.startswith("sector_") or c.startswith("market_")]
+        sector_cols = [
+            c for c in df.columns if c.startswith("sector_") or c.startswith("market_")
+        ]
         assert len(sector_cols) == 0
 
     def test_include_sector_correlation_true_merges_columns(self, sample_ohlcv):

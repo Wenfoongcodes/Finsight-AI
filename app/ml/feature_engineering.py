@@ -352,9 +352,9 @@ class FeatureEngineer:
         compute_hurst_exp: bool = False,
         include_fundamentals: bool = False,
         ticker: Optional[str] = None,
-        fundamental_engineer=None,              # FundamentalFeatureEngineer | None
+        fundamental_engineer=None,  # FundamentalFeatureEngineer | None
         include_sector_correlation: bool = False,
-        sector_correlation_engineer=None,       # SectorCorrelationFeatureEngineer | None
+        sector_correlation_engineer=None,  # SectorCorrelationFeatureEngineer | None
     ) -> None:
         self.rolling_windows = rolling_windows or settings.ROLLING_WINDOWS
         self.include_fundamentals = include_fundamentals
@@ -375,12 +375,19 @@ class FeatureEngineer:
         self._fundamental_engineer = fundamental_engineer
         if self.include_fundamentals and self._fundamental_engineer is None:
             from app.ml.fundamental_features import FundamentalFeatureEngineer
+
             self._fundamental_engineer = FundamentalFeatureEngineer()
 
         # Lazily import to avoid mandatory dependency when sector correlation is off
         self._sector_correlation_engineer = sector_correlation_engineer
-        if self.include_sector_correlation and self._sector_correlation_engineer is None:
-            from app.ml.sector_correlation_features import SectorCorrelationFeatureEngineer
+        if (
+            self.include_sector_correlation
+            and self._sector_correlation_engineer is None
+        ):
+            from app.ml.sector_correlation_features import (
+                SectorCorrelationFeatureEngineer,
+            )
+
             self._sector_correlation_engineer = SectorCorrelationFeatureEngineer()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -428,7 +435,9 @@ class FeatureEngineer:
 
             # ── Fundamental + macro features (Improvement 4) ──────────────────
             if self.include_fundamentals and self._fundamental_engineer is not None:
-                resolved_ticker = self.ticker or (ticker.upper().strip() if ticker else None)
+                resolved_ticker = self.ticker or (
+                    ticker.upper().strip() if ticker else None
+                )
                 if resolved_ticker:
                     feat = self._merge_fundamental_features(feat, resolved_ticker)
                 else:
@@ -438,10 +447,17 @@ class FeatureEngineer:
                     )
 
             # ── Sector & market correlation features (Improvement 1) ──────────
-            if self.include_sector_correlation and self._sector_correlation_engineer is not None:
-                resolved_ticker = self.ticker or (ticker.upper().strip() if ticker else None)
+            if (
+                self.include_sector_correlation
+                and self._sector_correlation_engineer is not None
+            ):
+                resolved_ticker = self.ticker or (
+                    ticker.upper().strip() if ticker else None
+                )
                 if resolved_ticker:
-                    feat = self._merge_sector_correlation_features(feat, resolved_ticker)
+                    feat = self._merge_sector_correlation_features(
+                        feat, resolved_ticker
+                    )
                 else:
                     logger.warning(
                         "include_sector_correlation=True but no ticker supplied — "
@@ -563,7 +579,9 @@ class FeatureEngineer:
             n_valid = fund_df.notna().any(axis=0).sum()
             logger.info(
                 "[%s] Merged %d fundamental/macro features (%d with data)",
-                ticker, n_fund, n_valid,
+                ticker,
+                n_fund,
+                n_valid,
             )
             return merged
 
@@ -571,7 +589,8 @@ class FeatureEngineer:
             logger.warning(
                 "[%s] Fundamental feature merge failed (%s) — "
                 "proceeding with technical features only.",
-                ticker, exc,
+                ticker,
+                exc,
             )
             return feat
 

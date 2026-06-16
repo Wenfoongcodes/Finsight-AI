@@ -15,11 +15,10 @@ from unittest.mock import patch
 import pytest
 
 from app.core.security import (
+    _build_rate_limiter,
     _InMemoryRateLimiter,
     _RedisRateLimiter,
-    _build_rate_limiter,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers

@@ -45,6 +45,9 @@ class TestPredictionEndpoint:
             mock_pred.latest_close = 185.5
             mock_pred.narrative = "Bullish signal."
             mock_pred.shap_explanation = {"top_features": []}
+            # Add missing required string fields
+            mock_pred.horizon = "1-month"
+            mock_pred.news_sentiment = "positive"
             mock_svc.return_value.predict.return_value = mock_pred
 
             resp = client.post(

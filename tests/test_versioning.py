@@ -21,16 +21,14 @@ import pandas as pd
 import pytest
 
 from app.core.exceptions import ModelNotFoundError
+from app.ml.training.trainer import ModelTrainer
 from app.ml.training.versioning import (
-    DEFAULT_KEEP_LAST,
     VersionedArtifactStore,
     _build_registry_entry,
     _feature_hash,
     make_version_id,
     parse_version_timestamp,
 )
-from app.ml.training.trainer import ModelTrainer
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -174,11 +172,15 @@ class TestArtifactStorePaths:
         mp = store.meta_path("AAPL", "xgboost", "1d", "v1")
         assert mp.name == "meta.json"
 
-    def test_active_path_at_slot_level(self, store: VersionedArtifactStore, tmp_path: Path):
+    def test_active_path_at_slot_level(
+        self, store: VersionedArtifactStore, tmp_path: Path
+    ):
         ap = store._active_path("AAPL", "xgboost", "1d")
         assert ap == tmp_path / "AAPL" / "xgboost" / "1d" / "active.json"
 
-    def test_registry_path_at_slot_level(self, store: VersionedArtifactStore, tmp_path: Path):
+    def test_registry_path_at_slot_level(
+        self, store: VersionedArtifactStore, tmp_path: Path
+    ):
         rp = store._registry_path("AAPL", "xgboost", "1d")
         assert rp == tmp_path / "AAPL" / "xgboost" / "1d" / "versions.json"
 
@@ -202,7 +204,9 @@ class TestActivePointer:
             store.set_active_version_id("AAPL", "xgboost", "1d", f"v{i}")
         assert store.get_active_version_id("AAPL", "xgboost", "1d") == "v9"
 
-    def test_active_pointer_is_independent_per_slot(self, store: VersionedArtifactStore):
+    def test_active_pointer_is_independent_per_slot(
+        self, store: VersionedArtifactStore
+    ):
         store.set_active_version_id("AAPL", "xgboost", "1d", "v1")
         store.set_active_version_id("MSFT", "xgboost", "1d", "v2")
         store.set_active_version_id("AAPL", "lightgbm", "1d", "v3")
@@ -249,7 +253,9 @@ class TestVersionRegistry:
                 "AAPL", "xgboost", "1d", {"version_id": vid, "is_active": False}
             )
         store.update_registry_active_flags("AAPL", "xgboost", "1d", "v2")
-        entries = {e["version_id"]: e for e in store.load_registry("AAPL", "xgboost", "1d")}
+        entries = {
+            e["version_id"]: e for e in store.load_registry("AAPL", "xgboost", "1d")
+        }
         assert entries["v1"]["is_active"] is False
         assert entries["v2"]["is_active"] is True
         assert entries["v3"]["is_active"] is False
@@ -286,7 +292,9 @@ class TestPruning:
         store.set_active_version_id("AAPL", "xgboost", "1d", "v04")
 
         store.prune("AAPL", "xgboost", "1d", keep_last=2)
-        remaining = {e["version_id"] for e in store.load_registry("AAPL", "xgboost", "1d")}
+        remaining = {
+            e["version_id"] for e in store.load_registry("AAPL", "xgboost", "1d")
+        }
         # v03 and v04 should remain; v04 is active
         assert "v04" in remaining
         assert "v03" in remaining
@@ -354,16 +362,26 @@ class TestModelTrainerVersioning:
     def test_train_creates_versioned_artifact(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         _, result = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         assert result.version_id != ""
-        assert trainer._store.version_exists("TEST", "random_forest", "1d", result.version_id)
+        assert trainer._store.version_exists(
+            "TEST", "random_forest", "1d", result.version_id
+        )
 
     def test_train_sets_active_version(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         _, result = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         active = trainer._store.get_active_version_id("TEST", "random_forest", "1d")
@@ -373,11 +391,23 @@ class TestModelTrainerVersioning:
         X, y = tiny_X_y
         params = {"n_estimators": 5, "max_depth": 2}
         _, r1 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
-        import time; time.sleep(1.1)  # ensure different timestamps
+        import time
+
+        time.sleep(1.1)  # ensure different timestamps
         _, r2 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
         assert r1.version_id != r2.version_id
         versions = trainer.list_versions("TEST", "random_forest", "1d")
@@ -386,7 +416,11 @@ class TestModelTrainerVersioning:
     def test_load_model_loads_active_version(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         _, result = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         model, feature_columns = trainer.load_model("TEST", "random_forest", "1d")
@@ -397,11 +431,23 @@ class TestModelTrainerVersioning:
         X, y = tiny_X_y
         params = {"n_estimators": 5, "max_depth": 2}
         _, r1 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
-        import time; time.sleep(1.1)
+        import time
+
+        time.sleep(1.1)
         _, r2 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
         # r2 is active now; promote r1
         trainer.promote_version("TEST", "random_forest", "1d", r1.version_id)
@@ -412,23 +458,45 @@ class TestModelTrainerVersioning:
         X, y = tiny_X_y
         params = {"n_estimators": 5, "max_depth": 2}
         _, r1 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
-        import time; time.sleep(1.1)
+        import time
+
+        time.sleep(1.1)
         _, r2 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
         # r2 is active
-        assert trainer._store.get_active_version_id("TEST", "random_forest", "1d") == r2.version_id
+        assert (
+            trainer._store.get_active_version_id("TEST", "random_forest", "1d")
+            == r2.version_id
+        )
         # Rollback → r1
         restored = trainer.rollback("TEST", "random_forest", "1d")
         assert restored == r1.version_id
-        assert trainer._store.get_active_version_id("TEST", "random_forest", "1d") == r1.version_id
+        assert (
+            trainer._store.get_active_version_id("TEST", "random_forest", "1d")
+            == r1.version_id
+        )
 
     def test_rollback_raises_when_no_previous(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         with pytest.raises(ModelNotFoundError):
@@ -437,19 +505,32 @@ class TestModelTrainerVersioning:
     def test_promote_nonexistent_version_raises(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         with pytest.raises(ModelNotFoundError):
-            trainer.promote_version("TEST", "random_forest", "1d", "nonexistent_version")
+            trainer.promote_version(
+                "TEST", "random_forest", "1d", "nonexistent_version"
+            )
 
     def test_prune_versions_via_trainer(self, trainer: ModelTrainer, tiny_X_y):
         X, y = tiny_X_y
         params = {"n_estimators": 5, "max_depth": 2}
         for _ in range(4):
-            import time; time.sleep(1.1)
+            import time
+
+            time.sleep(1.1)
             trainer.train(
-                "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+                "random_forest",
+                X,
+                y,
+                ticker="TEST",
+                horizon="1d",
+                hyperparams=params,
             )
         deleted = trainer.prune_versions("TEST", "random_forest", "1d", keep_last=2)
         remaining = trainer.list_versions("TEST", "random_forest", "1d")
@@ -459,10 +540,16 @@ class TestModelTrainerVersioning:
         # Active version must still be present
         assert any(v["version_id"] == active_id for v in remaining)
 
-    def test_list_versions_returns_enriched_entries(self, trainer: ModelTrainer, tiny_X_y):
+    def test_list_versions_returns_enriched_entries(
+        self, trainer: ModelTrainer, tiny_X_y
+    ):
         X, y = tiny_X_y
         trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d",
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
             hyperparams={"n_estimators": 5, "max_depth": 2},
         )
         versions = trainer.list_versions("TEST", "random_forest", "1d")
@@ -478,11 +565,23 @@ class TestModelTrainerVersioning:
         X, y = tiny_X_y
         params = {"n_estimators": 5, "max_depth": 2}
         _, r1 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
-        import time; time.sleep(1.1)
+        import time
+
+        time.sleep(1.1)
         _, r2 = trainer.train(
-            "random_forest", X, y, ticker="TEST", horizon="1d", hyperparams=params,
+            "random_forest",
+            X,
+            y,
+            ticker="TEST",
+            horizon="1d",
+            hyperparams=params,
         )
         # Load r1 explicitly even though r2 is active
         model, cols = trainer.load_model(
@@ -557,6 +656,7 @@ class TestVersioningEndpoints:
         Patch ModelTrainer to use tmp_path and pre-populate two versions.
         """
         from fastapi.testclient import TestClient
+
         from main import app
 
         store = VersionedArtifactStore(tmp_path)
@@ -571,6 +671,7 @@ class TestVersioningEndpoints:
         )
 
         import app.api.v1.endpoints.versioning as vmod
+
         original_trainer = vmod._trainer
 
         trainer = ModelTrainer(model_dir=tmp_path)

@@ -4,12 +4,12 @@ import os
 import time
 import uuid
 from typing import Optional
-from streaming_signal import render_streaming_signal_tab
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from streaming_signal import render_streaming_signal_tab
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration — environment-driven

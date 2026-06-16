@@ -176,14 +176,16 @@ class VersionedArtifactStore:
         path = self._active_path(ticker, model_name, horizon)
         self._atomic_write(path, {"version_id": version_id})
         logger.info(
-            "[%s/%s/%s] Active version set → %s", ticker, model_name, horizon, version_id
+            "[%s/%s/%s] Active version set → %s",
+            ticker,
+            model_name,
+            horizon,
+            version_id,
         )
 
     # ── Version registry ──────────────────────────────────────────────────────
 
-    def load_registry(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> list[dict]:
+    def load_registry(self, ticker: str, model_name: str, horizon: str) -> list[dict]:
         """Return the version history list (sorted oldest → newest)."""
         path = self._registry_path(ticker, model_name, horizon)
         if not path.exists():
@@ -233,17 +235,13 @@ class VersionedArtifactStore:
     ) -> bool:
         return self.model_path(ticker, model_name, horizon, version_id).exists()
 
-    def list_version_ids(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> list[str]:
+    def list_version_ids(self, ticker: str, model_name: str, horizon: str) -> list[str]:
         """Return all version IDs present on disk, sorted chronologically."""
         vdir = self._versions_dir(ticker, model_name, horizon)
         if not vdir.exists():
             return []
         ids = sorted(
-            d.name
-            for d in vdir.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
+            d.name for d in vdir.iterdir() if d.is_dir() and not d.name.startswith(".")
         )
         return ids
 
@@ -302,20 +300,14 @@ class VersionedArtifactStore:
 
     # ── Legacy flat-file detection ────────────────────────────────────────────
 
-    def legacy_model_path(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> Path:
+    def legacy_model_path(self, ticker: str, model_name: str, horizon: str) -> Path:
         """Path to the old-style flat ``{TICKER}_{MODEL}_{HORIZON}.pkl`` artifact."""
         return self._base / f"{ticker.upper()}_{model_name}_{horizon}.pkl"
 
-    def legacy_meta_path(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> Path:
+    def legacy_meta_path(self, ticker: str, model_name: str, horizon: str) -> Path:
         return self._base / f"{ticker.upper()}_{model_name}_{horizon}_meta.json"
 
-    def has_legacy_artifact(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> bool:
+    def has_legacy_artifact(self, ticker: str, model_name: str, horizon: str) -> bool:
         return self.legacy_model_path(ticker, model_name, horizon).exists()
 
     def migrate_legacy_artifact(

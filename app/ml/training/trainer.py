@@ -382,7 +382,10 @@ class ModelTrainer:
             if run_hpo and not hyperparams:
                 logger.info(
                     "[%s/%s/%s] Running HPO (%d trials)…",
-                    ticker, model_name, horizon, hpo_trials,
+                    ticker,
+                    model_name,
+                    horizon,
+                    hpo_trials,
                 )
                 best_params = optimize_hyperparameters(
                     model_name, X, y, n_trials=hpo_trials
@@ -430,9 +433,14 @@ class ModelTrainer:
 
                 logger.info(
                     "[%s/%s/%s] Fold %d/%d — Acc=%.4f F1=%.4f AUC=%.4f",
-                    ticker, model_name, horizon,
-                    fold_idx + 1, len(splits),
-                    metrics["accuracy"], metrics["f1"], metrics["roc_auc"],
+                    ticker,
+                    model_name,
+                    horizon,
+                    fold_idx + 1,
+                    len(splits),
+                    metrics["accuracy"],
+                    metrics["f1"],
+                    metrics["roc_auc"],
                 )
 
             result.compute_aggregates()
@@ -443,7 +451,9 @@ class ModelTrainer:
             if should_calibrate:
                 logger.info(
                     "[%s/%s/%s] Applying Platt scaling (cv=3)…",
-                    ticker, model_name, horizon,
+                    ticker,
+                    model_name,
+                    horizon,
                 )
                 base_estimator = get_model(model_name, **best_params)
                 final_model = CalibratedClassifierCV(
@@ -460,14 +470,17 @@ class ModelTrainer:
 
             # ── Generate version identifier ────────────────────────────────
             from datetime import datetime, timezone
-            ts = datetime.strptime(
-                result.trained_at[:19], "%Y-%m-%dT%H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+
+            ts = datetime.strptime(result.trained_at[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
             version_id = make_version_id(result.feature_columns, best_params, ts)
             result.version_id = version_id
 
             # ── Persist versioned artifacts ────────────────────────────────
-            self._save_versioned_artifacts(final_model, result, ticker, model_name, horizon)
+            self._save_versioned_artifacts(
+                final_model, result, ticker, model_name, horizon
+            )
 
             # ── Promotion logic ────────────────────────────────────────────
             should_promote = promote
@@ -477,7 +490,9 @@ class ModelTrainer:
                 )
 
             if should_promote:
-                self._store.set_active_version_id(ticker, model_name, horizon, version_id)
+                self._store.set_active_version_id(
+                    ticker, model_name, horizon, version_id
+                )
                 self._store.update_registry_active_flags(
                     ticker, model_name, horizon, version_id
                 )
@@ -487,16 +502,25 @@ class ModelTrainer:
                 logger.info(
                     "[%s/%s/%s] New version %s NOT promoted "
                     "(auto_promote_if_better=True, AUC %.4f not better enough)",
-                    ticker, model_name, horizon, version_id, result.mean_roc_auc,
+                    ticker,
+                    model_name,
+                    horizon,
+                    version_id,
+                    result.mean_roc_auc,
                 )
 
             logger.info(
                 "[%s/%s/%s] Training complete in %.2fs | "
                 "Acc=%.4f F1=%.4f AUC=%.4f | trigger=%s | version=%s",
-                ticker, model_name, horizon,
+                ticker,
+                model_name,
+                horizon,
                 result.training_duration_s,
-                result.mean_accuracy, result.mean_f1, result.mean_roc_auc,
-                trigger_reason, version_id,
+                result.mean_accuracy,
+                result.mean_f1,
+                result.mean_roc_auc,
+                trigger_reason,
+                version_id,
             )
             return final_model, result
 
@@ -580,11 +604,11 @@ class ModelTrainer:
                 detail="Check list_versions() for available version IDs.",
             )
 
-        previous_active = self._store.get_active_version_id(
-            ticker, model_name, horizon
-        )
+        previous_active = self._store.get_active_version_id(ticker, model_name, horizon)
         self._store.set_active_version_id(ticker, model_name, horizon, version_id)
-        self._store.update_registry_active_flags(ticker, model_name, horizon, version_id)
+        self._store.update_registry_active_flags(
+            ticker, model_name, horizon, version_id
+        )
 
         # Update the legacy-compatible flat meta so ModelSelector picks it up
         meta_path = self._store.meta_path(ticker, model_name, horizon, version_id)
@@ -597,12 +621,14 @@ class ModelTrainer:
 
         logger.info(
             "[%s/%s/%s] Version promoted: %s → %s",
-            ticker, model_name, horizon, previous_active, version_id,
+            ticker,
+            model_name,
+            horizon,
+            previous_active,
+            version_id,
         )
 
-    def rollback(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> str:
+    def rollback(self, ticker: str, model_name: str, horizon: str) -> str:
         """
         Roll back to the version that was active before the current one.
 
@@ -618,18 +644,15 @@ class ModelTrainer:
                 detail="No rollback target available.",
             )
 
-        current_active = self._store.get_active_version_id(
-            ticker, model_name, horizon
-        )
+        current_active = self._store.get_active_version_id(ticker, model_name, horizon)
 
         # Find the most recent version that is NOT the current active one
         # and still exists on disk
         candidates = [
-            e for e in reversed(entries)
+            e
+            for e in reversed(entries)
             if e.get("version_id") != current_active
-            and self._store.version_exists(
-                ticker, model_name, horizon, e["version_id"]
-            )
+            and self._store.version_exists(ticker, model_name, horizon, e["version_id"])
         ]
 
         if not candidates:
@@ -637,7 +660,7 @@ class ModelTrainer:
                 f"No previous version available for rollback "
                 f"({ticker}/{model_name}/{horizon})",
                 detail=f"Current active: {current_active}. "
-                       "Only one version exists or all others have been pruned.",
+                "Only one version exists or all others have been pruned.",
             )
 
         target_version = candidates[0]["version_id"]
@@ -645,13 +668,15 @@ class ModelTrainer:
 
         logger.info(
             "[%s/%s/%s] Rolled back: %s → %s",
-            ticker, model_name, horizon, current_active, target_version,
+            ticker,
+            model_name,
+            horizon,
+            current_active,
+            target_version,
         )
         return target_version
 
-    def list_versions(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> list[dict]:
+    def list_versions(self, ticker: str, model_name: str, horizon: str) -> list[dict]:
         """
         Return full version history from the registry, enriched with
         on-disk existence status.
@@ -692,7 +717,11 @@ class ModelTrainer:
         deleted = self._store.prune(ticker, model_name, horizon, keep_last)
         logger.info(
             "[%s/%s/%s] Pruned %d versions (keep_last=%d)",
-            ticker, model_name, horizon, len(deleted), keep_last,
+            ticker,
+            model_name,
+            horizon,
+            len(deleted),
+            keep_last,
         )
         return deleted
 
@@ -731,7 +760,10 @@ class ModelTrainer:
         if not self._store.version_exists(ticker, model_name, horizon, active_id):
             logger.warning(
                 "[%s/%s/%s] Active version %s missing from disk — retraining.",
-                ticker, model_name, horizon, active_id,
+                ticker,
+                model_name,
+                horizon,
+                active_id,
             )
             return TRIGGER_CORRUPT
 
@@ -743,7 +775,10 @@ class ModelTrainer:
         except Exception as exc:
             logger.warning(
                 "[%s/%s/%s] Artifact corrupt (%s) — will retrain.",
-                ticker, model_name, horizon, exc,
+                ticker,
+                model_name,
+                horizon,
+                exc,
             )
             return TRIGGER_CORRUPT
 
@@ -754,7 +789,11 @@ class ModelTrainer:
             removed = saved_cols - current_cols
             logger.warning(
                 "[%s/%s/%s] Feature mismatch — added=%d removed=%d — retraining.",
-                ticker, model_name, horizon, len(added), len(removed),
+                ticker,
+                model_name,
+                horizon,
+                len(added),
+                len(removed),
             )
             return TRIGGER_MISMATCH
 
@@ -799,7 +838,11 @@ class ModelTrainer:
         self._store.add_registry_entry(ticker, model_name, horizon, entry)
 
         logger.info(
-            "[%s/%s/%s] Version artifact saved: %s", ticker, model_name, horizon, version_id
+            "[%s/%s/%s] Version artifact saved: %s",
+            ticker,
+            model_name,
+            horizon,
+            version_id,
         )
 
     def _write_legacy_meta(
@@ -846,18 +889,25 @@ class ModelTrainer:
         if improvement >= threshold:
             logger.info(
                 "[%s/%s/%s] Auto-promote: new AUC %.4f > current %.4f + threshold %.4f",
-                ticker, model_name, horizon, new_auc, current_auc, threshold,
+                ticker,
+                model_name,
+                horizon,
+                new_auc,
+                current_auc,
+                threshold,
             )
             return True
         logger.info(
             "[%s/%s/%s] No auto-promote: improvement %.4f < threshold %.4f",
-            ticker, model_name, horizon, improvement, threshold,
+            ticker,
+            model_name,
+            horizon,
+            improvement,
+            threshold,
         )
         return False
 
-    def _migrate_legacy(
-        self, ticker: str, model_name: str, horizon: str
-    ) -> None:
+    def _migrate_legacy(self, ticker: str, model_name: str, horizon: str) -> None:
         """Transparently migrate a legacy flat artifact into the versioned layout."""
         legacy_pkl = self._store.legacy_model_path(ticker, model_name, horizon)
         legacy_meta_path = self._store.legacy_meta_path(ticker, model_name, horizon)
@@ -873,7 +923,10 @@ class ModelTrainer:
         except Exception as exc:
             logger.warning(
                 "[%s/%s/%s] Cannot migrate legacy artifact (corrupt): %s",
-                ticker, model_name, horizon, exc,
+                ticker,
+                model_name,
+                horizon,
+                exc,
             )
             return
 
@@ -891,5 +944,8 @@ class ModelTrainer:
         if version_id:
             logger.info(
                 "[%s/%s/%s] Legacy artifact migrated → version %s",
-                ticker, model_name, horizon, version_id,
+                ticker,
+                model_name,
+                horizon,
+                version_id,
             )

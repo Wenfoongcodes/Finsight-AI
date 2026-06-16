@@ -13,8 +13,8 @@ from app.core.formatting import (
 )
 from app.core.logging_config import get_logger
 from app.services.news_recency import (
-    HORIZON_MAX_AGE_DAYS,
     DEFAULT_MAX_AGE_DAYS,
+    HORIZON_MAX_AGE_DAYS,
     NewsRecencyFilter,
 )
 from app.services.ticker_resolver import AssetProfile, resolve_ticker
@@ -208,6 +208,7 @@ _MIN_SNIPPET_WORDS: int = 10
 # ─────────────────────────────────────────────────────────────────────────────
 # DDG timelimit mapping
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _horizon_to_ddg_timelimit(horizon: str) -> str:
     """

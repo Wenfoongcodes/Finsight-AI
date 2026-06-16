@@ -17,7 +17,6 @@ from app.api.v1.endpoints.routes import (
 )
 from app.api.v1.endpoints.streaming import streaming_router
 from app.api.v1.endpoints.versioning import versioning_router
-
 from app.core.exceptions import (
     DataIngestionError,
     FinSightBaseError,

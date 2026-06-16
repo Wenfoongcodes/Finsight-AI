@@ -31,7 +31,7 @@ from app.api.versioning_schemas import (
     VersionEntry,
     VersionHistoryResponse,
 )
-from app.core.exceptions import ModelNotFoundError, ModelTrainingError
+from app.core.exceptions import ModelNotFoundError
 from app.core.logging_config import get_logger
 from app.ml.training.trainer import ModelTrainer
 

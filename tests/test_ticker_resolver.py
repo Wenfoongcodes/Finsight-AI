@@ -6,22 +6,19 @@ in NewsRetriever.
 
 All yfinance.Ticker.info calls are mocked so no network access is required.
 """
+
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
-
+from app.services.news_intelligence import _build_queries
 from app.services.ticker_resolver import (
     AssetProfile,
-    TickerResolver,
-    _strip_ticker_suffix,
     _heuristic_asset_class,
     _resolve_cached,
+    _strip_ticker_suffix,
     resolve_ticker,
 )
-from app.services.news_intelligence import _build_queries
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -221,7 +218,11 @@ class TestBuildQueries:
         queries = _build_queries(profile)
         assert len(queries) == 3
         combined = " ".join(queries).lower()
-        assert "cryptocurrency" in combined or "crypto" in combined or "blockchain" in combined
+        assert (
+            "cryptocurrency" in combined
+            or "crypto" in combined
+            or "blockchain" in combined
+        )
         # The raw ticker suffix must not appear in queries
         assert "btc-usd" not in combined
 
@@ -267,7 +268,9 @@ class TestBuildQueries:
         profile = _make_profile("EURUSD=X", "EUR/USD", "CURRENCY")
         queries = _build_queries(profile)
         combined = " ".join(queries).lower()
-        assert "forex" in combined or "currency" in combined or "exchange rate" in combined
+        assert (
+            "forex" in combined or "currency" in combined or "exchange rate" in combined
+        )
 
     def test_unknown_asset_class_falls_back_to_equity(self):
         """Unknown asset classes should produce valid equity-style queries."""

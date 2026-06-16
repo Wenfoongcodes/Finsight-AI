@@ -7,7 +7,6 @@ from app.api.schemas import (
     AgentResponse,
     BatchPredictionRequest,
     ChatRequest,
-    ChatResponse as ChatResponseSchema,
     IngestRequest,
     IngestResponse,
     LeaderboardEntry,
@@ -21,16 +20,19 @@ from app.api.schemas import (
     TrainRequest,
     TrainResponse,
 )
+from app.api.schemas import (
+    ChatResponse as ChatResponseSchema,
+)
 from app.core.exceptions import (
+    AgentError,
     DataIngestionError,
     DataValidationError,
     InsufficientDataError,
+    LLMError,
     ModelNotFoundError,
     ModelTrainingError,
     PredictionError,
     RAGError,
-    LLMError,
-    AgentError,
 )
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import MIN_ROWS_SUMMARY, get_data_summary, ingest_market_data

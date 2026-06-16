@@ -31,7 +31,6 @@ Design principles
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -43,28 +42,28 @@ logger = get_logger("sector_correlation_features")
 
 # ── GICS sector -> SPDR Select Sector ETF ────────────────────────────────────
 SECTOR_ETF_MAP: dict[str, str] = {
-    "Technology":             "XLK",
-    "Health Care":            "XLV",
-    "Healthcare":             "XLV",          # alternate yfinance spelling
-    "Financials":             "XLF",
-    "Financial Services":     "XLF",          # alternate yfinance spelling
+    "Technology": "XLK",
+    "Health Care": "XLV",
+    "Healthcare": "XLV",  # alternate yfinance spelling
+    "Financials": "XLF",
+    "Financial Services": "XLF",  # alternate yfinance spelling
     "Consumer Discretionary": "XLY",
-    "Consumer Staples":       "XLP",
-    "Energy":                 "XLE",
-    "Industrials":            "XLI",
-    "Materials":              "XLB",
-    "Real Estate":            "XLRE",
-    "Utilities":              "XLU",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Industrials": "XLI",
+    "Materials": "XLB",
+    "Real Estate": "XLRE",
+    "Utilities": "XLU",
     "Communication Services": "XLC",
 }
 
 _SPY = "SPY"
 
 # Minimum rows in price_index before we attempt to build features
-_MIN_ROWS: int = 63          # one quarter -- needed for rolling beta warm-up
+_MIN_ROWS: int = 63  # one quarter -- needed for rolling beta warm-up
 
 # TTL for the in-process sector-lookup cache (seconds)
-_INFO_CACHE_TTL_S: int = 3_600 * 6   # 6 hours
+_INFO_CACHE_TTL_S: int = 3_600 * 6  # 6 hours
 
 # Rolling windows for relative return calculations (trading days)
 _REL_RETURN_WINDOWS: tuple[int, ...] = (5, 21, 63)
@@ -112,8 +111,6 @@ SECTOR_CORRELATION_FEATURE_NAMES: tuple[str, ...] = (
 _SECTOR_CORRELATION_FEATURE_NAMES = SECTOR_CORRELATION_FEATURE_NAMES
 
 
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Sector resolution helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,6 +125,7 @@ def _fetch_yfinance_info_sector(ticker: str) -> str:
     """
     try:
         import yfinance as yf
+
         info = yf.Ticker(ticker).info or {}
         return info.get("sector", "") or ""
     except Exception as exc:
@@ -231,7 +229,7 @@ def _relative_return_features(
     rows: dict[str, pd.Series] = {}
     for w in _REL_RETURN_WINDOWS:
         stock_ret = stock_close.pct_change(w)
-        etf_ret   = etf_close.pct_change(w)
+        etf_ret = etf_close.pct_change(w)
         rows[f"{prefix}_rel_ret_{w}d"] = stock_ret - etf_ret
     return pd.DataFrame(rows, index=stock_close.index)
 
@@ -248,8 +246,8 @@ def _rolling_beta(
     Beta < 1 -> defensive.
     Computed entirely via pandas rolling ops -- O(n), no Python loop.
     """
-    cov  = stock_rets.rolling(window, min_periods=window).cov(market_rets)
-    var  = market_rets.rolling(window, min_periods=window).var().replace(0, np.nan)
+    cov = stock_rets.rolling(window, min_periods=window).cov(market_rets)
+    var = market_rets.rolling(window, min_periods=window).var().replace(0, np.nan)
     beta = cov / var
     beta.name = "market_beta"
     return beta
@@ -275,6 +273,7 @@ def _rolling_corr(
 def _sector_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     """RSI of the sector ETF close price, reusing production compute_rsi."""
     from app.ml.feature_engineering import compute_rsi
+
     return compute_rsi(close, period)
 
 
@@ -294,14 +293,14 @@ def _sector_trend_regime(close: pd.Series) -> pd.DataFrame:
                              (thresholds: +-2% diff between the two SMAs)
     sector_close_vs_sma50  : % deviation of close from SMA-50
     """
-    sma50  = close.rolling(50,  min_periods=50).mean()
+    sma50 = close.rolling(50, min_periods=50).mean()
     sma200 = close.rolling(200, min_periods=200).mean()
 
-    cross    = (sma50 > sma200).astype(int)
+    cross = (sma50 > sma200).astype(int)
     diff_pct = (sma50 - sma200) / sma200.replace(0, np.nan)
 
     regime = pd.Series(0.0, index=close.index)
-    regime[diff_pct >  0.02] =  1.0
+    regime[diff_pct > 0.02] = 1.0
     regime[diff_pct < -0.02] = -1.0
 
     close_vs_sma50 = close / sma50.replace(0, np.nan) - 1.0
@@ -309,8 +308,8 @@ def _sector_trend_regime(close: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "sector_sma50_200_cross": cross,
-            "sector_trend_regime":    regime,
-            "sector_close_vs_sma50":  close_vs_sma50,
+            "sector_trend_regime": regime,
+            "sector_close_vs_sma50": close_vs_sma50,
         },
         index=close.index,
     )
@@ -330,15 +329,15 @@ def _market_breadth_proxy(spy_close: pd.Series) -> pd.DataFrame:
     market_above_sma200     : 1 if SPY > SMA200, else 0
     market_spy_momentum_21d : 21-day SPY price momentum
     """
-    sma200    = spy_close.rolling(200, min_periods=200).mean()
+    sma200 = spy_close.rolling(200, min_periods=200).mean()
     vs_sma200 = spy_close / sma200.replace(0, np.nan) - 1.0
-    above     = (spy_close > sma200).astype(int)
-    mom21     = spy_close.pct_change(21)
+    above = (spy_close > sma200).astype(int)
+    mom21 = spy_close.pct_change(21)
 
     return pd.DataFrame(
         {
-            "market_spy_vs_sma200":    vs_sma200,
-            "market_above_sma200":     above,
+            "market_spy_vs_sma200": vs_sma200,
+            "market_above_sma200": above,
             "market_spy_momentum_21d": mom21,
         },
         index=spy_close.index,
@@ -352,8 +351,8 @@ def _market_breadth_proxy(spy_close: pd.Series) -> pd.DataFrame:
 
 # Function aliases — used by test_sector_correlation_features.py imports.
 # Both names point to the same function object (zero overhead).
-_rolling_beta_feature        = _rolling_beta   # noqa: E221
-_rolling_correlation_feature = _rolling_corr   # noqa: E221
+_rolling_beta_feature = _rolling_beta  # noqa: E221
+_rolling_correlation_feature = _rolling_corr  # noqa: E221
 
 
 class SectorCorrelationFeatureEngineer:
@@ -385,7 +384,7 @@ class SectorCorrelationFeatureEngineer:
         period_years: int = 5,
         include_market: bool = True,
     ) -> None:
-        self.period_years  = period_years
+        self.period_years = period_years
         self.include_market = include_market
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -421,7 +420,9 @@ class SectorCorrelationFeatureEngineer:
             logger.warning(
                 "[%s] Price index too short (%d rows < %d) -- "
                 "returning empty DataFrame.",
-                ticker, len(price_index), _MIN_ROWS,
+                ticker,
+                len(price_index),
+                _MIN_ROWS,
             )
             return pd.DataFrame(index=price_index)
 
@@ -433,7 +434,9 @@ class SectorCorrelationFeatureEngineer:
         # ── 2. Fetch ETF closes (both via ingest_market_data cache) ───────────
         # period_years is passed as a keyword argument so that test mocks using
         # lambda (etf, idx, **kw) can absorb it without a positional-arg error.
-        sector_close = _fetch_etf_close(sector_etf, price_index, period_years=self.period_years)
+        sector_close = _fetch_etf_close(
+            sector_etf, price_index, period_years=self.period_years
+        )
         market_close = (
             _fetch_etf_close(_SPY, price_index, period_years=self.period_years)
             if self.include_market
@@ -444,7 +447,7 @@ class SectorCorrelationFeatureEngineer:
         stock_close_aln = stock_close.reindex(price_index, method="ffill")
 
         # ── 3. Log-return series ──────────────────────────────────────────────
-        stock_rets  = _log_returns(stock_close_aln)
+        stock_rets = _log_returns(stock_close_aln)
         sector_rets = _log_returns(sector_close)
         market_rets = _log_returns(market_close)
 
@@ -488,8 +491,8 @@ class SectorCorrelationFeatureEngineer:
                 frames.append(
                     pd.DataFrame(
                         {
-                            "sector_rsi_14":       _sector_rsi(sector_close),
-                            "sector_momentum_5d":  _sector_momentum(sector_close, 5),
+                            "sector_rsi_14": _sector_rsi(sector_close),
+                            "sector_momentum_5d": _sector_momentum(sector_close, 5),
                             "sector_momentum_21d": _sector_momentum(sector_close, 21),
                         },
                         index=price_index,

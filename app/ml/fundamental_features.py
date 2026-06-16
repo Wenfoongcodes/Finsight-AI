@@ -30,7 +30,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from functools import lru_cache
 from typing import Optional
 
 import numpy as np
@@ -42,25 +41,25 @@ logger = get_logger("fundamental_features")
 
 # ── Macro tickers available via yfinance ─────────────────────────────────────
 _VIX_TICKER = "^VIX"
-_TNX_TICKER = "^TNX"   # 10-year US Treasury yield
-_IRX_TICKER = "^IRX"   # 13-week Treasury bill (proxy for 2-year)
+_TNX_TICKER = "^TNX"  # 10-year US Treasury yield
+_IRX_TICKER = "^IRX"  # 13-week Treasury bill (proxy for 2-year)
 
 # ── Sector ETF universe for relative-performance calculation ─────────────────
 # Maps GICS sector name → liquid ETF ticker
 SECTOR_ETFS: dict[str, str] = {
-    "Technology":            "XLK",
-    "Health Care":           "XLV",
-    "Financials":            "XLF",
-    "Consumer Discretionary":"XLY",
-    "Consumer Staples":      "XLP",
-    "Energy":                "XLE",
-    "Utilities":             "XLU",
-    "Industrials":           "XLI",
-    "Materials":             "XLB",
-    "Real Estate":           "XLRE",
-    "Communication Services":"XLC",
+    "Technology": "XLK",
+    "Health Care": "XLV",
+    "Financials": "XLF",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Utilities": "XLU",
+    "Industrials": "XLI",
+    "Materials": "XLB",
+    "Real Estate": "XLRE",
+    "Communication Services": "XLC",
 }
-_SPY_TICKER = "SPY"   # Broad market benchmark
+_SPY_TICKER = "SPY"  # Broad market benchmark
 
 # ── yfinance info keys we harvest ─────────────────────────────────────────────
 _INFO_KEYS: list[str] = [
@@ -114,6 +113,7 @@ def _get_yf_info(ticker: str) -> dict:
 
     try:
         import yfinance as yf
+
         info = yf.Ticker(ticker).info or {}
         _INFO_CACHE[ticker] = (now, info)
         return info
@@ -148,6 +148,7 @@ def _fetch_earnings_surprise(ticker: str) -> pd.DataFrame:
     """
     try:
         import yfinance as yf
+
         tkr = yf.Ticker(ticker)
 
         # yfinance >= 0.2.x exposes earnings_history
@@ -213,10 +214,8 @@ def _fetch_macro_series(
     """
     try:
         import yfinance as yf
-        df = yf.download(
-            ticker, start=start, end=end,
-            auto_adjust=True, progress=False
-        )
+
+        df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
         if df.empty:
             return pd.Series(dtype=float)
         if isinstance(df.columns, pd.MultiIndex):
@@ -229,9 +228,7 @@ def _fetch_macro_series(
         return pd.Series(dtype=float)
 
 
-def _fetch_sector_etf(
-    ticker: str, start: str, end: str
-) -> pd.Series:
+def _fetch_sector_etf(ticker: str, start: str, end: str) -> pd.Series:
     """Return the daily Close price series for a sector ETF."""
     return _fetch_macro_series(ticker, start, end, column="Close")
 
@@ -249,8 +246,11 @@ class FundamentalSnapshot:
     All values represent the most recently available quarterly data.
     NaN indicates the metric is unavailable for this ticker.
     """
+
     ticker: str
-    fetched_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    fetched_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     sector: str = ""
     industry: str = ""
 
@@ -259,7 +259,7 @@ class FundamentalSnapshot:
     forward_pe: float = np.nan
     price_to_book: float = np.nan
     ev_to_ebitda: float = np.nan
-    pe_premium: float = np.nan        # forward_pe / trailing_pe − 1
+    pe_premium: float = np.nan  # forward_pe / trailing_pe − 1
 
     # ── Profitability ─────────────────────────────────────────────────────────
     profit_margin: float = np.nan
@@ -272,8 +272,8 @@ class FundamentalSnapshot:
     # ── Financial health ──────────────────────────────────────────────────────
     debt_to_equity: float = np.nan
     current_ratio: float = np.nan
-    free_cash_flow: float = np.nan     # raw, in millions
-    fcf_yield: float = np.nan          # FCF / market cap
+    free_cash_flow: float = np.nan  # raw, in millions
+    fcf_yield: float = np.nan  # FCF / market cap
 
     # ── Market sentiment ──────────────────────────────────────────────────────
     institutional_ownership_pct: float = np.nan
@@ -344,16 +344,15 @@ class FundamentalFeatureEngineer:
             logger.warning(
                 "[%s] Price index too short (%d rows) for fundamental build — "
                 "returning empty DataFrame.",
-                ticker, len(price_index),
+                ticker,
+                len(price_index),
             )
             return pd.DataFrame(index=price_index)
 
         start = str(price_index.min().date())
         end = str(price_index.max().date())
 
-        logger.info(
-            "[%s] Building fundamental features (%s → %s)", ticker, start, end
-        )
+        logger.info("[%s] Building fundamental features (%s → %s)", ticker, start, end)
 
         frames: list[pd.DataFrame] = []
 
@@ -371,9 +370,7 @@ class FundamentalFeatureEngineer:
                 if not surprise_df.empty:
                     frames.append(surprise_df)
             except Exception as exc:
-                logger.warning(
-                    "[%s] Earnings surprise build failed: %s", ticker, exc
-                )
+                logger.warning("[%s] Earnings surprise build failed: %s", ticker, exc)
 
         # ── 3. Macroeconomic features (VIX, yield curve, sector ETF) ─────────
         if self.include_macro:
@@ -384,9 +381,7 @@ class FundamentalFeatureEngineer:
                 if not macro_df.empty:
                     frames.append(macro_df)
             except Exception as exc:
-                logger.warning(
-                    "[%s] Macro feature build failed: %s", ticker, exc
-                )
+                logger.warning("[%s] Macro feature build failed: %s", ticker, exc)
 
         if not frames:
             return pd.DataFrame(index=price_index)
@@ -399,7 +394,9 @@ class FundamentalFeatureEngineer:
 
         logger.info(
             "[%s] Fundamental feature matrix: %d features × %d rows",
-            ticker, result.shape[1], result.shape[0],
+            ticker,
+            result.shape[1],
+            result.shape[0],
         )
         return result
 
@@ -423,9 +420,13 @@ class FundamentalFeatureEngineer:
         snap.ev_to_ebitda = _safe_float(info.get("enterpriseToEbitda"))
 
         # PE premium: forward vs trailing — positive means market expects growth
-        if np.isfinite(snap.forward_pe) and np.isfinite(snap.trailing_pe) and snap.trailing_pe != 0:
+        if (
+            np.isfinite(snap.forward_pe)
+            and np.isfinite(snap.trailing_pe)
+            and snap.trailing_pe != 0
+        ):
             snap.pe_premium = snap.forward_pe / snap.trailing_pe - 1.0
-        
+
         snap.profit_margin = _safe_float(info.get("profitMargins"))
         snap.operating_margin = _safe_float(info.get("operatingMargins"))
         snap.revenue_growth = _safe_float(info.get("revenueGrowth"))
@@ -440,7 +441,9 @@ class FundamentalFeatureEngineer:
         if np.isfinite(fcf_raw) and np.isfinite(market_cap) and market_cap > 0:
             snap.fcf_yield = fcf_raw / market_cap
 
-        snap.institutional_ownership_pct = _safe_float(info.get("institutionPercentHeld"))
+        snap.institutional_ownership_pct = _safe_float(
+            info.get("institutionPercentHeld")
+        )
         snap.short_interest_ratio = _safe_float(info.get("shortPercentOfFloat"))
 
         logger.debug(
@@ -465,20 +468,20 @@ class FundamentalFeatureEngineer:
         + ffill, all dates will carry the same value (last-known-value fill).
         """
         row = {
-            "fund_trailing_pe":           snap.trailing_pe,
-            "fund_forward_pe":            snap.forward_pe,
-            "fund_price_to_book":         snap.price_to_book,
-            "fund_ev_to_ebitda":          snap.ev_to_ebitda,
-            "fund_pe_premium":            snap.pe_premium,
-            "fund_profit_margin":         snap.profit_margin,
-            "fund_operating_margin":      snap.operating_margin,
-            "fund_revenue_growth":        snap.revenue_growth,
-            "fund_earnings_growth":       snap.earnings_growth,
-            "fund_debt_to_equity":        snap.debt_to_equity,
-            "fund_current_ratio":         snap.current_ratio,
-            "fund_fcf_yield":             snap.fcf_yield,
-            "fund_institutional_pct":     snap.institutional_ownership_pct,
-            "fund_short_interest_ratio":  snap.short_interest_ratio,
+            "fund_trailing_pe": snap.trailing_pe,
+            "fund_forward_pe": snap.forward_pe,
+            "fund_price_to_book": snap.price_to_book,
+            "fund_ev_to_ebitda": snap.ev_to_ebitda,
+            "fund_pe_premium": snap.pe_premium,
+            "fund_profit_margin": snap.profit_margin,
+            "fund_operating_margin": snap.operating_margin,
+            "fund_revenue_growth": snap.revenue_growth,
+            "fund_earnings_growth": snap.earnings_growth,
+            "fund_debt_to_equity": snap.debt_to_equity,
+            "fund_current_ratio": snap.current_ratio,
+            "fund_fcf_yield": snap.fcf_yield,
+            "fund_institutional_pct": snap.institutional_ownership_pct,
+            "fund_short_interest_ratio": snap.short_interest_ratio,
         }
         anchor_date = price_index.min()
         df = pd.DataFrame([row], index=pd.DatetimeIndex([anchor_date]))
@@ -550,14 +553,16 @@ class FundamentalFeatureEngineer:
             vix_aligned = vix.reindex(price_index, method="ffill")
             df["macro_vix"] = vix_aligned
             vix_roll_mean = vix_aligned.rolling(20, min_periods=5).mean()
-            vix_roll_std = vix_aligned.rolling(20, min_periods=5).std().replace(0, np.nan)
+            vix_roll_std = (
+                vix_aligned.rolling(20, min_periods=5).std().replace(0, np.nan)
+            )
             df["macro_vix_zscore_20"] = (vix_aligned - vix_roll_mean) / vix_roll_std
             df["macro_high_vix"] = (vix_aligned > 25).astype(int)
             logger.debug("[%s] VIX: %d data points", ticker, vix.notna().sum())
 
         # ── Yield curve slope ────────────────────────────────────────────────
-        tnx = _fetch_macro_series(_TNX_TICKER, start, end)   # 10yr yield
-        irx = _fetch_macro_series(_IRX_TICKER, start, end)   # short-term proxy
+        tnx = _fetch_macro_series(_TNX_TICKER, start, end)  # 10yr yield
+        irx = _fetch_macro_series(_IRX_TICKER, start, end)  # short-term proxy
 
         if not tnx.empty and not irx.empty:
             tnx_a = tnx.reindex(price_index, method="ffill")
@@ -578,31 +583,31 @@ class FundamentalFeatureEngineer:
                 spy_prices = _fetch_sector_etf(_SPY_TICKER, start, end)
 
                 if not sector_prices.empty and not spy_prices.empty:
-                    sector_ret = (
-                        sector_prices.reindex(price_index, method="ffill")
-                        .pct_change(self.sector_etf_lookback_days)
-                    )
-                    spy_ret = (
-                        spy_prices.reindex(price_index, method="ffill")
-                        .pct_change(self.sector_etf_lookback_days)
-                    )
+                    sector_ret = sector_prices.reindex(
+                        price_index, method="ffill"
+                    ).pct_change(self.sector_etf_lookback_days)
+                    spy_ret = spy_prices.reindex(
+                        price_index, method="ffill"
+                    ).pct_change(self.sector_etf_lookback_days)
                     df["macro_sector_rel_perf"] = sector_ret - spy_ret
-                    df["macro_sector_outperforming"] = (
-                        (sector_ret > spy_ret).astype(int)
+                    df["macro_sector_outperforming"] = (sector_ret > spy_ret).astype(
+                        int
                     )
                     logger.debug(
                         "[%s] Sector ETF (%s) vs SPY: %d data points",
-                        ticker, sector_etf_ticker, sector_prices.notna().sum(),
+                        ticker,
+                        sector_etf_ticker,
+                        sector_prices.notna().sum(),
                     )
             except Exception as exc:
                 logger.debug(
                     "[%s] Sector ETF feature failed (%s): %s",
-                    ticker, sector_etf_ticker, exc,
+                    ticker,
+                    sector_etf_ticker,
+                    exc,
                 )
         else:
-            logger.debug(
-                "[%s] No sector ETF mapping for sector=%r", ticker, sector
-            )
+            logger.debug("[%s] No sector ETF mapping for sector=%r", ticker, sector)
 
         return df
 
@@ -701,7 +706,7 @@ def add_sector_relative_features(
             continue
         info = _get_yf_info(peer.upper())
         key_map = {
-            "fund_trailing_pe":  "trailingPE",
+            "fund_trailing_pe": "trailingPE",
             "fund_price_to_book": "priceToBook",
             "fund_ev_to_ebitda": "enterpriseToEbitda",
             "fund_profit_margin": "profitMargins",
@@ -728,6 +733,7 @@ def add_sector_relative_features(
 
     logger.info(
         "[%s] Sector-relative Z-scores computed from %d peers",
-        ticker, len(sector_peers),
+        ticker,
+        len(sector_peers),
     )
     return df

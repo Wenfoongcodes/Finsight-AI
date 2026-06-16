@@ -16,15 +16,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.ml.feature_engineering import FeatureEngineer
 from app.ml.fundamental_features import (
+    _FUNDAMENTAL_FEATURE_NAMES,
     FundamentalFeatureEngineer,
     FundamentalSnapshot,
-    _FUNDAMENTAL_FEATURE_NAMES,
     _safe_float,
     add_sector_relative_features,
 )
-from app.ml.feature_engineering import FeatureEngineer
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -128,7 +127,9 @@ class TestFundamentalSnapshot:
 
 class TestFetchSnapshot:
     def test_parses_known_info_keys(self, mock_info, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             snap = eng._fetch_snapshot("AAPL")
 
@@ -140,7 +141,9 @@ class TestFetchSnapshot:
         assert snap.sector == "Technology"
 
     def test_pe_premium_computed(self, mock_info):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             snap = eng._fetch_snapshot("AAPL")
         # forward_pe / trailing_pe - 1 = 24.0 / 28.5 - 1
@@ -148,14 +151,18 @@ class TestFetchSnapshot:
         assert snap.pe_premium == pytest.approx(expected, rel=1e-4)
 
     def test_fcf_yield_computed(self, mock_info):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             snap = eng._fetch_snapshot("AAPL")
         expected = 105_000_000_000.0 / 3_000_000_000_000.0
         assert snap.fcf_yield == pytest.approx(expected, rel=1e-4)
 
     def test_handles_missing_keys_gracefully(self):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value={}):
             snap = eng._fetch_snapshot("UNKNOWN")
         assert np.isnan(snap.trailing_pe)
@@ -163,7 +170,9 @@ class TestFetchSnapshot:
         assert snap.sector == ""
 
     def test_handles_yfinance_failure(self):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        _eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch(
             "app.ml.fundamental_features._get_yf_info",
             side_effect=Exception("network error"),
@@ -180,7 +189,9 @@ class TestFetchSnapshot:
 
 class TestBuild:
     def test_returns_dataframe_with_price_index(self, mock_info, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             result = eng.build("AAPL", price_index)
 
@@ -189,19 +200,26 @@ class TestBuild:
         assert result.index.equals(price_index)
 
     def test_contains_expected_valuation_columns(self, mock_info, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             result = eng.build("AAPL", price_index)
 
         for col in [
-            "fund_trailing_pe", "fund_forward_pe", "fund_price_to_book",
-            "fund_ev_to_ebitda", "fund_pe_premium",
+            "fund_trailing_pe",
+            "fund_forward_pe",
+            "fund_price_to_book",
+            "fund_ev_to_ebitda",
+            "fund_pe_premium",
         ]:
             assert col in result.columns, f"Missing column: {col}"
 
     def test_static_values_are_forward_filled(self, mock_info, price_index):
         """Snapshot value should be the same on every row (forward-filled)."""
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             result = eng.build("AAPL", price_index)
 
@@ -213,13 +231,17 @@ class TestBuild:
 
     def test_no_rows_dropped(self, mock_info, price_index):
         """build() must not drop rows — that is the caller's responsibility."""
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         with patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info):
             result = eng.build("AAPL", price_index)
         assert len(result) == len(price_index)
 
     def test_returns_empty_df_for_short_index(self):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=False
+        )
         tiny_index = pd.bdate_range(end="2026-01-10", periods=5)
         with patch("app.ml.fundamental_features._get_yf_info", return_value={}):
             result = eng.build("TEST", tiny_index)
@@ -233,7 +255,9 @@ class TestBuild:
 
 class TestMacroFeatures:
     def test_macro_vix_column_present(self, mock_info, mock_vix_series, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=True, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=True, include_earnings_surprise=False
+        )
 
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
@@ -252,7 +276,9 @@ class TestMacroFeatures:
         assert result["macro_vix"].notna().any()
 
     def test_vix_zscore_is_computed(self, mock_info, mock_vix_series, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=True, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=True, include_earnings_surprise=False
+        )
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
             patch(
@@ -272,7 +298,9 @@ class TestMacroFeatures:
 
     def test_macro_fails_gracefully_when_vix_unavailable(self, mock_info, price_index):
         """Macro build failure must not propagate — falls back silently."""
-        eng = FundamentalFeatureEngineer(include_macro=True, include_earnings_surprise=False)
+        eng = FundamentalFeatureEngineer(
+            include_macro=True, include_earnings_surprise=False
+        )
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
             patch(
@@ -289,10 +317,10 @@ class TestMacroFeatures:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == len(price_index)
 
-    def test_yield_curve_slope_column(
-        self, mock_info, mock_yield_series, price_index
-    ):
-        eng = FundamentalFeatureEngineer(include_macro=True, include_earnings_surprise=False)
+    def test_yield_curve_slope_column(self, mock_info, mock_yield_series, price_index):
+        eng = FundamentalFeatureEngineer(
+            include_macro=True, include_earnings_surprise=False
+        )
 
         def _mock_macro(ticker, *a, **kw):
             return mock_yield_series
@@ -325,18 +353,28 @@ class TestEarningsSurprise:
     def _make_surprise_df(self, price_index) -> pd.DataFrame:
         """Synthetic quarterly earnings data aligned to price_index."""
         # Pick 4 announcement dates spread across the index
-        dates = pd.DatetimeIndex([
-            price_index[50], price_index[175], price_index[300], price_index[425],
-        ])
-        return pd.DataFrame({
-            "actual_eps": [2.10, 1.98, 2.25, 2.40],
-            "estimated_eps": [2.00, 2.05, 2.15, 2.30],
-            "surprise_pct": [0.05, -0.034, 0.047, 0.043],
-        }, index=dates)
+        dates = pd.DatetimeIndex(
+            [
+                price_index[50],
+                price_index[175],
+                price_index[300],
+                price_index[425],
+            ]
+        )
+        return pd.DataFrame(
+            {
+                "actual_eps": [2.10, 1.98, 2.25, 2.40],
+                "estimated_eps": [2.00, 2.05, 2.15, 2.30],
+                "surprise_pct": [0.05, -0.034, 0.047, 0.043],
+            },
+            index=dates,
+        )
 
     def test_earnings_surprise_column_present(self, mock_info, price_index):
         surprise_df = self._make_surprise_df(price_index)
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=True)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=True
+        )
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
             patch(
@@ -350,7 +388,9 @@ class TestEarningsSurprise:
 
     def test_positive_surprise_propagates_forward(self, mock_info, price_index):
         surprise_df = self._make_surprise_df(price_index)
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=True)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=True
+        )
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
             patch(
@@ -366,7 +406,9 @@ class TestEarningsSurprise:
             assert after_first.notna().any()
 
     def test_handles_empty_earnings_history(self, mock_info, price_index):
-        eng = FundamentalFeatureEngineer(include_macro=False, include_earnings_surprise=True)
+        eng = FundamentalFeatureEngineer(
+            include_macro=False, include_earnings_surprise=True
+        )
         with (
             patch("app.ml.fundamental_features._get_yf_info", return_value=mock_info),
             patch(
@@ -396,9 +438,24 @@ class TestSectorRelativeFeatures:
     def test_adds_zscore_columns(self, price_index):
         df = self._make_fund_df(price_index)
         peer_infos = {
-            "MSFT": {"trailingPE": 35.0, "priceToBook": 12.0, "enterpriseToEbitda": 25.0, "profitMargins": 0.35},
-            "GOOGL": {"trailingPE": 22.0, "priceToBook": 6.0, "enterpriseToEbitda": 18.0, "profitMargins": 0.24},
-            "META": {"trailingPE": 26.0, "priceToBook": 8.0, "enterpriseToEbitda": 20.0, "profitMargins": 0.33},
+            "MSFT": {
+                "trailingPE": 35.0,
+                "priceToBook": 12.0,
+                "enterpriseToEbitda": 25.0,
+                "profitMargins": 0.35,
+            },
+            "GOOGL": {
+                "trailingPE": 22.0,
+                "priceToBook": 6.0,
+                "enterpriseToEbitda": 18.0,
+                "profitMargins": 0.24,
+            },
+            "META": {
+                "trailingPE": 26.0,
+                "priceToBook": 8.0,
+                "enterpriseToEbitda": 20.0,
+                "profitMargins": 0.33,
+            },
         }
 
         def _mock_info(ticker):
@@ -415,9 +472,24 @@ class TestSectorRelativeFeatures:
     def test_zscore_is_numeric(self, price_index):
         df = self._make_fund_df(price_index)
         peer_infos = {
-            "PEER1": {"trailingPE": 30.0, "priceToBook": 10.0, "enterpriseToEbitda": 20.0, "profitMargins": 0.20},
-            "PEER2": {"trailingPE": 20.0, "priceToBook": 8.0, "enterpriseToEbitda": 16.0, "profitMargins": 0.18},
-            "PEER3": {"trailingPE": 25.0, "priceToBook": 9.0, "enterpriseToEbitda": 18.0, "profitMargins": 0.22},
+            "PEER1": {
+                "trailingPE": 30.0,
+                "priceToBook": 10.0,
+                "enterpriseToEbitda": 20.0,
+                "profitMargins": 0.20,
+            },
+            "PEER2": {
+                "trailingPE": 20.0,
+                "priceToBook": 8.0,
+                "enterpriseToEbitda": 16.0,
+                "profitMargins": 0.18,
+            },
+            "PEER3": {
+                "trailingPE": 25.0,
+                "priceToBook": 9.0,
+                "enterpriseToEbitda": 18.0,
+                "profitMargins": 0.22,
+            },
         }
 
         def _mock_info(ticker):
@@ -454,21 +526,26 @@ class TestFeatureEngineerFundamentalIntegration:
 
     def _make_fundamental_df(self, index: pd.DatetimeIndex) -> pd.DataFrame:
         """Return a synthetic fundamental feature DataFrame."""
-        return pd.DataFrame({
-            "fund_trailing_pe": 28.5,
-            "fund_forward_pe": 24.0,
-            "fund_price_to_book": 45.2,
-            "fund_profit_margin": 0.253,
-            "macro_vix": np.random.uniform(15, 25, len(index)),
-            "macro_yield_curve_slope": np.random.uniform(-0.5, 1.5, len(index)),
-        }, index=index)
+        return pd.DataFrame(
+            {
+                "fund_trailing_pe": 28.5,
+                "fund_forward_pe": 24.0,
+                "fund_price_to_book": 45.2,
+                "fund_profit_margin": 0.253,
+                "macro_vix": np.random.uniform(15, 25, len(index)),
+                "macro_yield_curve_slope": np.random.uniform(-0.5, 1.5, len(index)),
+            },
+            index=index,
+        )
 
     def test_include_fundamentals_false_does_not_call_engineer(self, sample_ohlcv):
         """Default behaviour: no fundamental fetches."""
         eng = FeatureEngineer(include_fundamentals=False)
         # Just check it runs without error and produces the standard output
         df = eng.build_features(sample_ohlcv)
-        fund_cols = [c for c in df.columns if c.startswith("fund_") or c.startswith("macro_")]
+        fund_cols = [
+            c for c in df.columns if c.startswith("fund_") or c.startswith("macro_")
+        ]
         assert len(fund_cols) == 0
 
     def test_include_fundamentals_true_merges_columns(self, sample_ohlcv):

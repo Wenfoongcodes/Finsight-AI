@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
@@ -33,8 +33,18 @@ logger = get_logger("ticker_resolver")
 # ── Suffixes stripped when falling back to ticker-derived names ───────────────
 # These are yfinance / exchange conventions that are never used by publishers.
 _STRIP_SUFFIXES: tuple[str, ...] = (
-    "-USD", "-USDT", "-EUR", "-GBP", "-BTC",
-    "-PERP", "-SWAP", ".NS", ".BO", ".L", ".TO", ".AX",
+    "-USD",
+    "-USDT",
+    "-EUR",
+    "-GBP",
+    "-BTC",
+    "-PERP",
+    "-SWAP",
+    ".NS",
+    ".BO",
+    ".L",
+    ".TO",
+    ".AX",
 )
 
 # ── Currency-pair pattern: anything ending in a 3-letter fiat/crypto suffix ──
@@ -46,13 +56,13 @@ _CRYPTO_PAIR_RE = re.compile(
 # ── Known quoteType → asset class normalization ───────────────────────────────
 _QUOTE_TYPE_MAP: dict[str, str] = {
     "CRYPTOCURRENCY": "CRYPTOCURRENCY",
-    "EQUITY":        "EQUITY",
-    "ETF":           "ETF",
-    "MUTUALFUND":    "MUTUALFUND",
-    "INDEX":         "INDEX",
-    "FUTURE":        "FUTURE",
-    "CURRENCY":      "CURRENCY",
-    "OPTION":        "OPTION",
+    "EQUITY": "EQUITY",
+    "ETF": "ETF",
+    "MUTUALFUND": "MUTUALFUND",
+    "INDEX": "INDEX",
+    "FUTURE": "FUTURE",
+    "CURRENCY": "CURRENCY",
+    "OPTION": "OPTION",
 }
 
 _resolver_lock = threading.Lock()
@@ -176,10 +186,7 @@ def _resolve_cached(ticker: str) -> AssetProfile:
     info = _fetch_yfinance_info(ticker)
 
     # ── Display name ──────────────────────────────────────────────────────────
-    display_name: Optional[str] = (
-        info.get("shortName")
-        or info.get("longName")
-    )
+    display_name: Optional[str] = info.get("shortName") or info.get("longName")
     source = "yfinance"
 
     if not display_name or not display_name.strip():

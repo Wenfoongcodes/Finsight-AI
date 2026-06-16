@@ -484,8 +484,8 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
         (
             "returns (bool, int) tuple",
             lambda: (
-                lambda l: (
-                    isinstance(l.is_allowed("t"), tuple) and len(l.is_allowed("t")) == 2
+                lambda limiter: (
+                    isinstance(limiter.is_allowed("t"), tuple) and len(limiter.is_allowed("t")) == 2
                 )
             )(_Lim(5, 60)),
         ),
@@ -496,21 +496,21 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
         (
             "blocks at max + 1",
             lambda: (
-                lambda l: (
-                    [l.is_allowed("ip") for _ in range(5)] and not l.is_allowed("ip")[0]
+                lambda limiter: (
+                    [limiter.is_allowed("ip") for _ in range(5)] and not limiter.is_allowed("ip")[0]
                 )
             )(_Lim(5, 60)),
         ),
         (
             "remaining decrements correctly",
-            lambda: (lambda l: l.is_allowed("ip")[1] > l.is_allowed("ip")[1])(
+            lambda: (lambda limiter: limiter.is_allowed("ip")[1] > limiter.is_allowed("ip")[1])(
                 _Lim(10, 60)
             ),
         ),
         (
             "independent IPs do not share buckets",
             lambda: (
-                lambda l: [l.is_allowed("x") for _ in range(6)] and l.is_allowed("y")[0]
+                lambda limiter: [limiter.is_allowed("x") for _ in range(6)] and limiter.is_allowed("y")[0]
             )(_Lim(5, 60)),
         ),
         ("window expiry resets bucket", lambda: _check_expiry(_Lim(3, 1))),
@@ -792,9 +792,9 @@ def layer4_startup_health(api_url: str) -> LayerResult:
     _banner("Layer 4 — API startup + /health endpoint")
     result = LayerResult("Startup & /health")
 
-    import urllib.request
-    import urllib.error
     import json
+    import urllib.error
+    import urllib.request
 
     url = f"{api_url.rstrip('/')}/health"
     try:
@@ -835,8 +835,8 @@ def layer5_e2e_429(api_url: str, max_requests: int) -> LayerResult:
     _banner("Layer 5 — End-to-end rate limit enforcement (HTTP 429)")
     result = LayerResult("E2E HTTP 429")
 
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     # Use /api/v1/train/ (POST, non-exempt, returns 422 fast without a model)
     # as a fallback if market/summary is slow. The rate limiter fires BEFORE
@@ -1063,8 +1063,8 @@ def layer7_fail_open(
 
 def _print_summary(layers: list[LayerResult]) -> int:
     _banner("Verification summary")
-    passed = sum(1 for l in layers if l.passed and not l.skipped)
-    skipped = sum(1 for l in layers if l.skipped)
+    passed = sum(1 for layer in layers if layer.passed and not layer.skipped)
+    skipped = sum(1 for layer in layers if layer.skipped)
     failed = len(layers) - passed - skipped
 
     for layer in layers:

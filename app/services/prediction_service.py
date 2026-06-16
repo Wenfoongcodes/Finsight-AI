@@ -13,14 +13,14 @@ from app.core.formatting import (
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import ingest_market_data
 from app.ml.explainability import SHAPExplainer
-from app.ml.feature_engineering import FeatureEngineer, FeatureSelector, HORIZONS
+from app.ml.feature_engineering import HORIZONS, FeatureEngineer, FeatureSelector
 from app.ml.training.trainer import ModelTrainer
 from app.services.model_selector import (
-    ModelSelector,
     ALL_TRAINING_MODELS,
-    REASON_NO_ARTIFACTS,
     REASON_BELOW_THRESHOLD,
     REASON_LEADERBOARD,
+    REASON_NO_ARTIFACTS,
+    ModelSelector,
 )
 from app.services.signal_fusion import FusedSignal, SignalFusionService
 from configs.settings import settings

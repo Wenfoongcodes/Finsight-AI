@@ -5,7 +5,9 @@
 # they should be merged into app/api/schemas.py alongside the existing classes.
 
 from __future__ import annotations
+
 from typing import Any, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -84,7 +86,9 @@ class PruneVersionsRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=10)
     model_name: str
     horizon: str
-    keep_last: int = Field(default=5, ge=1, le=50, description="Number of versions to keep")
+    keep_last: int = Field(
+        default=5, ge=1, le=50, description="Number of versions to keep"
+    )
 
 
 class PruneVersionsResponse(BaseModel):

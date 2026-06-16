@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,19 +204,22 @@ class CacheCleanup:
         """Lazily load settings and return the four target directories."""
         try:
             from configs.settings import settings as s
-            raw        = self._raw_dir        or s.RAW_DATA_DIR
-            models     = self._models_dir     or s.MODELS_DIR
+
+            raw = self._raw_dir or s.RAW_DATA_DIR
+            models = self._models_dir or s.MODELS_DIR
             embeddings = self._embeddings_dir or s.EMBEDDINGS_DIR
-            logs       = self._logs_dir       or s.LOGS_DIR
+            logs = self._logs_dir or s.LOGS_DIR
             # Also read CACHE_MAX_AGE_DAYS from settings if caller didn't override
             if self.raw_max_age_days == _DEFAULT_RAW_MAX_AGE_DAYS:
-                self.raw_max_age_days = getattr(s, "CACHE_MAX_AGE_DAYS", _DEFAULT_RAW_MAX_AGE_DAYS)
+                self.raw_max_age_days = getattr(
+                    s, "CACHE_MAX_AGE_DAYS", _DEFAULT_RAW_MAX_AGE_DAYS
+                )
             vector_db_base = getattr(s, "VECTOR_DB_PATH", None)
         except Exception:
-            raw        = self._raw_dir        or Path("data/raw")
-            models     = self._models_dir     or Path("data/models")
+            raw = self._raw_dir or Path("data/raw")
+            models = self._models_dir or Path("data/models")
             embeddings = self._embeddings_dir or Path("data/embeddings")
-            logs       = self._logs_dir       or Path("logs")
+            logs = self._logs_dir or Path("logs")
             vector_db_base = None
         return (
             Path(raw),
@@ -245,7 +247,11 @@ class CacheCleanup:
         logger.info(
             "CacheCleanup.run() started [dry_run=%s]  "
             "raw=%s  models=%s  embeddings=%s  logs=%s",
-            self.dry_run, raw_dir, models_dir, embeddings_dir, logs_dir,
+            self.dry_run,
+            raw_dir,
+            models_dir,
+            embeddings_dir,
+            logs_dir,
         )
 
         self._clean_raw(raw_dir, report)
@@ -350,19 +356,19 @@ class CacheCleanup:
             # {TICKER}_{model}_{horizon}.pkl  or  {TICKER}_{model}_{horizon}_meta.json
             stem = path.stem  # e.g. "AAPL_xgboost_1d" or "AAPL_xgboost_1d_meta"
             if stem.endswith("_meta"):
-                stem = stem[:-5]   # strip "_meta"
+                stem = stem[:-5]  # strip "_meta"
             parts = stem.split("_")
             if len(parts) < 3:
-                continue           # doesn't look like a legacy artifact
+                continue  # doesn't look like a legacy artifact
 
-            ticker    = parts[0]
-            horizon   = parts[-1]
-            model     = "_".join(parts[1:-1])   # handles "random_forest"
+            ticker = parts[0]
+            horizon = parts[-1]
+            model = "_".join(parts[1:-1])  # handles "random_forest"
 
             # Check if a versioned slot with an active pointer exists
             active_json = models_dir / ticker / model / horizon / "active.json"
             if not active_json.exists():
-                continue   # versioned layout not present yet — keep the file
+                continue  # versioned layout not present yet — keep the file
 
             try:
                 size = path.stat().st_size
@@ -372,7 +378,7 @@ class CacheCleanup:
                     size_bytes=size,
                     age_days=round(age_days, 2),
                     reason=f"superseded by versioned layout at "
-                           f"{ticker}/{model}/{horizon}",
+                    f"{ticker}/{model}/{horizon}",
                 )
                 self._delete(path, report)
                 report.model_deleted.append(deleted)
@@ -408,7 +414,7 @@ class CacheCleanup:
         # Determine the set of basenames that belong to the active index
         protected_stems: set[str] = set()
         if vector_db_base:
-            active_base = Path(vector_db_base).stem   # e.g. "faiss_index"
+            active_base = Path(vector_db_base).stem  # e.g. "faiss_index"
             protected_stems.add(active_base)
             protected_stems.add(active_base + "_docs")
             protected_stems.add(active_base + "_urls")
@@ -438,7 +444,7 @@ class CacheCleanup:
                         size_bytes=size,
                         age_days=round(age_days, 2),
                         reason=f"older than {self.embeddings_max_age_days}d "
-                               f"embeddings TTL",
+                        f"embeddings TTL",
                     )
                     self._delete(path, report)
                     report.embedding_deleted.append(deleted)
@@ -601,10 +607,11 @@ Examples
         default=_DEFAULT_EMBEDDINGS_MAX_AGE_DAYS,
         metavar="N",
         help=f"Max age in days for embedding files "
-             f"(default: {_DEFAULT_EMBEDDINGS_MAX_AGE_DAYS}).",
+        f"(default: {_DEFAULT_EMBEDDINGS_MAX_AGE_DAYS}).",
     )
     p.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         default=False,
         help="Log every file inspected, not just deleted ones.",
