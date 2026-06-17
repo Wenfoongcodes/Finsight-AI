@@ -307,6 +307,7 @@ class FeatureSelector:
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature Engineer  (Improvement 4: fundamental integration)
 #                   (Improvement 1: sector correlation integration)
+#                   (Improvement 2: options market / implied volatility integration)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -315,8 +316,9 @@ class FeatureEngineer:
     Stateful feature engineering pipeline.
 
     Builds a comprehensive feature matrix from raw OHLCV data.
-    Optionally merges fundamental + macro features (Improvement 4) and
-    sector & market correlation features (Improvement 1).
+    Optionally merges fundamental + macro features (Improvement 4), sector &
+    market correlation features (Improvement 1), and options-market /
+    implied-volatility features (Improvement 2).
 
     Parameters
     ----------
@@ -328,8 +330,9 @@ class FeatureEngineer:
         Whether to fetch and merge fundamental + macro features (Improvement 4).
         Default False — backward-compatible with all existing call sites.
     ticker : str | None
-        Ticker symbol — required when ``include_fundamentals=True`` or
-        ``include_sector_correlation=True``.  Ignored otherwise.
+        Ticker symbol — required when ``include_fundamentals=True``,
+        ``include_sector_correlation=True``, or ``include_options=True``.
+        Ignored otherwise.
     fundamental_engineer : FundamentalFeatureEngineer | None
         Pre-constructed fundamental engineer. If None and
         ``include_fundamentals=True``, one is created automatically.
@@ -344,6 +347,20 @@ class FeatureEngineer:
     sector_correlation_engineer : SectorCorrelationFeatureEngineer | None
         Pre-constructed sector correlation engineer. If None and
         ``include_sector_correlation=True``, one is created automatically.
+    include_options : bool
+        Whether to fetch and merge options-market / implied-volatility
+        features (Improvement 2): ATM IV, constant-maturity IV, IV rank,
+        IV change, the IV/realized-vol spread, put/call ratios, and the
+        VIX/VIX9D/VIX3M term-structure features. Default False —
+        backward-compatible with all existing call sites. The snapshot-
+        derived columns (``opt_*``) depend on a daily snapshot cache
+        populated by ``scripts/warm_options_cache.py`` — they degrade
+        gracefully to NaN (imputed away) when that cache hasn't been warmed
+        for a given ticker yet. The VIX-family columns (``vix_*``) work
+        immediately since they're regular historical yfinance series.
+    options_engineer : OptionsFeatureEngineer | None
+        Pre-constructed options engineer. If None and ``include_options=True``,
+        one is created automatically.
     """
 
     def __init__(
@@ -355,10 +372,13 @@ class FeatureEngineer:
         fundamental_engineer=None,  # FundamentalFeatureEngineer | None
         include_sector_correlation: bool = False,
         sector_correlation_engineer=None,  # SectorCorrelationFeatureEngineer | None
+        include_options: bool = False,
+        options_engineer=None,  # OptionsFeatureEngineer | None
     ) -> None:
         self.rolling_windows = rolling_windows or settings.ROLLING_WINDOWS
         self.include_fundamentals = include_fundamentals
         self.include_sector_correlation = include_sector_correlation
+        self.include_options = include_options
         self.ticker = ticker.upper().strip() if ticker else None
 
         # Enforce the production guard on Hurst
@@ -390,6 +410,13 @@ class FeatureEngineer:
 
             self._sector_correlation_engineer = SectorCorrelationFeatureEngineer()
 
+        # Lazily import to avoid mandatory dependency when options are off
+        self._options_engineer = options_engineer
+        if self.include_options and self._options_engineer is None:
+            from app.ml.options_features import OptionsFeatureEngineer
+
+            self._options_engineer = OptionsFeatureEngineer()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def build_features(
@@ -405,9 +432,10 @@ class FeatureEngineer:
         df : pd.DataFrame
             OHLCV DataFrame with DatetimeIndex.
         ticker : str | None
-            Ticker symbol. Required only when ``include_fundamentals=True`` or
-            ``include_sector_correlation=True`` and not already set in the
-            constructor. Constructor value takes precedence when both are supplied.
+            Ticker symbol. Required only when ``include_fundamentals=True``,
+            ``include_sector_correlation=True``, or ``include_options=True``
+            and not already set in the constructor. Constructor value takes
+            precedence when both are supplied.
 
         Returns
         -------
@@ -464,6 +492,19 @@ class FeatureEngineer:
                         "sector correlation features skipped."
                     )
 
+            # ── Options market / implied volatility features (Improvement 2) ──
+            if self.include_options and self._options_engineer is not None:
+                resolved_ticker = self.ticker or (
+                    ticker.upper().strip() if ticker else None
+                )
+                if resolved_ticker:
+                    feat = self._merge_options_features(feat, resolved_ticker)
+                else:
+                    logger.warning(
+                        "include_options=True but no ticker supplied — "
+                        "options features skipped."
+                    )
+
             logger.info(
                 "Feature matrix built: %d features × %d rows",
                 feat.shape[1],
@@ -490,9 +531,10 @@ class FeatureEngineer:
         """
         Return feature column names (excludes OHLCV + all target columns).
 
-        Fundamental columns (``fund_*``, ``macro_*``) and sector correlation
-        columns (``sector_*``, ``market_*``) are automatically included because
-        they are simply present in the DataFrame and not in the exclude set.
+        Fundamental columns (``fund_*``, ``macro_*``), sector correlation
+        columns (``sector_*``, ``market_*``), and options/IV columns
+        (``opt_*``, ``vix_*``) are automatically included because they are
+        simply present in the DataFrame and not in the exclude set.
         """
         horizon_targets = {f"target_{h}" for h in HORIZONS}
         exclude = (
@@ -673,6 +715,80 @@ class FeatureEngineer:
             )
             return feat
 
+    # ── Options / implied-volatility merge (Improvement 2) ───────────────────
+
+    def _merge_options_features(
+        self, feat: pd.DataFrame, ticker: str
+    ) -> pd.DataFrame:
+        """
+        Fetch, align, and merge options-market / implied-volatility features
+        into *feat*.
+
+        Mirrors ``_merge_sector_correlation_features`` and
+        ``_merge_fundamental_features``: left join on the DatetimeIndex, NaN
+        columns imputed with the column median so partial coverage (e.g. a
+        ticker that only recently became optionable, or has no options at
+        all) does not eliminate otherwise-valid technical rows via the
+        ``dropna()`` call that follows in ``build_features()``.
+
+        The 21-day realized volatility column — already computed earlier in
+        the pipeline by ``_volatility_features`` — is passed through so the
+        options engineer can also produce the IV/realized-vol volatility-
+        risk-premium spread feature (``opt_iv_rv_spread``).
+
+        Requirements
+        ------------
+        The snapshot-derived columns (``opt_*``) depend on
+        ``OptionsHistoryStore`` already having at least one stored snapshot
+        for *ticker* (populated via ``scripts/warm_options_cache.py``).
+        Until then, this merge simply contributes the VIX-family columns
+        (``vix_*``), which have genuine historical depth via yfinance.
+        """
+        try:
+            realized_vol = feat.get("realized_vol_21d")
+            opt_df = self._options_engineer.build(
+                ticker=ticker,
+                price_index=feat.index,
+                realized_vol_21d=realized_vol,
+            )
+
+            if opt_df.empty:
+                logger.warning(
+                    "[%s] Options feature build returned empty DataFrame — "
+                    "skipping merge.",
+                    ticker,
+                )
+                return feat
+
+            opt_df = opt_df.reindex(feat.index)
+
+            # Impute NaNs with column median so missing snapshot history
+            # (e.g. cache not warmed yet, or ticker not optionable) does not
+            # cascade into row drops for an otherwise valid trading day.
+            for col in opt_df.columns:
+                if opt_df[col].isna().all():
+                    continue
+                opt_df[col] = opt_df[col].fillna(opt_df[col].median())
+
+            merged = feat.join(opt_df, how="left")
+
+            logger.info(
+                "[%s] Merged %d options/IV features (%d with data)",
+                ticker,
+                opt_df.shape[1],
+                opt_df.notna().any(axis=0).sum(),
+            )
+            return merged
+
+        except Exception as exc:
+            logger.warning(
+                "[%s] Options feature merge failed (%s) — "
+                "proceeding with existing features only.",
+                ticker,
+                exc,
+            )
+            return feat
+
     # ── Private feature builders (all unchanged from original) ───────────────
 
     def _price_features(self, feat: pd.DataFrame) -> pd.DataFrame:
@@ -842,11 +958,6 @@ class FeatureEngineer:
 
         feat[settings.TARGET_COLUMN] = feat["target_1d"]
         return feat
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Convenience wrappers (unchanged)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:

@@ -12,6 +12,7 @@ from app.core.formatting import (
     utc_now_iso,
 )
 from app.core.logging_config import get_logger
+from app.ml.options_features import build_options_context_narrative
 from app.services.news_intelligence import (
     FinancialIntelligenceService,
     NewsItem,
@@ -82,7 +83,7 @@ class FusedSignal:
     news_sentiment: str = "neutral"
     generated_at: str = field(default_factory=utc_now_iso)
     recency_note: str = ""
-
+    options_context: str = ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Service
@@ -139,6 +140,12 @@ class SignalFusionService:
         ml_prob = round_prob(prediction_response.p_bullish)
         ml_conf = prediction_response.confidence_label.upper()
 
+        try:
+            options_context = build_options_context_narrative(ticker)
+        except Exception as exc:
+            logger.debug("[%s] Options context unavailable: %s", ticker, exc)
+            options_context = ""
+
         ml_only = FusedSignal(
             final_direction=ml_dir,
             final_confidence=ml_conf,
@@ -151,6 +158,7 @@ class SignalFusionService:
             news_sentiment="neutral",
             generated_at=utc_now_iso(),
             recency_note="",
+            options_context=options_context,
         )
 
         # ── Step 1: Retrieve news (with horizon-aware recency filter) ─────────
@@ -183,6 +191,7 @@ class SignalFusionService:
                 agg_sentiment,
                 agg_score,
                 recency_note,
+                options_context,
             )
             logger.info(
                 "[%s/%s] Fusion: %s → %s (applied=%s, recency=%s)",
@@ -227,6 +236,7 @@ class SignalFusionService:
             agg_sentiment,
             agg_score,
             recency_note,
+            options_context,
         )
 
     # ── LLM fusion ────────────────────────────────────────────────────────────
@@ -241,6 +251,7 @@ class SignalFusionService:
         agg_sentiment: str,
         agg_score: float,
         recency_note: str,
+        options_context: str = "",
     ) -> FusedSignal:
         """
         Call the LLM to synthesise the ML signal with the news items.
@@ -263,6 +274,10 @@ class SignalFusionService:
             for i, n in enumerate(news_items[:6])
         )
 
+        options_block = (
+            f"\n=== OPTIONS MARKET ===\n{options_context}\n" if options_context else ""
+        )
+
         user_msg = (
             f"=== ML SIGNAL ===\n"
             f"Ticker:       {ticker}\n"
@@ -274,6 +289,7 @@ class SignalFusionService:
             f"Recency note: {recency_note}\n"
             f"{news_str}\n\n"
             f"Aggregate sentiment: {agg_sentiment} (score={agg_score:+.3f})\n"
+            f"{options_block}"
         )
 
         messages = [
@@ -307,6 +323,7 @@ class SignalFusionService:
             news_sentiment=data.get("news_sentiment", agg_sentiment),
             generated_at=utc_now_iso(),
             recency_note=recency_note,
+            options_context=options_context,
         )
 
     # ── Rule-based fallback ───────────────────────────────────────────────────
@@ -321,6 +338,7 @@ class SignalFusionService:
         agg_sentiment: str,
         agg_score: float,
         recency_note: str,
+        options_context: str = "",
     ) -> FusedSignal:
         """
         Deterministic fusion when LLM is unavailable.
@@ -371,6 +389,7 @@ class SignalFusionService:
             news_sentiment=agg_sentiment,
             generated_at=utc_now_iso(),
             recency_note=recency_note,
+            options_context=options_context,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
