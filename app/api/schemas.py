@@ -95,6 +95,7 @@ class PredictionResult(BaseModel):
     narrative: str
     top_features: list[SHAPFeature]
     auto_trained: bool = False
+    feature_selection_meta: Optional[dict] = None
 
     # ── Fused signal ──────────────────────────────────────────────────────────
     fused_direction: str = "UNKNOWN"

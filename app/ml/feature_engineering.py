@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time as _time_module
 import warnings
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Optional
 
 import numpy as np
@@ -309,6 +312,448 @@ class FeatureSelector:
 #                   (Improvement 1: sector correlation integration)
 #                   (Improvement 2: options market / implied volatility integration)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPROVEMENT 4 — Automated Feature Selection as a Standard Pipeline Stage
+#
+# Add these classes to app/ml/feature_engineering.py, directly after the
+# existing FeatureSelector class (~line 250).  Also add the import at the
+# top of the file:
+#
+#   import time
+#   from dataclasses import dataclass, field as dc_field
+#
+# The original FeatureSelector is preserved for backward compatibility.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── 1. Audit dataclass ────────────────────────────────────────────────────────
+
+
+@dataclass
+class FeatureSelectionMeta:
+    """
+    Full audit trail produced by StabilityBasedFeatureSelector.
+
+    Stored inside the versioned model artifact (model.pkl) and summarised in
+    versions.json so the dashboard and version history can surface it without
+    loading the pkl.
+    """
+
+    n_input_features: int
+    n_output_features: int
+    n_folds_evaluated: int
+    min_stability_threshold: int
+
+    # feature → number of folds in which it was selected (0 .. n_folds_evaluated)
+    stability_scores: dict = dc_field(default_factory=dict)
+
+    # Stage-level drop lists (feature names)
+    dropped_low_variance: list = dc_field(default_factory=list)
+    dropped_high_correlation: list = dc_field(default_factory=list)
+    dropped_low_mi: list = dc_field(default_factory=list)
+    dropped_unstable: list = dc_field(default_factory=list)
+
+    # Averaged MI scores across folds (feature → float)
+    mi_scores: dict = dc_field(default_factory=dict)
+
+    # Threshold values used (for reproducibility / debugging)
+    variance_percentile_threshold: float = 0.05
+    correlation_threshold: float = 0.95
+    mi_elbow_cutoff: float = 0.0  # mean MI value at the adaptive elbow
+
+    elapsed_s: float = 0.0
+    selected_features: list = dc_field(default_factory=list)
+
+    # ── Convenience accessors ──────────────────────────────────────────────
+
+    def top_mi_features(self, n: int = 10) -> list[tuple[str, float]]:
+        """Return the top-N features by averaged MI score."""
+        return sorted(self.mi_scores.items(), key=lambda kv: -kv[1])[:n]
+
+    def stability_summary(self) -> dict[int, list[str]]:
+        """Group features by their stability score (fold count)."""
+        groups: dict[int, list[str]] = {}
+        for feat, cnt in self.stability_scores.items():
+            groups.setdefault(cnt, []).append(feat)
+        return dict(sorted(groups.items(), reverse=True))
+
+    def to_dict(self) -> dict:
+        """Serialisable summary — avoids storing the full feature lists in the
+        registry JSON (those go in the pkl); registry gets counts only."""
+        return {
+            "n_input_features": self.n_input_features,
+            "n_output_features": self.n_output_features,
+            "n_folds_evaluated": self.n_folds_evaluated,
+            "min_stability_threshold": self.min_stability_threshold,
+            "dropped_low_variance_count": len(self.dropped_low_variance),
+            "dropped_high_correlation_count": len(self.dropped_high_correlation),
+            "dropped_low_mi_count": len(self.dropped_low_mi),
+            "dropped_unstable_count": len(self.dropped_unstable),
+            "variance_percentile_threshold": self.variance_percentile_threshold,
+            "correlation_threshold": self.correlation_threshold,
+            "mi_elbow_cutoff": round(self.mi_elbow_cutoff, 6),
+            "elapsed_s": round(self.elapsed_s, 3),
+            # Top-10 MI scores for dashboard display
+            "mi_scores_top10": {f: round(s, 6) for f, s in self.top_mi_features(10)},
+            # Full stability scores (compact — just counts)
+            "stability_scores": {
+                f: c for f, c in self.stability_scores.items() if c > 0
+            },
+            "selected_features": self.selected_features,
+        }
+
+
+# ── 2. Single-fold selector with adaptive thresholds ─────────────────────────
+
+
+class RobustFeatureSelector:
+    """
+    Three-stage feature selector with adaptive thresholds.
+
+    Stage 1 — Adaptive variance thresholding
+        Removes features whose variance falls in the bottom
+        ``variance_bottom_pct`` of the variance distribution.  This adapts
+        to the natural scale of the current feature set rather than relying
+        on a fixed constant (the original threshold of 1e-5).
+
+    Stage 2 — mRMR-inspired correlation filtering
+        For each pair of features with |corr| > ``correlation_threshold``,
+        retains the member that is more correlated with the *target* variable
+        y — preferring informative redundancy over arbitrary column-order
+        dropping.
+
+    Stage 3 — Adaptive mutual information cutoff (elbow detection)
+        Sorts features by MI with the target.  Keeps all features until the
+        marginal MI gain drops below ``mi_elbow_min_gain_pct`` × max(MI).
+        A hard cap of ``mi_top_n_cap`` is applied after the elbow.
+
+    This class is designed to be called once per walk-forward fold inside
+    ``StabilityBasedFeatureSelector``.  It is also usable standalone.
+    """
+
+    def __init__(
+        self,
+        variance_bottom_pct: float = 0.05,
+        correlation_threshold: float = 0.95,
+        mi_elbow_min_gain_pct: float = 0.05,
+        mi_top_n_cap: int = 80,
+        random_state: int = settings.RANDOM_SEED,
+    ) -> None:
+        self.variance_bottom_pct = variance_bottom_pct
+        self.correlation_threshold = correlation_threshold
+        self.mi_elbow_min_gain_pct = mi_elbow_min_gain_pct
+        self.mi_top_n_cap = mi_top_n_cap
+        self.random_state = random_state
+
+        self.selected_features_: list[str] = []
+        self._dropped_variance: list[str] = []
+        self._dropped_correlation: list[str] = []
+        self._dropped_mi: list[str] = []
+        self._mi_scores: dict[str, float] = {}
+        self._variances: dict[str, float] = {}
+        self._var_threshold: float = 0.0
+        self._elbow_threshold: float = 0.0
+        self._is_fitted: bool = False
+
+    # ── fit ───────────────────────────────────────────────────────────────────
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "RobustFeatureSelector":
+        cols = list(X.columns)
+        n_input = len(cols)
+
+        # ── Stage 1: Adaptive variance threshold ──────────────────────────────
+        variances = X[cols].var()
+        var_threshold = float(
+            np.percentile(variances.values, self.variance_bottom_pct * 100)
+        )
+        # Enforce a minimum floor so features with literally zero variance are
+        # always dropped even when the distribution is all-zero.
+        var_threshold = max(var_threshold, 1e-9)
+
+        keep_var = variances >= var_threshold
+        self._dropped_variance = [c for c in cols if not keep_var[c]]
+        cols = [c for c in cols if keep_var[c]]
+        self._variances = {c: float(variances[c]) for c in list(X.columns)}
+        self._var_threshold = var_threshold
+        logger.debug(
+            "RobustFeatureSelector Stage 1 (variance %.2e): %d → %d",
+            var_threshold,
+            n_input,
+            len(cols),
+        )
+
+        # ── Stage 2: mRMR-inspired correlation filter ─────────────────────────
+        X_sub = X[cols].fillna(0)
+        corr_matrix = X_sub.corr().abs()
+        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+        # Target correlation for the mRMR tie-breaking decision
+        try:
+            target_corr = X_sub.corrwith(y.astype(float)).abs().fillna(0)
+        except Exception:
+            target_corr = pd.Series(0.0, index=cols)
+
+        to_drop: set[str] = set()
+        for col in list(upper.columns):
+            if col in to_drop:
+                continue
+            high_peers = upper.index[upper[col] > self.correlation_threshold].tolist()
+            for peer in high_peers:
+                if peer in to_drop:
+                    continue
+                # mRMR decision: keep whichever correlates more with target
+                col_tc = float(target_corr.get(col, 0.0))
+                peer_tc = float(target_corr.get(peer, 0.0))
+                if col_tc >= peer_tc:
+                    to_drop.add(peer)
+                else:
+                    to_drop.add(col)
+                    break  # col itself is now scheduled for drop; move on
+
+        self._dropped_correlation = list(to_drop)
+        cols = [c for c in cols if c not in to_drop]
+        logger.debug(
+            "RobustFeatureSelector Stage 2 (corr %.2f): → %d",
+            self.correlation_threshold,
+            len(cols),
+        )
+
+        # ── Stage 3: Adaptive MI elbow ────────────────────────────────────────
+        if not cols:
+            self.selected_features_ = []
+            self._dropped_mi = []
+            self._mi_scores = {}
+            self._elbow_threshold = 0.0
+            self._is_fitted = True
+            return self
+
+        X_mi = X[cols].fillna(0)
+        mi_raw = mutual_info_classif(X_mi, y, random_state=self.random_state)
+        mi_series = pd.Series(mi_raw, index=cols).sort_values(ascending=False)
+        self._mi_scores = {c: float(mi_series.get(c, 0.0)) for c in list(X.columns)}
+
+        max_mi = float(mi_series.iloc[0]) if len(mi_series) > 0 else 1.0
+        elbow_threshold = max_mi * self.mi_elbow_min_gain_pct
+        self._elbow_threshold = elbow_threshold
+
+        cols_keep = [c for c in mi_series.index if mi_series[c] >= elbow_threshold]
+        # Hard cap
+        if len(cols_keep) > self.mi_top_n_cap:
+            cols_keep = cols_keep[: self.mi_top_n_cap]
+
+        self._dropped_mi = [c for c in cols if c not in set(cols_keep)]
+        self.selected_features_ = cols_keep
+        self._is_fitted = True
+
+        logger.debug(
+            "RobustFeatureSelector Stage 3 (MI elbow %.4f): → %d",
+            elbow_threshold,
+            len(cols_keep),
+        )
+        logger.info(
+            "RobustFeatureSelector: %d → var:%d → corr:%d → mi_elbow:%d features",
+            n_input,
+            n_input - len(self._dropped_variance),
+            n_input - len(self._dropped_variance) - len(self._dropped_correlation),
+            len(cols_keep),
+        )
+        return self
+
+    # ── transform / fit_transform ─────────────────────────────────────────────
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not self._is_fitted:
+            raise ValueError("Call fit() before transform().")
+        available = [c for c in self.selected_features_ if c in X.columns]
+        return X[available]
+
+    def fit_transform(self, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
+        return self.fit(X, y).transform(X)
+
+
+# ── 3. Cross-validation stability selector ────────────────────────────────────
+
+
+class StabilityBasedFeatureSelector:
+    """
+    Runs ``RobustFeatureSelector`` inside each walk-forward fold to build
+    per-feature stability scores, then returns only those features that are
+    selected in at least ``min_stability_folds`` folds.
+
+    This guards against spurious feature selection caused by time-specific
+    patterns in a single training window — a feature that is genuinely
+    informative will be selected consistently across different historical
+    periods.
+
+    Usage inside ModelTrainer.train()
+    -----------------------------------
+    The trainer calls ``fit()`` before the main walk-forward loop, passing
+    the same fold splits so the selection windows have zero look-ahead bias.
+    The resulting ``selected_features_`` list then replaces the full X for
+    both evaluation and the final model fit.
+
+    Parameters
+    ----------
+    min_stability_folds : int
+        Minimum number of folds a feature must be selected in to survive.
+        With 5 walk-forward folds, 3 is a reasonable default (3/5 = 60%).
+    selector_kwargs : dict | None
+        Keyword arguments forwarded to each ``RobustFeatureSelector`` instance.
+    """
+
+    def __init__(
+        self,
+        min_stability_folds: int = 3,
+        selector_kwargs: Optional[dict] = None,
+    ) -> None:
+        self.min_stability_folds = min_stability_folds
+        self.selector_kwargs: dict = selector_kwargs or {}
+
+        self.selected_features_: list[str] = []
+        self.meta_: Optional[FeatureSelectionMeta] = None
+        self._is_fitted: bool = False
+
+    # ── fit ───────────────────────────────────────────────────────────────────
+
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        fold_splits: list[tuple[np.ndarray, np.ndarray]],
+    ) -> "StabilityBasedFeatureSelector":
+        """
+        Parameters
+        ----------
+        X, y :
+            Full feature matrix and target (same object passed to trainer.train()).
+        fold_splits :
+            List of (train_idx, test_idx) pairs from WalkForwardSplitter.split(X).
+            Each fold's *training* portion is used for feature selection — the
+            test portion is deliberately excluded to prevent look-ahead.
+        """
+        t0 = _time_module.perf_counter()
+        n_folds = len(fold_splits)
+        all_cols = list(X.columns)
+
+        # Running accumulators
+        stability_counts: dict[str, int] = {c: 0 for c in all_cols}
+        fold_mi_scores: dict[str, list[float]] = {c: [] for c in all_cols}
+        all_dropped_var: list[str] = []
+        all_dropped_corr: list[str] = []
+        all_dropped_mi: list[str] = []
+        elbow_values: list[float] = []
+        successful_folds = 0
+
+        for fold_idx, (train_idx, _) in enumerate(fold_splits):
+            X_tr = X.iloc[train_idx]
+            y_tr = y.iloc[train_idx]
+
+            sel = RobustFeatureSelector(**self.selector_kwargs)
+            try:
+                sel.fit(X_tr, y_tr)
+            except Exception as exc:
+                logger.warning(
+                    "StabilityBasedFeatureSelector: fold %d/%d selector failed: %s",
+                    fold_idx + 1,
+                    n_folds,
+                    exc,
+                )
+                continue
+
+            successful_folds += 1
+            for feat in sel.selected_features_:
+                stability_counts[feat] = stability_counts.get(feat, 0) + 1
+            for feat, score in sel._mi_scores.items():
+                fold_mi_scores.setdefault(feat, []).append(score)
+
+            all_dropped_var.extend(sel._dropped_variance)
+            all_dropped_corr.extend(sel._dropped_correlation)
+            all_dropped_mi.extend(sel._dropped_mi)
+            elbow_values.append(sel._elbow_threshold)
+
+            logger.debug(
+                "Stability fold %d/%d: %d features selected",
+                fold_idx + 1,
+                n_folds,
+                len(sel.selected_features_),
+            )
+
+        # ── Aggregate stability scores → stable feature set ───────────────────
+        # Use the successful fold count so that failures don't penalise features.
+        effective_threshold = min(self.min_stability_folds, successful_folds)
+
+        stable_features = [
+            feat for feat, cnt in stability_counts.items() if cnt >= effective_threshold
+        ]
+
+        # Sort by descending average MI for deterministic, interpretable ordering
+        avg_mi: dict[str, float] = {
+            feat: float(np.mean(scores))
+            for feat, scores in fold_mi_scores.items()
+            if scores
+        }
+        stable_features.sort(key=lambda f: -avg_mi.get(f, 0.0))
+
+        dropped_unstable = [
+            feat
+            for feat, cnt in stability_counts.items()
+            if 0 < cnt < effective_threshold
+        ]
+
+        self.selected_features_ = stable_features
+        self.meta_ = FeatureSelectionMeta(
+            n_input_features=len(all_cols),
+            n_output_features=len(stable_features),
+            n_folds_evaluated=successful_folds,
+            min_stability_threshold=effective_threshold,
+            stability_scores={
+                feat: cnt for feat, cnt in stability_counts.items() if cnt > 0
+            },
+            dropped_low_variance=list(set(all_dropped_var)),
+            dropped_high_correlation=list(set(all_dropped_corr)),
+            dropped_low_mi=list(set(all_dropped_mi)),
+            dropped_unstable=dropped_unstable,
+            mi_scores=avg_mi,
+            variance_percentile_threshold=self.selector_kwargs.get(
+                "variance_bottom_pct", 0.05
+            ),
+            correlation_threshold=self.selector_kwargs.get(
+                "correlation_threshold", 0.95
+            ),
+            mi_elbow_cutoff=float(np.mean(elbow_values)) if elbow_values else 0.0,
+            elapsed_s=_time_module.perf_counter() - t0,
+            selected_features=stable_features,
+        )
+        self._is_fitted = True
+
+        logger.info(
+            "StabilityBasedFeatureSelector: %d → %d stable features "
+            "(threshold %d/%d folds) in %.2fs",
+            len(all_cols),
+            len(stable_features),
+            effective_threshold,
+            successful_folds,
+            self.meta_.elapsed_s,
+        )
+        return self
+
+    # ── transform / fit_transform ─────────────────────────────────────────────
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not self._is_fitted:
+            raise ValueError("Call fit() before transform().")
+        available = [c for c in self.selected_features_ if c in X.columns]
+        return X[available]
+
+    def fit_transform(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        fold_splits: list[tuple[np.ndarray, np.ndarray]],
+    ) -> pd.DataFrame:
+        return self.fit(X, y, fold_splits).transform(X)
 
 
 class FeatureEngineer:

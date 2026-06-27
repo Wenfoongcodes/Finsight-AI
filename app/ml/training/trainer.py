@@ -25,6 +25,10 @@ from app.core.formatting import (
     utc_now_iso,
 )
 from app.core.logging_config import get_logger
+from app.ml.feature_engineering import (
+    FeatureSelectionMeta,
+    StabilityBasedFeatureSelector,
+)
 from app.ml.models.model_factory import get_model
 from app.ml.training.versioning import (
     DEFAULT_AUC_IMPROVEMENT_THRESHOLD,
@@ -43,6 +47,7 @@ TRIGGER_CORRUPT = "artifact_corrupt"
 TRIGGER_MISMATCH = "feature_mismatch"
 TRIGGER_MANUAL = "manual_request"
 TRIGGER_STALE = "artifact_stale"
+TRIGGER_FEATURE_SELECTION = "feature_selection_applied"
 
 
 # ──────────────────────────────────────────────────────────────────[...]
@@ -86,6 +91,9 @@ class TrainingResult:
     training_duration_s: float = 0.0
     # Version identifier assigned after artifact save
     version_id: str = ""
+    # Serialised FeatureSelectionMeta.to_dict() — None when
+    # feature selection was not applied.
+    feature_selection_meta: Optional[dict] = None
 
     def compute_aggregates(self) -> None:
         """Compute mean metrics with canonical precision."""
@@ -123,6 +131,7 @@ class TrainingResult:
             "n_folds": len(self.fold_results),
             "feature_columns": self.feature_columns,
             "version_id": self.version_id,
+            "feature_selection_meta": self.feature_selection_meta,
         }
 
 
@@ -313,6 +322,9 @@ class ModelTrainer:
         hpo_trials: int = 30,
         calibrate: bool = True,
         fold_callback: Optional[Callable[[FoldResult], None]] = None,
+        run_feature_selection: bool = True,
+        min_stability_folds: int = 3,
+        feature_selector_kwargs: Optional[dict] = None,
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
         trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
 
@@ -339,6 +351,9 @@ class ModelTrainer:
             calibrate=calibrate,
             trigger_reason=trigger,
             fold_callback=fold_callback,
+            run_feature_selection=run_feature_selection,
+            min_stability_folds=min_stability_folds,
+            feature_selector_kwargs=feature_selector_kwargs,
         )
         return model, result.feature_columns, result
 
@@ -358,6 +373,9 @@ class ModelTrainer:
         promote: bool = True,
         auto_promote_if_better: bool = False,
         auc_threshold: float = DEFAULT_AUC_IMPROVEMENT_THRESHOLD,
+        run_feature_selection: bool = True,
+        min_stability_folds: int = 3,
+        feature_selector_kwargs: Optional[dict] = None,
     ) -> tuple[Any, "TrainingResult"]:
         """
         Train with walk-forward validation and persist a versioned artifact.
@@ -390,6 +408,49 @@ class ModelTrainer:
                 best_params = optimize_hyperparameters(
                     model_name, X, y, n_trials=hpo_trials
                 )
+
+            # ── Stability-based feature selection (Improvement 4) ──────────
+            sel_meta: Optional[FeatureSelectionMeta] = None
+            if run_feature_selection:
+                _fs_splitter = WalkForwardSplitter()
+                _fs_splits = _fs_splitter.split(X)
+                logger.info(
+                    "[%s/%s/%s] Stability feature selection: "
+                    "%d input features, %d folds, min_stability=%d…",
+                    ticker,
+                    model_name,
+                    horizon,
+                    X.shape[1],
+                    len(_fs_splits),
+                    min_stability_folds,
+                )
+                _stability_sel = StabilityBasedFeatureSelector(
+                    min_stability_folds=min_stability_folds,
+                    selector_kwargs=feature_selector_kwargs or {},
+                )
+                _stability_sel.fit(X, y, _fs_splits)
+                sel_meta = _stability_sel.meta_
+                if _stability_sel.selected_features_:
+                    X = _stability_sel.transform(X)
+                    logger.info(
+                        "[%s/%s/%s] Feature selection complete: "
+                        "%d → %d stable features (%.2fs)",
+                        ticker,
+                        model_name,
+                        horizon,
+                        sel_meta.n_input_features,
+                        sel_meta.n_output_features,
+                        sel_meta.elapsed_s,
+                    )
+                else:
+                    logger.warning(
+                        "[%s/%s/%s] Stability selection returned 0 features "
+                        "— proceeding with full feature set.",
+                        ticker,
+                        model_name,
+                        horizon,
+                    )
+                    sel_meta = None
 
             splitter = WalkForwardSplitter()
             splits = splitter.split(X)
@@ -444,6 +505,9 @@ class ModelTrainer:
                 )
 
             result.compute_aggregates()
+            result.feature_selection_meta = (
+                sel_meta.to_dict() if sel_meta is not None else None
+            )
 
             # ── Final model ────────────────────────────────────────────────
             should_calibrate = calibrate and model_name != "logistic_regression"
@@ -787,18 +851,34 @@ class ModelTrainer:
 
         saved_cols = set(artifact.get("feature_columns", []))
         current_cols = set(current_feature_cols)
-        if saved_cols != current_cols:
-            added = current_cols - saved_cols
-            removed = saved_cols - current_cols
+
+        # A model trained after stability feature selection will have a
+        # saved_cols that is a proper *subset* of current_cols — that is
+        # expected and must NOT trigger a retrain.
+        # Retrain only if features the model *requires* are no longer produced.
+        missing_from_current = saved_cols - current_cols
+        if missing_from_current:
             logger.warning(
-                "[%s/%s/%s] Feature mismatch — added=%d removed=%d — retraining.",
+                "[%s/%s/%s] Feature mismatch — %d saved features absent from "
+                "current pipeline (%s…) — retraining.",
                 ticker,
                 model_name,
                 horizon,
-                len(added),
-                len(removed),
+                len(missing_from_current),
+                sorted(missing_from_current)[:3],
             )
             return TRIGGER_MISMATCH
+
+        newly_available = current_cols - saved_cols
+        if newly_available:
+            logger.info(
+                "[%s/%s/%s] %d new features available upstream "
+                "(will be evaluated at next scheduled retrain).",
+                ticker,
+                model_name,
+                horizon,
+                len(newly_available),
+            )
 
         return None
 
@@ -825,6 +905,7 @@ class ModelTrainer:
                     "horizon": horizon,
                     "trained_at": result.trained_at,
                     "version_id": version_id,
+                    "feature_selection_meta": result.feature_selection_meta,
                 },
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,

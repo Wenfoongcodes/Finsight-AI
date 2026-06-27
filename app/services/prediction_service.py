@@ -13,7 +13,7 @@ from app.core.formatting import (
 from app.core.logging_config import get_logger
 from app.ml.data_ingestion import ingest_market_data
 from app.ml.explainability import SHAPExplainer
-from app.ml.feature_engineering import HORIZONS, FeatureEngineer, FeatureSelector
+from app.ml.feature_engineering import HORIZONS, FeatureEngineer
 from app.ml.training.trainer import ModelTrainer
 from app.services.model_selector import (
     ALL_TRAINING_MODELS,
@@ -68,6 +68,7 @@ class PredictionResponse:
     feature_snapshot: dict
     fused_signal: Optional[FusedSignal] = None
     auto_trained: bool = False
+    feature_selection_meta: Optional[dict] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ class PredictionService:
         horizon: str = "1d",
         use_cache: bool = True,
         run_fusion: bool = True,
-        apply_feature_selection: bool = False,
+        apply_feature_selection: bool = True,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> PredictionResponse:
         """
@@ -121,7 +122,7 @@ class PredictionService:
         horizon:            Prediction horizon key.
         use_cache:          Whether to use cached market data.
         run_fusion:         Whether to run LLM signal fusion.
-        apply_feature_selection: Whether to apply FeatureSelector.
+        apply_feature_selection: Whether to apply stability-based feature selection (default True — always on in production).
         progress_callback:  Optional ``(stage, message, pct) -> None`` callback
                             invoked at each major pipeline stage.  When
                             ``None`` (default), a no-op is used so all existing
@@ -162,18 +163,22 @@ class PredictionService:
                 22,
             )
 
-            # ── 3. Optional feature selection ─────────────────────────────────
+            # ── 3. Feature selection (Improvement 4) ──────────────────────────
+            # Stability-based selection is now a standard pipeline stage baked
+            # into ModelTrainer.train().  We pass apply_feature_selection through
+            # to load_or_train so callers can disable it (e.g., in tests) but it
+            # defaults to True in production.  The selection runs inside each
+            # walk-forward training window so there is zero look-ahead bias.
+            # No manual FeatureSelector call is needed here — the trainer handles
+            # it and persists the stable feature set in the artifact, so on
+            # subsequent calls we simply load the model and align X to its saved
+            # feature_columns (done below in step 6).
             if apply_feature_selection:
-                cb("features", "Applying feature selection…", 25)
-                fs = FeatureSelector()
-                X = fs.fit_transform(X, y)
-                logger.info(
-                    "[%s/%s] FeatureSelector: %d features retained",
-                    ticker,
-                    horizon,
-                    X.shape[1],
+                cb(
+                    "features",
+                    "Stability feature selection enabled (runs inside trainer)…",
+                    25,
                 )
-                cb("features", f"{X.shape[1]} features retained after selection", 27)
 
             # ── 4. Model selection ────────────────────────────────────────────
             sel = self.selector.select(ticker, horizon=horizon)
@@ -238,6 +243,7 @@ class PredictionService:
                             horizon=horizon,
                             trigger_reason="no_artifacts_train_all",
                             fold_callback=fold_cb,
+                            run_feature_selection=apply_feature_selection,
                         )
                         logger.info(
                             "[%s/%s] Trained %s: AUC=%.4f",
@@ -329,14 +335,34 @@ class PredictionService:
                 X=X,
                 y=y,
                 horizon=horizon,
+                run_feature_selection=apply_feature_selection,
             )
+            _fs_meta: Optional[dict] = None
             if train_result_incr is not None:
                 auto_trained = True
+                _fs_meta = train_result_incr.feature_selection_meta
                 cb(
                     "training",
                     f"Incremental retrain complete — AUC {train_result_incr.mean_roc_auc:.4f}",
                     75,
                 )
+            else:
+                try:
+                    _active_id = self.trainer._store.get_active_version_id(
+                        ticker, sel.model_name, horizon
+                    )
+                    if _active_id:
+                        _entries = self.trainer._store.load_registry(
+                            ticker, sel.model_name, horizon
+                        )
+                        _active_entry = next(
+                            (e for e in _entries if e.get("version_id") == _active_id),
+                            None,
+                        )
+                        if _active_entry:
+                            _fs_meta = _active_entry.get("feature_selection")
+                except Exception as _exc:
+                    logger.debug("Could not read feature_selection_meta: %s", _exc)
 
             # ── 6. Align features ─────────────────────────────────────────────
             missing = set(feature_columns) - set(X.columns)
@@ -394,6 +420,7 @@ class PredictionService:
                 feature_snapshot=snapshot,
                 fused_signal=None,
                 auto_trained=auto_trained,
+                feature_selection_meta=_fs_meta,
             )
 
             # ── 11. Signal fusion ─────────────────────────────────────────────

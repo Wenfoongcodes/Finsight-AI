@@ -1,0 +1,28 @@
+[
+  {
+    "version_id": "20260627T115729_036afb83",
+    "trained_at": "2026-06-27T11:57:29+00:00",
+    "trigger_reason": "no_artifacts_train_all",
+    "mean_roc_auc": 0.4322,
+    "mean_accuracy": 0.4057,
+    "mean_f1": 0.4022,
+    "n_features": 31,
+    "feature_hash": "036afb83",
+    "best_params": {},
+    "is_active": true,
+    "training_duration_s": 19.71,
+    "n_folds": 5,
+    "feature_selection": {
+      "n_input": 83,
+      "n_output": 31,
+      "n_folds_evaluated": 5,
+      "min_stability_threshold": 3,
+      "dropped_low_variance": 5,
+      "dropped_high_correlation": 28,
+      "dropped_low_mi": 40,
+      "dropped_unstable": 22,
+      "mi_elbow_cutoff": 0.015294,
+      "elapsed_s": 4.281
+    }
+  }
+]

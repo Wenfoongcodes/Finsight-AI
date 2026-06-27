@@ -1,24 +1,4 @@
 """
-app/ml/training/versioning.py
-==============================
-Model versioning, promotion, rollback, and registry management.
-
-Directory layout
-----------------
-data/models/
-  AAPL/
-    xgboost/
-      1d/
-        versions/
-          20260514T094122_a3f7c2d1/
-            model.pkl
-            meta.json
-          20260601T133045_b5e8f1a2/
-            model.pkl
-            meta.json
-        active.json       ← {"version_id": "20260514T094122_a3f7c2d1"}
-        versions.json     ← full history list, sorted by trained_at
-
 Version identifier format
 -------------------------
   {YYYYmmddTHHMMSS}_{8-char-hex}
@@ -382,6 +362,7 @@ def _build_registry_entry(
     is_active: bool = False,
 ) -> dict:
     """Build a standardised registry entry from a TrainingResult.to_dict() output."""
+    fs_meta = training_result_dict.get("feature_selection_meta") or {}
     return {
         "version_id": version_id,
         "trained_at": training_result_dict.get("trained_at", ""),
@@ -397,4 +378,21 @@ def _build_registry_entry(
         "is_active": is_active,
         "training_duration_s": training_result_dict.get("training_duration_s", 0.0),
         "n_folds": training_result_dict.get("n_folds", 0),
+        # Improvement 4: feature selection audit summary (compact — counts only)
+        "feature_selection": {
+            "n_input": fs_meta.get("n_input_features", 0),
+            "n_output": fs_meta.get("n_output_features", 0),
+            "n_folds_evaluated": fs_meta.get("n_folds_evaluated", 0),
+            "min_stability_threshold": fs_meta.get("min_stability_threshold", 0),
+            "dropped_low_variance": fs_meta.get("dropped_low_variance_count", 0),
+            "dropped_high_correlation": fs_meta.get(
+                "dropped_high_correlation_count", 0
+            ),
+            "dropped_low_mi": fs_meta.get("dropped_low_mi_count", 0),
+            "dropped_unstable": fs_meta.get("dropped_unstable_count", 0),
+            "mi_elbow_cutoff": fs_meta.get("mi_elbow_cutoff", 0.0),
+            "elapsed_s": fs_meta.get("elapsed_s", 0.0),
+        }
+        if fs_meta
+        else None,
     }
