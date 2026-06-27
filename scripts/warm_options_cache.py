@@ -73,8 +73,16 @@ def print_summary(rows: list[dict]) -> None:
     print(header)
     print("─" * len(header))
     for r in rows:
-        iv_str = f"{r['atm_iv_cm30'] * 100:.2f}%" if r["atm_iv_cm30"] == r["atm_iv_cm30"] else "n/a"
-        pc_str = f"{r['put_call_volume_ratio']:.2f}" if r["put_call_volume_ratio"] == r["put_call_volume_ratio"] else "n/a"
+        iv_str = (
+            f"{r['atm_iv_cm30'] * 100:.2f}%"
+            if r["atm_iv_cm30"] == r["atm_iv_cm30"]
+            else "n/a"
+        )
+        pc_str = (
+            f"{r['put_call_volume_ratio']:.2f}"
+            if r["put_call_volume_ratio"] == r["put_call_volume_ratio"]
+            else "n/a"
+        )
         print(
             f"{r['ticker']:<8} {str(r['is_optionable']):<11} {iv_str:>13} "
             f"{pc_str:>10} {r['n_contracts_used']:>10}"

@@ -97,3 +97,7 @@ class AuthenticationError(APIError):
 
 class RateLimitError(APIError):
     """Raised when an external API rate limit is hit."""
+
+
+class PortfolioAnalysisError(FinSightBaseError):
+    """Raised when portfolio-level analysis (correlation, optimization, risk) fails."""

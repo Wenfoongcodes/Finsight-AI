@@ -15,6 +15,7 @@ client = TestClient(app)
 @dataclass
 class MockNewsItem:
     """Mock news item for FusedSignal."""
+
     title: str
     snippet: str
     url: str
@@ -26,6 +27,7 @@ class MockNewsItem:
 @dataclass
 class MockFusedSignal:
     """Mock fused signal object."""
+
     final_direction: str
     final_confidence: str
     fusion_probability: float
@@ -42,6 +44,7 @@ class MockFusedSignal:
 @dataclass
 class MockPrediction:
     """Mock prediction object matching PredictionResponse structure."""
+
     ticker: str
     model_name: str
     horizon: str

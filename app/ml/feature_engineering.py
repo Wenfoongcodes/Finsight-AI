@@ -717,9 +717,7 @@ class FeatureEngineer:
 
     # ── Options / implied-volatility merge (Improvement 2) ───────────────────
 
-    def _merge_options_features(
-        self, feat: pd.DataFrame, ticker: str
-    ) -> pd.DataFrame:
+    def _merge_options_features(self, feat: pd.DataFrame, ticker: str) -> pd.DataFrame:
         """
         Fetch, align, and merge options-market / implied-volatility features
         into *feat*.

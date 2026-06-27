@@ -310,9 +310,7 @@ def fetch_options_snapshot(ticker: str) -> Optional[OptionsSnapshot]:
         spot = float(hist["Close"].iloc[-1])
 
         future_expiries = [
-            e
-            for e in expiries
-            if datetime.strptime(e, "%Y-%m-%d").date() > today
+            e for e in expiries if datetime.strptime(e, "%Y-%m-%d").date() > today
         ]
         if not future_expiries:
             return snap
@@ -321,7 +319,9 @@ def fetch_options_snapshot(ticker: str) -> Optional[OptionsSnapshot]:
         near_days = (datetime.strptime(near_str, "%Y-%m-%d").date() - today).days
 
         chain_near = tkr.option_chain(near_str)
-        atm_iv_near, n_near = _atm_iv_from_chain(chain_near.calls, chain_near.puts, spot)
+        atm_iv_near, n_near = _atm_iv_from_chain(
+            chain_near.calls, chain_near.puts, spot
+        )
 
         atm_iv_next: float = np.nan
         next_days: float = np.nan
@@ -339,10 +339,18 @@ def fetch_options_snapshot(ticker: str) -> Optional[OptionsSnapshot]:
 
         cm30 = _constant_maturity_iv(atm_iv_near, near_days, atm_iv_next, next_days)
 
-        call_vol = float(chain_near.calls.get("volume", pd.Series(dtype=float)).fillna(0).sum())
-        put_vol = float(chain_near.puts.get("volume", pd.Series(dtype=float)).fillna(0).sum())
-        call_oi = float(chain_near.calls.get("openInterest", pd.Series(dtype=float)).fillna(0).sum())
-        put_oi = float(chain_near.puts.get("openInterest", pd.Series(dtype=float)).fillna(0).sum())
+        call_vol = float(
+            chain_near.calls.get("volume", pd.Series(dtype=float)).fillna(0).sum()
+        )
+        put_vol = float(
+            chain_near.puts.get("volume", pd.Series(dtype=float)).fillna(0).sum()
+        )
+        call_oi = float(
+            chain_near.calls.get("openInterest", pd.Series(dtype=float)).fillna(0).sum()
+        )
+        put_oi = float(
+            chain_near.puts.get("openInterest", pd.Series(dtype=float)).fillna(0).sum()
+        )
 
         snap.is_optionable = (n_near + n_next) >= 2
         snap.near_expiry = near_str
@@ -452,7 +460,9 @@ class OptionsHistoryStore:
         df = pd.concat([df, row]).sort_index()
 
         path = self._path(snapshot.ticker)
-        fd, tmp_path = tempfile.mkstemp(dir=self._dir, prefix=".tmp_", suffix=".parquet")
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self._dir, prefix=".tmp_", suffix=".parquet"
+        )
         try:
             os.close(fd)
             df.to_parquet(tmp_path, index=True)
@@ -658,9 +668,7 @@ class OptionsFeatureEngineer:
                 df["vix_term_structure_slope"] > 0
             ).astype(int)
         else:
-            logger.debug(
-                "VIX9D/VIX3M unavailable — term-structure features skipped."
-            )
+            logger.debug("VIX9D/VIX3M unavailable — term-structure features skipped.")
 
         return df
 

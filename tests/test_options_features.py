@@ -382,9 +382,9 @@ class TestOptionsFeatureEngineerBuild:
 
         with patch(
             "app.ml.options_features._fetch_yf_series",
-            side_effect=lambda ticker, start, end: vix_series
-            if ticker == "^VIX"
-            else pd.Series(dtype=float),
+            side_effect=lambda ticker, start, end: (
+                vix_series if ticker == "^VIX" else pd.Series(dtype=float)
+            ),
         ):
             eng = OptionsFeatureEngineer(history_store=store, include_vix=True)
             result = eng.build("AAPL", price_index)

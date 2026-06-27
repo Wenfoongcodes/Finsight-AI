@@ -261,4 +261,3 @@ class ModelSelector:
         except Exception as exc:
             logger.warning("Failed to parse %s: %s", meta_path.name, exc)
             return None
-

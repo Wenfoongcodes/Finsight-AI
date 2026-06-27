@@ -485,7 +485,8 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
             "returns (bool, int) tuple",
             lambda: (
                 lambda limiter: (
-                    isinstance(limiter.is_allowed("t"), tuple) and len(limiter.is_allowed("t")) == 2
+                    isinstance(limiter.is_allowed("t"), tuple)
+                    and len(limiter.is_allowed("t")) == 2
                 )
             )(_Lim(5, 60)),
         ),
@@ -497,20 +498,26 @@ def layer1_in_memory(max_requests: int) -> LayerResult:
             "blocks at max + 1",
             lambda: (
                 lambda limiter: (
-                    [limiter.is_allowed("ip") for _ in range(5)] and not limiter.is_allowed("ip")[0]
+                    [limiter.is_allowed("ip") for _ in range(5)]
+                    and not limiter.is_allowed("ip")[0]
                 )
             )(_Lim(5, 60)),
         ),
         (
             "remaining decrements correctly",
-            lambda: (lambda limiter: limiter.is_allowed("ip")[1] > limiter.is_allowed("ip")[1])(
-                _Lim(10, 60)
-            ),
+            lambda: (
+                lambda limiter: (
+                    limiter.is_allowed("ip")[1] > limiter.is_allowed("ip")[1]
+                )
+            )(_Lim(10, 60)),
         ),
         (
             "independent IPs do not share buckets",
             lambda: (
-                lambda limiter: [limiter.is_allowed("x") for _ in range(6)] and limiter.is_allowed("y")[0]
+                lambda limiter: (
+                    [limiter.is_allowed("x") for _ in range(6)]
+                    and limiter.is_allowed("y")[0]
+                )
             )(_Lim(5, 60)),
         ),
         ("window expiry resets bucket", lambda: _check_expiry(_Lim(3, 1))),

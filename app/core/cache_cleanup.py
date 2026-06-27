@@ -256,6 +256,7 @@ class CacheCleanup:
 
         self._clean_raw(raw_dir, report)
         self._clean_legacy_models(models_dir, report)
+        self._prune_versioned_models(models_dir, report)
         self._clean_embeddings(embeddings_dir, vector_db_base, report)
         self._clean_logs(logs_dir, report)
 
@@ -501,6 +502,104 @@ class CacheCleanup:
                 logger.warning(msg)
                 report.errors.append(msg)
 
+    def _prune_versioned_models(
+        self, models_dir: Path, report: CleanupReport, keep_last: int = 3
+    ) -> None:
+        """
+        Prune old versioned model artifacts across all ticker/model/horizon slots,
+        always preserving the active version and the last ``keep_last`` versions.
+        """
+        from app.ml.training.versioning import VersionedArtifactStore
+
+        if not models_dir.exists():
+            return
+
+        store = VersionedArtifactStore(models_dir)
+
+        # Walk ticker/ → model_name/ → horizon/ slots
+        for ticker_dir in sorted(models_dir.iterdir()):
+            if not ticker_dir.is_dir():
+                continue
+            for model_dir in sorted(ticker_dir.iterdir()):
+                if not model_dir.is_dir():
+                    continue
+                for horizon_dir in sorted(model_dir.iterdir()):
+                    if not horizon_dir.is_dir():
+                        continue
+
+                    ticker = ticker_dir.name
+                    model_name = model_dir.name
+                    horizon = horizon_dir.name
+
+                    try:
+                        deleted_ids = (
+                            []
+                            if self.dry_run
+                            else store.prune(
+                                ticker, model_name, horizon, keep_last=keep_last
+                            )
+                        )
+                        for vid in deleted_ids:
+                            logger.info(
+                                "[cache_cleanup] pruned model version %s/%s/%s @ %s",
+                                ticker,
+                                model_name,
+                                horizon,
+                                vid,
+                            )
+                            # Approximate size — version dir already deleted, so we log 0
+                            report.model_deleted.append(
+                                DeletedFile(
+                                    path=models_dir
+                                    / ticker
+                                    / model_name
+                                    / horizon
+                                    / "versions"
+                                    / vid,
+                                    size_bytes=0,
+                                    age_days=0.0,
+                                    reason=f"versioned model pruned (keep_last={keep_last})",
+                                )
+                            )
+                        if self.dry_run and store.list_version_ids(
+                            ticker, model_name, horizon
+                        ):
+                            all_ids = store.list_version_ids(
+                                ticker, model_name, horizon
+                            )
+                            active_id = store.get_active_version_id(
+                                ticker, model_name, horizon
+                            )
+                            preserve = set(all_ids[-keep_last:]) | (
+                                {active_id} if active_id else set()
+                            )
+                            candidates = [v for v in all_ids if v not in preserve]
+                            for vid in candidates:
+                                logger.info(
+                                    "[DRY RUN] would prune model version %s/%s/%s @ %s",
+                                    ticker,
+                                    model_name,
+                                    horizon,
+                                    vid,
+                                )
+                                report.model_deleted.append(
+                                    DeletedFile(
+                                        path=models_dir
+                                        / ticker
+                                        / model_name
+                                        / horizon
+                                        / "versions"
+                                        / vid,
+                                        size_bytes=0,
+                                        age_days=0.0,
+                                        reason=f"versioned model pruned (keep_last={keep_last})",
+                                    )
+                                )
+                    except Exception as exc:
+                        msg = f"model prune {ticker}/{model_name}/{horizon}: {exc}"
+                        logger.warning(msg)
+                        report.errors.append(msg)
+
     # ── Deletion helper ───────────────────────────────────────────────────────
 
     def _delete(self, path: Path, report: CleanupReport) -> None:
@@ -540,9 +639,9 @@ def cleanup_on_startup(dry_run: bool = False) -> None:
             yield
     """
     try:
-        CacheCleanup(dry_run=dry_run).run_raw_only()
+        report = CacheCleanup(dry_run=dry_run).run()
+        logger.info("[cache_cleanup] %s", report.summary())
     except Exception as exc:
-        # Never crash startup due to cleanup failure
         logger.warning("Startup cache cleanup failed (non-fatal): %s", exc)
 
 

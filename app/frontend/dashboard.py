@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from portfolio_tab import render_portfolio_tab
 from streaming_signal import render_streaming_signal_tab
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -631,8 +632,8 @@ st.markdown(
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab_predict, tab_market, tab_chat, tab_agent = st.tabs(
-    ["Signal", "Market Data", "AI Chat", "AI Agent"]
+tab_predict, tab_market, tab_chat, tab_agent, tab_portfolio = st.tabs(
+    ["Signal", "Market Data", "AI Chat", "AI Agent", "Portfolio"]
 )
 
 
@@ -1210,3 +1211,10 @@ with tab_agent:
                     )
         else:
             st.warning("Enter a query to run the agent.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5 — PORTFOLIO
+# ═════════════════════════════════════════════════════════════════════════════
+
+with tab_portfolio:
+    render_portfolio_tab(api_base=API_BASE, api_key=_API_KEY)

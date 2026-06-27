@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import ErrorResponse
+from app.api.v1.endpoints.portfolio import portfolio_router
 from app.api.v1.endpoints.routes import (
     agent_router,
     market_router,
@@ -17,6 +18,7 @@ from app.api.v1.endpoints.routes import (
 )
 from app.api.v1.endpoints.streaming import streaming_router
 from app.api.v1.endpoints.versioning import versioning_router
+from app.core.cache_cleanup import cleanup_on_startup
 from app.core.exceptions import (
     DataIngestionError,
     FinSightBaseError,
@@ -95,6 +97,9 @@ async def lifespan(app: FastAPI):
     )
 
     _validate_startup_config()
+
+    # ── Cache cleanup: raw parquet on every boot ──────────────────────────────
+    cleanup_on_startup(dry_run=False)
 
     yield
 
@@ -221,6 +226,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_router, prefix=api_prefix)
     app.include_router(streaming_router, prefix=api_prefix)
     app.include_router(versioning_router, prefix=api_prefix)
+    app.include_router(portfolio_router, prefix=api_prefix)
 
     return app
 

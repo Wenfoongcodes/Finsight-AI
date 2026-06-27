@@ -1,0 +1,16 @@
+[
+  {
+    "version_id": "20260618T080807_e805e3a5",
+    "trained_at": "2026-06-18T08:08:07+00:00",
+    "trigger_reason": "no_artifacts_train_all",
+    "mean_roc_auc": 0.5228,
+    "mean_accuracy": 0.4766,
+    "mean_f1": 0.3756,
+    "n_features": 83,
+    "feature_hash": "e805e3a5",
+    "best_params": {},
+    "is_active": true,
+    "training_duration_s": 55.93,
+    "n_folds": 5
+  }
+]
