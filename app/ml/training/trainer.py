@@ -326,6 +326,12 @@ class ModelTrainer:
         min_stability_folds: int = 3,
         feature_selector_kwargs: Optional[dict] = None,
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
+        try:
+            model, feature_columns = self.load_model(ticker, model_name, horizon)
+            return model, feature_columns, None
+        except FileNotFoundError:
+            pass
+
         trigger = self._detect_trigger(
             ticker,
             model_name,
