@@ -9,8 +9,34 @@
     "n_features": 83,
     "feature_hash": "e805e3a5",
     "best_params": {},
-    "is_active": true,
+    "is_active": false,
     "training_duration_s": 30.4,
     "n_folds": 5
+  },
+  {
+    "version_id": "20260628T061415_4df51205",
+    "trained_at": "2026-06-28T06:14:15+00:00",
+    "trigger_reason": "feature_selection_applied",
+    "mean_roc_auc": 0.6515,
+    "mean_accuracy": 0.556,
+    "mean_f1": 0.5967,
+    "n_features": 28,
+    "feature_hash": "4df51205",
+    "best_params": {},
+    "is_active": true,
+    "training_duration_s": 22.86,
+    "n_folds": 5,
+    "feature_selection": {
+      "n_input": 83,
+      "n_output": 28,
+      "n_folds_evaluated": 5,
+      "min_stability_threshold": 3,
+      "dropped_low_variance": 5,
+      "dropped_high_correlation": 28,
+      "dropped_low_mi": 38,
+      "dropped_unstable": 19,
+      "mi_elbow_cutoff": 0.016057,
+      "elapsed_s": 4.476
+    }
   }
 ]

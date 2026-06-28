@@ -785,12 +785,6 @@ with tab_predict:
             unsafe_allow_html=True,
         )
 
-        narrative = pred.get("narrative", "")
-        if narrative:
-            st.markdown(
-                f'<div class="ml-narrative">{narrative}</div>', unsafe_allow_html=True
-            )
-
         st.markdown('<div style="height:1.5rem;"></div>', unsafe_allow_html=True)
         st.markdown(
             '<div class="section-label">SHAP Feature Attribution</div>',
@@ -886,128 +880,160 @@ with tab_predict:
                     unsafe_allow_html=True,
                 )
 
-            # ── Feature Selection Transparency Panel (Improvement 4) ──────────
-            # Renders only when the API populates feature_selection_meta, which
-            # requires prediction_service.py Fix 1 (Changes A-C) to be applied.
+            # ── How the model chose its indicators (Improvement 4) ───────────
+            # Expander always renders — content depends on whether metadata exists.
             fs_meta = pred.get("feature_selection_meta") or {}
-            if fs_meta and fs_meta.get("n_input_features", 0) > 0:
-                st.markdown(
-                    '<div style="height:1.5rem;"></div>', unsafe_allow_html=True
-                )
-                st.markdown(
-                    '<div class="section-label">Feature Selection — Stability Analysis</div>',
-                    unsafe_allow_html=True,
-                )
-                n_in = fs_meta.get("n_input_features", 0)
-                n_out = fs_meta.get("n_output_features", 0)
-                n_folds_ev = fs_meta.get("n_folds_evaluated", 0)
-                min_stab = fs_meta.get("min_stability_threshold", 0)
-                d_var = fs_meta.get("dropped_low_variance_count", 0)
-                d_corr = fs_meta.get("dropped_high_correlation_count", 0)
-                d_mi = fs_meta.get("dropped_low_mi_count", 0)
-                d_unst = fs_meta.get("dropped_unstable_count", 0)
-                elapsed = fs_meta.get("elapsed_s", 0.0)
-                retain_pct = round(n_out / n_in * 100, 1) if n_in else 0
+            with st.expander("🎯 How the model chose its indicators", expanded=False):
+                if fs_meta and fs_meta.get("n_input_features", 0) > 0:
+                    n_in = fs_meta.get("n_input_features", 0)
+                    n_out = fs_meta.get("n_output_features", 0)
+                    n_folds_ev = fs_meta.get("n_folds_evaluated", 0)
+                    min_stab = fs_meta.get("min_stability_threshold", 0)
+                    d_var = fs_meta.get("dropped_low_variance_count", 0)
+                    d_corr = fs_meta.get("dropped_high_correlation_count", 0)
+                    d_mi = fs_meta.get("dropped_low_mi_count", 0)
+                    d_unst = fs_meta.get("dropped_unstable_count", 0)
+                    mi_top = fs_meta.get("mi_scores_top10", {})
+                    stab_scores = fs_meta.get("stability_scores", {})
+                    n_dropped = n_in - n_out
 
-                # Four-stat summary row
-                st.markdown(
-                    f"""<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem;margin-bottom:1.25rem;">
-<div class="ml-stat"><div class="ml-stat-label">Evaluated</div>
-<div class="ml-stat-value">{n_in} features</div></div>
-<div class="ml-stat"><div class="ml-stat-label">Retained</div>
-<div class="ml-stat-value" style="color:var(--accent-green);">{n_out} ({retain_pct}%)</div></div>
-<div class="ml-stat"><div class="ml-stat-label">Stability Threshold</div>
-<div class="ml-stat-value">{min_stab}/{n_folds_ev} folds</div></div>
-<div class="ml-stat"><div class="ml-stat-label">Selection Time</div>
-<div class="ml-stat-value">{elapsed:.1f}s</div></div>
-</div>""",
-                    unsafe_allow_html=True,
-                )
+                    # ── Plain-English summary sentence ────────────────────────
+                    st.markdown(
+                        f'<p style="font-family:var(--font-body);font-size:0.9rem;'
+                        f'color:var(--text-primary);line-height:1.75;margin-bottom:1rem;">'
+                        f"Out of <strong>{n_in}</strong> available indicators, the model "
+                        f'identified <strong style="color:var(--accent-green);">{n_out}</strong> '
+                        f"that reliably predicted this stock's direction across "
+                        f"{n_folds_ev} different historical periods. "
+                        f"The remaining <strong>{n_dropped}</strong> were set aside because "
+                        f"they were either redundant, inconsistent, or added no useful signal."
+                        f"</p>",
+                        unsafe_allow_html=True,
+                    )
 
-                # Stage-level pipeline breakdown
-                st.markdown(
-                    f"""<div style="background:var(--bg-card);border:1px solid var(--border);
-border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;
-font-family:var(--font-mono);font-size:0.78rem;line-height:2;">
-<div style="color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;
-font-size:0.65rem;margin-bottom:0.6rem;">Pipeline stages — features removed per stage</div>
-<div style="display:grid;grid-template-columns:220px 1fr;gap:0.15rem 0.75rem;">
-    <span style="color:var(--accent-amber);">Stage 1 · Low variance</span>
-    <span style="color:var(--text-secondary);">{d_var} removed &nbsp;(bottom 5th-pct variance)</span>
-    <span style="color:var(--accent-amber);">Stage 2 · High correlation</span>
-    <span style="color:var(--text-secondary);">{d_corr} removed &nbsp;(mRMR, threshold 0.95)</span>
-    <span style="color:var(--accent-amber);">Stage 3 · Low mutual info</span>
-    <span style="color:var(--text-secondary);">{d_mi} removed &nbsp;(adaptive MI elbow)</span>
-    <span style="color:var(--accent-red);">Stability filter</span>
-    <span style="color:var(--text-secondary);">{d_unst} removed &nbsp;(&lt;{min_stab}/{n_folds_ev} CV folds)</span>
-</div>
-</div>""",
-                    unsafe_allow_html=True,
-                )
+                    # ── Plain-English filtering breakdown ─────────────────────
+                    st.markdown(
+                        f'<div style="background:var(--bg-elevated);border:1px solid var(--border);'
+                        f"border-left:3px solid var(--accent-purple);border-radius:0 6px 6px 0;"
+                        f'padding:0.9rem 1.2rem;margin-bottom:1.1rem;font-size:0.87rem;line-height:1.85;">'
+                        f'<div style="font-family:var(--font-body);color:var(--text-secondary);">'
+                        f'<strong style="color:var(--text-primary);">{d_var}</strong> indicators were '
+                        f"removed because they barely changed — they carried no useful information.<br>"
+                        f'<strong style="color:var(--text-primary);">{d_corr}</strong> were removed '
+                        f"because they were measuring the same thing as another indicator already kept.<br>"
+                        f'<strong style="color:var(--text-primary);">{d_mi}</strong> were removed '
+                        f"because they showed no meaningful connection to future price direction.<br>"
+                        f'<strong style="color:var(--text-primary);">{d_unst}</strong> were removed '
+                        f"because they only worked in some time periods, not consistently."
+                        f"</div></div>",
+                        unsafe_allow_html=True,
+                    )
 
-                # Top MI features expandable bar chart
-                mi_top = fs_meta.get("mi_scores_top10", {})
-                stab_scores = fs_meta.get("stability_scores", {})
-                if mi_top:
-                    with st.expander(
-                        "📊 Top features by mutual information", expanded=False
-                    ):
-                        mi_items = sorted(mi_top.items(), key=lambda kv: -kv[1])
-                        bar_max = max(v for _, v in mi_items) or 1.0
-                        rows = ""
-                        for feat_name, mi_val in mi_items:
-                            bar_w = round(mi_val / bar_max * 100, 1)
-                            sc = stab_scores.get(feat_name, 0)
-                            sc_color = (
-                                "var(--accent-green)"
-                                if sc >= min_stab
-                                else "var(--accent-red)"
+                    # ── Most influential indicators (no raw scores) ───────────
+                    if mi_top:
+                        with st.expander(
+                            "📊 Most influential indicators for this stock",
+                            expanded=False,
+                        ):
+                            st.markdown(
+                                '<div style="font-family:var(--font-body);font-size:0.8rem;'
+                                'color:var(--text-muted);margin-bottom:0.75rem;">'
+                                "Longer bar = stronger connection to future price direction "
+                                "for this specific stock.</div>",
+                                unsafe_allow_html=True,
                             )
-                            rows += (
-                                '<div style="margin-bottom:0.55rem;">'
-                                + '<div style="display:flex;justify-content:space-between;'
-                                + 'font-family:var(--font-mono);font-size:0.75rem;margin-bottom:0.2rem;">'
-                                + f'<span style="color:var(--accent-cyan);">{feat_name}</span>'
-                                + f'<span style="color:var(--text-muted);">MI {mi_val:.4f} &nbsp;·&nbsp; '
-                                + f'<span style="color:{sc_color};">stability {sc}/{n_folds_ev}</span></span></div>'
-                                + '<div style="background:var(--bg-elevated);border-radius:3px;height:5px;">'
-                                + f'<div style="height:100%;width:{bar_w}%;background:var(--accent-purple);'
-                                + 'border-radius:3px;"></div></div></div>'
+                            mi_items = sorted(mi_top.items(), key=lambda kv: -kv[1])
+                            bar_max = max(v for _, v in mi_items) or 1.0
+                            rows = ""
+                            for feat_name, mi_val in mi_items:
+                                bar_w = round(mi_val / bar_max * 100, 1)
+                                friendly = feat_name.replace("_", " ").title()
+                                sc = stab_scores.get(feat_name, 0)
+                                always_on = sc >= n_folds_ev
+                                badge_color = (
+                                    "var(--accent-green)"
+                                    if sc >= min_stab
+                                    else "var(--accent-red)"
+                                )
+                                badge_label = (
+                                    "always consistent"
+                                    if always_on
+                                    else f"consistent {sc}/{n_folds_ev} periods"
+                                )
+                                rows += (
+                                    '<div style="margin-bottom:0.65rem;">'
+                                    + '<div style="display:flex;justify-content:space-between;'
+                                    + 'font-size:0.82rem;margin-bottom:0.25rem;">'
+                                    + f'<span style="color:var(--text-primary);font-family:var(--font-body);">{friendly}</span>'
+                                    + '<span style="font-family:var(--font-mono);font-size:0.7rem;'
+                                    + f'color:{badge_color};">{badge_label}</span></div>'
+                                    + '<div style="background:var(--bg-elevated);border-radius:3px;height:6px;">'
+                                    + f'<div style="height:100%;width:{bar_w}%;background:var(--accent-purple);'
+                                    + 'border-radius:3px;opacity:0.85;"></div></div></div>'
+                                )
+                            st.markdown(
+                                f'<div style="padding:0.25rem 0;">{rows}</div>',
+                                unsafe_allow_html=True,
                             )
-                        st.markdown(
-                            f'<div style="padding:0.5rem 0;">{rows}</div>',
-                            unsafe_allow_html=True,
-                        )
 
-                # Stability score distribution
-                if stab_scores:
-                    with st.expander(
-                        f"🔍 Stability distribution ({len(stab_scores)} features seen)",
-                        expanded=False,
-                    ):
-                        from collections import Counter
-
-                        dist = Counter(stab_scores.values())
-                        rows = ""
-                        for fc in sorted(dist.keys(), reverse=True):
-                            cnt = dist[fc]
-                            ok = fc >= min_stab
-                            clr = "var(--accent-green)" if ok else "var(--accent-red)"
-                            lbl = "stable" if ok else "rejected"
-                            rows += (
-                                '<div style="display:flex;justify-content:space-between;'
-                                + "padding:0.35rem 0;border-bottom:1px solid var(--border);"
-                                + 'font-family:var(--font-mono);font-size:0.78rem;">'
-                                + f'<span style="color:{clr};">Selected in {fc}/{n_folds_ev} folds</span>'
-                                + f'<span style="color:var(--text-secondary);">{cnt} features &nbsp;'
-                                + f'<span style="color:{clr};">[{lbl}]</span></span></div>'
+                    # ── Consistency breakdown ─────────────────────────────────
+                    if stab_scores:
+                        with st.expander(
+                            "🔍 How consistent were these indicators?",
+                            expanded=False,
+                        ):
+                            st.markdown(
+                                '<div style="font-family:var(--font-body);font-size:0.8rem;'
+                                'color:var(--text-muted);margin-bottom:0.75rem;">'
+                                "An indicator is only kept if it proved useful across "
+                                "multiple different time periods — not just one lucky stretch.</div>",
+                                unsafe_allow_html=True,
                             )
-                        st.markdown(
-                            '<div style="background:var(--bg-elevated);border:1px solid var(--border);'
-                            + f'border-radius:6px;padding:0.5rem 0.75rem;">{rows}</div>',
-                            unsafe_allow_html=True,
-                        )
-            # ── END Feature Selection Panel ───────────────────────────────────
+                            from collections import Counter
+
+                            dist = Counter(stab_scores.values())
+                            rows = ""
+                            for fc in sorted(dist.keys(), reverse=True):
+                                cnt = dist[fc]
+                                ok = fc >= min_stab
+                                clr = (
+                                    "var(--accent-green)" if ok else "var(--accent-red)"
+                                )
+                                if fc == n_folds_ev:
+                                    consistency = "Worked every time"
+                                elif fc >= min_stab:
+                                    consistency = "Worked most of the time  ✓ kept"
+                                elif fc == 1:
+                                    consistency = "Only worked once  — excluded"
+                                else:
+                                    consistency = f"Inconsistent ({fc}/{n_folds_ev} periods)  — excluded"
+                                rows += (
+                                    '<div style="display:flex;justify-content:space-between;'
+                                    + "padding:0.4rem 0;border-bottom:1px solid var(--border);"
+                                    + 'font-size:0.83rem;">'
+                                    + f'<span style="color:{clr};font-family:var(--font-body);">{consistency}</span>'
+                                    + '<span style="font-family:var(--font-mono);font-size:0.78rem;'
+                                    + f'color:var(--text-secondary);">{cnt} indicators</span></div>'
+                                )
+                            st.markdown(
+                                '<div style="background:var(--bg-elevated);border:1px solid var(--border);'
+                                + f'border-radius:6px;padding:0.5rem 0.75rem;">{rows}</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                else:
+                    # Shown when the cached prediction pre-dates Improvement 4
+                    # or the model hasn't been retrained yet with feature selection.
+                    st.markdown(
+                        '<div style="font-family:var(--font-body);font-size:0.85rem;'
+                        'color:var(--text-muted);padding:0.25rem 0;line-height:1.7;">'
+                        "Run a fresh prediction to see how the model chose its indicators. "
+                        "This detail becomes available after the model has been trained "
+                        "with the automated indicator selection pipeline."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+            # ── END indicator selection panel ─────────────────────────────────
 
         else:
             # ── FIX: this else belongs to `if features:` (8-space indent),

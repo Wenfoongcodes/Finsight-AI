@@ -326,7 +326,13 @@ class ModelTrainer:
         min_stability_folds: int = 3,
         feature_selector_kwargs: Optional[dict] = None,
     ) -> tuple[Any, list[str], "TrainingResult | None"]:
-        trigger = self._detect_trigger(ticker, model_name, horizon, list(X.columns))
+        trigger = self._detect_trigger(
+            ticker,
+            model_name,
+            horizon,
+            list(X.columns),
+            run_feature_selection=run_feature_selection,
+        )
 
         if trigger is None:
             model, feature_columns = self.load_model(ticker, model_name, horizon)
@@ -800,6 +806,7 @@ class ModelTrainer:
         model_name: str,
         horizon: str,
         current_feature_cols: list[str],
+        run_feature_selection: bool = True,
     ) -> Optional[str]:
         """
         Determine whether retraining is needed.  Returns a trigger reason string
@@ -879,6 +886,19 @@ class ModelTrainer:
                 horizon,
                 len(newly_available),
             )
+
+        # If the caller wants feature selection but the active artifact was
+        # trained before Improvement 4, trigger one retrain so the stable
+        # feature set and selection metadata are established.
+        if run_feature_selection and not artifact.get("feature_selection_meta"):
+            logger.info(
+                "[%s/%s/%s] Active version has no feature_selection_meta "
+                "— retraining with stability selection.",
+                ticker,
+                model_name,
+                horizon,
+            )
+            return TRIGGER_FEATURE_SELECTION
 
         return None
 

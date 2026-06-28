@@ -61,7 +61,9 @@ class TestModelTrainer:
 
     def test_load_model_roundtrip(self, X_y, tmp_path):
         X, y = X_y
+
         trainer = ModelTrainer(model_dir=tmp_path)
+
         trainer.train(
             "random_forest",
             X,
@@ -69,9 +71,15 @@ class TestModelTrainer:
             ticker="TEST",
             hyperparams={"n_estimators": 10},
         )
+
         model, feature_cols = trainer.load_model("TEST", "random_forest")
+
         assert model is not None
-        assert len(feature_cols) == X.shape[1]
+
+        # Returned features should be a subset of the original features
+        assert len(feature_cols) > 0
+        assert len(feature_cols) <= X.shape[1]
+        assert set(feature_cols).issubset(set(X.columns))
 
     def test_load_model_raises_if_not_found(self, tmp_path):
         from app.core.exceptions import ModelNotFoundError

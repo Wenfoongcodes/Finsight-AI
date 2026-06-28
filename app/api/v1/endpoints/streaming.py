@@ -250,6 +250,7 @@ def _serialise_prediction_response(resp, ticker: str, horizon: str) -> dict:
         "narrative": resp.narrative,
         "top_features": resp.shap_explanation.get("top_features", []),
         "auto_trained": resp.auto_trained,
+        "feature_selection_meta": resp.feature_selection_meta,
         "fused_direction": fused_direction,
         "fused_confidence": fused_confidence,
         "fused_probability": fused_probability,
