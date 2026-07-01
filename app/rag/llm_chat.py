@@ -93,7 +93,7 @@ class OpenAIClient:
 
         # Groq  (remember to set LLM_MODEL to a Groq-supported model)
         LLM_BASE_URL=https://api.groq.com/openai/v1
-        LLM_MODEL=llama3-70b-8192
+        LLM_MODEL=openai/gpt-oss-120b
 
         # Ollama (local)
         LLM_BASE_URL=http://localhost:11434/v1
@@ -124,12 +124,47 @@ class OpenAIClient:
         self._client = OpenAI(**client_kwargs)
         self._base_url = base_url  # stored for logging / diagnostics
 
+    def chat_stream(
+        self,
+        messages,
+        model: str = settings.LLM_MODEL,
+        temperature: float = settings.LLM_TEMPERATURE,
+        max_tokens: int = settings.LLM_MAX_TOKENS,
+    ):
+        """
+        Same as ``chat()`` but yields content deltas as they arrive instead
+        of blocking for the full completion. Yields plain str chunks.
+        """
+        try:
+            stream = self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    yield delta
+        except Exception as exc:
+            detail = getattr(exc, "message", None) or str(exc)
+            status = getattr(exc, "status_code", None)
+            if status:
+                detail = f"HTTP {status}: {detail}"
+            raise LLMError(
+                f"LLM streaming call failed (model={model}, endpoint={self._base_url or 'openai'}): "
+                f"{detail}",
+                detail=str(exc),
+            ) from exc
+
     def chat(
         self,
         messages,
         model: str = settings.LLM_MODEL,
         temperature: float = settings.LLM_TEMPERATURE,
         max_tokens: int = settings.LLM_MAX_TOKENS,
+        reasoning_effort: str | None = None,
     ) -> tuple[str, int]:
         """
         Send a chat completion request.
@@ -160,12 +195,20 @@ class OpenAIClient:
         )
 
         try:
-            response = self._client.chat.completions.create(
+            create_kwargs = dict(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            # gpt-oss (and other reasoning models) on Groq accept
+            # reasoning_effort to cap hidden chain-of-thought tokens —
+            # without this, low max_tokens budgets get fully consumed by
+            # reasoning and the final answer comes back empty.
+            if reasoning_effort:
+                create_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
+
+            response = self._client.chat.completions.create(**create_kwargs)
             content = response.choices[0].message.content or ""
             tokens = response.usage.total_tokens if response.usage else 0
 

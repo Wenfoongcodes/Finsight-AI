@@ -196,7 +196,7 @@ def _render_correlation_heatmap(
         xaxis=dict(side="bottom"),
         yaxis=dict(autorange="reversed"),
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def _render_risk_attribution(risk_attribution: list[dict], title: str) -> None:
@@ -233,7 +233,7 @@ def _render_risk_attribution(risk_attribution: list[dict], title: str) -> None:
         ),
         yaxis=dict(showgrid=False),
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def _render_efficient_frontier(
@@ -296,7 +296,7 @@ def _render_efficient_frontier(
             gridcolor="rgba(30,45,61,0.8)",
         ),
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def _render_sector_pie(sector_exposure: dict[str, float]) -> None:
@@ -337,7 +337,7 @@ def _render_sector_pie(sector_exposure: dict[str, float]) -> None:
         showlegend=True,
         legend=dict(orientation="v"),
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +436,7 @@ def _render_action_table(result: dict, portfolio_value: float) -> None:
         fmt["Recommended $"] = "${:,.0f}"
 
     styled = df.style.format(fmt).map(_style_action_column, subset=["Action"])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True)
 
 
 def _render_predictions_table(predictions: list[dict]) -> None:
@@ -455,7 +455,7 @@ def _render_predictions_table(predictions: list[dict]) -> None:
         }
         for p in predictions
     ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     st.caption(
         "This is a directional signal from the prediction model — a "
         "ranking of which stocks look relatively stronger, not a return "
@@ -514,7 +514,7 @@ def render_portfolio_tab(api_base: str, api_key: Optional[str] = None) -> None:
     edited_df = st.data_editor(
         st.session_state.portfolio_positions_df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key="portfolio_editor",
         hide_index=True,  # suppresses the index column unconditionally —
         # belt-and-suspenders guard so even if the backing DataFrame's index
@@ -607,9 +607,7 @@ def render_portfolio_tab(api_base: str, api_key: Optional[str] = None) -> None:
 
     run_col, _ = st.columns([2, 6])
     with run_col:
-        run_clicked = st.button(
-            "▶  Analyze Portfolio", type="primary", use_container_width=True
-        )
+        run_clicked = st.button("▶  Analyze Portfolio", type="primary", width="stretch")
 
     if run_clicked:
         positions = _parse_positions_table(edited_df)
@@ -752,7 +750,7 @@ def render_portfolio_tab(api_base: str, api_key: Optional[str] = None) -> None:
                 "Optimal weight": result["optimal_weights"],
             }
         ).fillna(0.0)
-        st.dataframe(weights_df.style.format("{:.2%}"), use_container_width=True)
+        st.dataframe(weights_df.style.format("{:.2%}"), width="stretch")
         st.caption(
             f"Covariance estimation method: {result['covariance_method'].replace('_', ' ')} "
             f"· Lookback: {result['lookback_days']} trading days · "

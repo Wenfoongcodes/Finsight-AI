@@ -54,9 +54,7 @@ def render_streaming_signal_tab(
     """
     run_col, _ = st.columns([2, 6])
     with run_col:
-        run_clicked = st.button(
-            "▶  Analyse Signal", type="primary", use_container_width=True
-        )
+        run_clicked = st.button("▶  Analyse Signal", type="primary", width="stretch")
 
     if run_clicked:
         st.session_state.last_prediction = None

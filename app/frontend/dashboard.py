@@ -162,7 +162,16 @@ st.markdown(
 .stApp { background: var(--bg-base) !important; }
 .main .block-container { padding: 1.5rem 2rem 3rem 2rem; max-width: 1400px; }
 html, body, .stApp * { font-family: var(--font-body) !important; color: var(--text-primary); }
-#MainMenu, footer, header { visibility: hidden; }
+[data-testid="stIconMaterial"],
+[data-testid="collapsedControl"] span,
+.material-symbols-outlined,
+.material-symbols-rounded {
+    font-family: 'Material Symbols Outlined', 'Material Symbols Rounded' !important;
+}
+
+#MainMenu, footer { visibility: hidden; }
+header[data-testid="stHeader"] { background: transparent !important; box-shadow: none !important; }
+[data-testid="collapsedControl"] { visibility: visible !important; display: flex !important; }
 .stDeployButton { display: none; }
 
 [data-testid="stSidebar"] { background: var(--bg-surface) !important; border-right: 1px solid var(--border) !important; }
@@ -518,7 +527,7 @@ with st.sidebar:
             height=90,
             label_visibility="collapsed",
         )
-        if st.button("Ingest Text", use_container_width=True, key="btn_ingest_text"):
+        if st.button("Ingest Text", width="stretch", key="btn_ingest_text"):
             if ingest_text.strip():
                 result = api_post(
                     "/rag/ingest",
@@ -539,7 +548,7 @@ with st.sidebar:
             placeholder="https://www.reuters.com/markets/…",
             label_visibility="collapsed",
         )
-        if st.button("Fetch & Ingest", use_container_width=True, key="btn_ingest_url"):
+        if st.button("Fetch & Ingest", width="stretch", key="btn_ingest_url"):
             url_val = article_url.strip()
             if url_val:
                 if not url_val.startswith(("http://", "https://")):
@@ -847,9 +856,7 @@ with tab_predict:
                     font=dict(family="DM Mono, monospace", size=11),
                 ),
             )
-            st.plotly_chart(
-                fig, use_container_width=True, config={"displayModeBar": False}
-            )
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
             with st.expander("📖 What do these features mean?", expanded=False):
                 st.markdown(
@@ -1064,7 +1071,7 @@ with tab_predict:
 with tab_market:
     load_col, _ = st.columns([2, 6])
     with load_col:
-        load_clicked = st.button("↓  Load Market Data", use_container_width=True)
+        load_clicked = st.button("↓  Load Market Data", width="stretch")
 
     if load_clicked:
         with st.spinner("Fetching market data…"):
@@ -1167,7 +1174,7 @@ with tab_market:
                 )
                 st.plotly_chart(
                     fig_spark,
-                    use_container_width=True,
+                    width="stretch",
                     config={"displayModeBar": False},
                 )
         except Exception:
@@ -1227,7 +1234,7 @@ with tab_chat:
                 label_visibility="collapsed",
             )
         with send_col:
-            submitted = st.form_submit_button("Send", use_container_width=True)
+            submitted = st.form_submit_button("Send", width="stretch")
 
     if submitted and user_input.strip():
         st.session_state.chat_history.append({"role": "user", "content": user_input})
@@ -1252,7 +1259,7 @@ with tab_chat:
     if st.session_state.chat_history:
         clear_col, _ = st.columns([1, 7])
         with clear_col:
-            if st.button("Clear history", use_container_width=True):
+            if st.button("Clear history", width="stretch"):
                 st.session_state.chat_history = []
                 st.rerun()
 
@@ -1298,9 +1305,7 @@ with tab_agent:
 
     run_agent_col, _ = st.columns([2, 6])
     with run_agent_col:
-        agent_clicked = st.button(
-            "▶  Run Agent", type="primary", use_container_width=True
-        )
+        agent_clicked = st.button("▶  Run Agent", type="primary", width="stretch")
 
     if agent_clicked:
         if agent_query.strip():

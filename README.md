@@ -217,7 +217,7 @@ Set `LLM_BASE_URL` and `LLM_MODEL` together:
 ```bash
 # Groq
 LLM_BASE_URL=https://api.groq.com/openai/v1
-LLM_MODEL=llama3-70b-8192
+LLM_MODEL=openai/gpt-oss-120b
 
 # Ollama (local)
 LLM_BASE_URL=http://localhost:11434/v1

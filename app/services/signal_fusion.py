@@ -22,7 +22,7 @@ from configs.settings import settings
 logger = get_logger("signal_fusion")
 
 _PROVIDER_MODEL_MAP: dict[str, str] = {
-    "groq": "llama3-70b-8192",
+    "groq": "openai/gpt-oss-120b",
     "ollama": "llama3",
     "azure": "gpt-4o-mini",
 }
@@ -301,7 +301,13 @@ class SignalFusionService:
         model = self._resolve_model()
         logger.info("[%s] LLM fusion model: %s", ticker, model)
 
-        raw, _ = llm.chat(messages, model=model, temperature=0.0, max_tokens=600)
+        raw, _ = llm.chat(
+            messages,
+            model=model,
+            temperature=0.0,
+            max_tokens=1500,
+            reasoning_effort="low",
+        )
 
         if not raw or not raw.strip():
             raise ValueError(
