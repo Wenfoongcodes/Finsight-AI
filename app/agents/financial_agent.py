@@ -117,6 +117,11 @@ def _sanitise_response(text: str) -> str:
         flags=re.MULTILINE,
     )
 
+    # ── 4.5. Pipe tables (GFM-style) → <table> HTML ───────────────────────────
+    # Must run BEFORE the newline-collapsing steps below, since those would
+    # otherwise destroy the row boundaries a pipe table depends on.
+    text = _convert_markdown_tables(text)
+
     # ── 5. Blank lines → paragraph break ─────────────────────────────────────
     text = re.sub(r"\n{2,}", "<br><br>", text)
 
@@ -124,6 +129,55 @@ def _sanitise_response(text: str) -> str:
     text = text.replace("\n", " ")
 
     return text.strip()
+
+
+_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_TABLE_SEP_RE = re.compile(r"^\|(?:\s*:?-{2,}:?\s*\|)+$")
+
+
+def _convert_markdown_tables(text: str) -> str:
+    """Detect GFM-style pipe tables (a header row, a ``---|---`` separator
+    row, and one or more data rows) and convert each one to an HTML
+    ``<table>``. Runs on already bold/heading/bullet-processed text, so
+    cell contents may contain ``<span>`` tags — that's fine, they pass
+    through untouched.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i].strip()
+        if (
+            _TABLE_ROW_RE.match(line)
+            and i + 1 < n
+            and _TABLE_SEP_RE.match(lines[i + 1].strip())
+        ):
+            header_cells = [c.strip() for c in line.strip("|").split("|")]
+            j = i + 2
+            rows: list[list[str]] = []
+            while j < n and _TABLE_ROW_RE.match(lines[j].strip()):
+                row_cells = [c.strip() for c in lines[j].strip().strip("|").split("|")]
+                rows.append(row_cells)
+                j += 1
+
+            html = ["<table>", "<thead>", "<tr>"]
+            html += [f"<th>{c}</th>" for c in header_cells]
+            html += ["</tr>", "</thead>", "<tbody>"]
+            for row_cells in rows:
+                html.append("<tr>")
+                html += [f"<td>{c}</td>" for c in row_cells]
+                html.append("</tr>")
+            html += ["</tbody>", "</table>"]
+
+            out.append("".join(html))
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+
+    return "\n".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

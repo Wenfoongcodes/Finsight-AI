@@ -54,3 +54,6 @@ Thumbs.db
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 *.dockerignore
+
+# ── Runtime data (dashboard-generated, not source) ──────────────────────────────
+app/frontend/custom_tickers.json

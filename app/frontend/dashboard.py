@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import json
 import os
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
+# Streamlit only adds this script's own directory (app/frontend/) to
+# sys.path, not the project root — so `app.*` imports fail unless we
+# add it explicitly. Same pattern as scripts/train_model.py etc.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+import markdown as md
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 from portfolio_tab import render_portfolio_tab
 from streaming_signal import render_streaming_signal_tab
+
+from app.core.shap_glossary import describe_shap_feature
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration — environment-driven
@@ -31,9 +42,6 @@ TICKERS = [
     "TSLA",
     "META",
     "NVDA",
-    "JPM",
-    "GS",
-    "SPY",
 ]
 
 HORIZON_OPTIONS = {
@@ -43,84 +51,57 @@ HORIZON_OPTIONS = {
     "Next 6 Months (6m)": "6m",
 }
 
+# ── Custom ticker persistence (survives page refresh / process restart) ─────
+_CUSTOM_TICKERS_PATH = Path(__file__).parent / "custom_tickers.json"
+
+
+def _load_custom_tickers() -> list[str]:
+    """Read persisted custom tickers from disk. Tolerant of a missing or
+    corrupted file — worst case we just start from an empty list rather
+    than crashing the dashboard."""
+    try:
+        if _CUSTOM_TICKERS_PATH.exists():
+            data = json.loads(_CUSTOM_TICKERS_PATH.read_text())
+            if isinstance(data, list):
+                return [str(t).upper().strip() for t in data if t]
+    except Exception:
+        pass
+    return []
+
+
+def _save_custom_tickers(tickers: list[str]) -> None:
+    """Persist the current custom ticker list to disk. Failures are
+    non-fatal — the ticker still works for the rest of the session even
+    if the write fails (e.g. read-only filesystem)."""
+    try:
+        _CUSTOM_TICKERS_PATH.write_text(json.dumps(tickers, indent=2))
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _is_valid_ticker(symbol: str) -> bool:
+    """Check whether a ticker symbol resolves to real market data.
+
+    Cached for an hour per symbol so re-selecting the same custom ticker
+    (or re-running the script on an unrelated widget interaction) doesn't
+    trigger a repeat network call to yfinance.
+    """
+    if not symbol or not symbol.replace(".", "").replace("-", "").isalnum():
+        return False
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(symbol).history(period="5d")
+        return not hist.empty
+    except Exception:
+        return False
+
+
 # ── SHAP glossary ──────────────────────────────────────────────────────────────
-_SHAP_GLOSSARY: dict[str, str] = {
-    "rsi_14": "Relative Strength Index (14-day) — measures whether the stock is overbought (>70) or oversold (<30) based on recent price changes.",
-    "rsi_7": "Short-term RSI (7-day) — a faster version of RSI that reacts more quickly to recent price moves.",
-    "rsi_21": "Slower RSI (21-day) — a smoother momentum indicator over a wider window.",
-    "rsi_overbought": "Flag = 1 when RSI is above 70, signalling the stock may be overbought.",
-    "rsi_oversold": "Flag = 1 when RSI is below 30, signalling the stock may be oversold.",
-    "macd_histogram": "MACD Histogram — the gap between the MACD line and its signal line; positive = accelerating uptrend, negative = accelerating downtrend.",
-    "macd_bullish": "Flag = 1 when the MACD line has crossed above its signal line (bullish crossover).",
-    "macd": "Moving Average Convergence Divergence — difference between 12-day and 26-day exponential moving averages.",
-    "momentum_5d": "5-day price momentum — how much the stock has moved over the last 5 trading days as a percentage.",
-    "momentum_10d": "10-day price momentum — percentage price change over the last two weeks.",
-    "momentum_21d": "21-day (monthly) price momentum — measures the monthly trend direction.",
-    "momentum_63d": "63-day (quarterly) price momentum — measures the 3-month trend direction.",
-    "momentum_persistence": "Ratio of short-term to long-term momentum; >1 means the recent move is accelerating.",
-    "realized_vol_5d": "5-day realized volatility — annualised standard deviation of daily returns over 5 days. High = more uncertain.",
-    "realized_vol_10d": "10-day realized volatility — same concept over two weeks.",
-    "realized_vol_21d": "21-day realized volatility — monthly volatility estimate.",
-    "realized_vol_63d": "3-month realized volatility — quarterly volatility estimate.",
-    "gk_vol_20": "Garman-Klass volatility — a precise intraday volatility estimate using open, high, low, and close prices.",
-    "atr_pct": "ATR as a % of price — Average True Range divided by the current price; shows how much the stock typically moves per day relative to its price.",
-    "atr_14": "Average True Range (14-day) — average of daily price swings; a higher ATR means larger typical daily moves.",
-    "hurst_30": "Hurst Exponent — >0.5 means the stock is trending; <0.5 means it tends to reverse; ≈0.5 means random behaviour.",
-    "volume_ratio": "Today's volume divided by the 20-day average. >1 means unusually high activity.",
-    "volume_imbalance_20": "Buy/sell volume imbalance — positive means more buyer-initiated trades; negative means more selling pressure.",
-    "obv_momentum": "On-Balance Volume momentum — rate of change in cumulative volume trend over 5 days.",
-    "obv_sma20": "OBV 20-day moving average — the smoothed trend of cumulative volume flow.",
-    "obv": "On-Balance Volume — running total of volume; rising OBV confirms upward price moves.",
-    "vwap_deviation": "Price deviation from VWAP (volume-weighted average price). Positive = trading above the session average; negative = below.",
-    "bb_pct": "Bollinger Band position — 0 = at lower band, 0.5 = middle, 1 = at upper band. Shows where price sits within its recent range.",
-    "bb_width": "Bollinger Band width — wider bands mean higher volatility; narrow bands (squeeze) often precede big moves.",
-    "bb_squeeze": "Flag = 1 when the bands are unusually narrow, signalling a potential breakout is building.",
-    "close_vs_sma_5": "How far the price is above or below its 5-day moving average, as a percentage.",
-    "close_vs_sma_10": "How far the price is above or below its 10-day moving average.",
-    "close_vs_sma_20": "How far the price is above or below its 20-day moving average.",
-    "close_vs_sma_50": "How far the price is above or below its 50-day moving average.",
-    "sma_5_20_cross": "Flag = 1 when the 5-day average is above the 20-day average (short-term uptrend).",
-    "sma_20_50_cross": "Flag = 1 when the 20-day average is above the 50-day average (medium-term uptrend).",
-    "ema_12_26_cross": "Flag = 1 when the 12-day EMA is above the 26-day EMA — the same crossover used by MACD.",
-    "returns_1d": "Yesterday's return — did the stock go up or down since the previous close?",
-    "returns_3d": "3-day return — cumulative price change over the last 3 sessions.",
-    "returns_5d": "5-day (weekly) return — how the stock performed over the last week.",
-    "returns_10d": "10-day return — two-week cumulative performance.",
-    "log_returns": "Logarithmic daily return — a mathematically symmetric measure of daily price change.",
-    "overnight_gap": "Overnight gap — how much the opening price differed from the previous close (news-driven moves often appear here).",
-    "pct_from_high_5": "How far below the 5-day high the price is. Near 0 = price is at a recent peak.",
-    "pct_from_high_20": "How far below the 20-day high the price is.",
-    "pct_from_low_5": "How far above the 5-day low the price is. Near 0 = price is at a recent trough.",
-    "pct_from_low_20": "How far above the 20-day low the price is.",
-    "rolling_range_5": "5-day price range as a fraction of price — measures how much the stock swung over the last week.",
-    "rolling_range_20": "20-day price range as a fraction of price.",
-    "hl_spread_pct": "High-minus-low spread as a percentage of price — today's intraday volatility.",
-    "amihud_illiq_20": "Amihud illiquidity — how much price moves per dollar traded. Higher = harder to trade without moving the price.",
-    "rolling_skew_20": "Return skewness (20-day) — positive means occasional large up-days; negative means occasional large crashes.",
-    "rolling_skew_60": "Return skewness (60-day) — same concept over a 3-month window.",
-    "rolling_kurt_20": "Return kurtosis (20-day) — measures how 'fat' the tails of daily returns are; high kurtosis means more surprise moves.",
-    "rolling_kurt_60": "Return kurtosis (60-day) — 3-month tail-risk indicator.",
-    "vol_regime_pct": "Volatility regime percentile — 0 = historically calm market, 1 = historically turbulent.",
-    "high_vol_regime": "Flag = 1 when the stock is in the top 25% of its historical volatility range.",
-    "low_vol_regime": "Flag = 1 when the stock is in the bottom 25% of its historical volatility range.",
-    "trend_regime": "Trend regime: +1 = confirmed uptrend, -1 = confirmed downtrend, 0 = sideways.",
-    "in_uptrend": "Flag = 1 when price is in a confirmed uptrend (50-day avg above 200-day avg).",
-    "in_downtrend": "Flag = 1 when price is in a confirmed downtrend.",
-    "candle_body": "Candlestick body size — how large today's open-to-close move is relative to the full high-low range.",
-    "upper_shadow": "Upper wick — how much the price reached above the open/close range; large upper wick can signal rejection.",
-    "lower_shadow": "Lower wick — how much the price fell below the open/close range; large lower wick can signal support.",
-    "candle_dir": "Candlestick direction: 1 = close > open (bullish candle), 0 = bearish candle.",
-}
-
-
+# Moved to app/core/shap_glossary.py — shared reference data, not UI logic.
 def _shap_feature_description(feature_name: str) -> str:
-    if feature_name in _SHAP_GLOSSARY:
-        return _SHAP_GLOSSARY[feature_name]
-    for key, desc in _SHAP_GLOSSARY.items():
-        if feature_name.startswith(key):
-            return desc
-    clean = feature_name.replace("_", " ").strip()
-    return f"Quantitative indicator derived from price and volume data ({clean})."
+    return describe_shap_feature(feature_name)
 
 
 st.set_page_config(
@@ -160,7 +141,9 @@ st.markdown(
 }
 
 .stApp { background: var(--bg-base) !important; }
-.main .block-container { padding: 1.5rem 2rem 3rem 2rem; max-width: 1400px; }
+.main .block-container { padding: 0.5rem 2rem 3rem 2rem !important; max-width: 1400px !important; }
+div[data-testid="stAppViewBlockContainer"] { padding-top: 0.5rem !important; }
+div[data-testid="stMainBlockContainer"] { padding-top: 0.5rem !important; }
 html, body, .stApp * { font-family: var(--font-body) !important; color: var(--text-primary); }
 [data-testid="stIconMaterial"],
 [data-testid="collapsedControl"] span,
@@ -191,6 +174,9 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
 
 .stButton > button { background: transparent !important; border: 1px solid var(--accent-cyan) !important; color: var(--accent-cyan) !important; font-family: var(--font-mono) !important; font-size: 0.8rem !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; padding: 0.5rem 1.5rem !important; border-radius: 4px !important; transition: all 0.2s ease !important; }
 .stButton > button:hover { background: rgba(0, 212, 255, 0.08) !important; box-shadow: 0 0 20px rgba(0, 212, 255, 0.2) !important; }
+
+[data-testid="stRadio"] label { align-items: flex-start !important; }
+[data-testid="stRadio"] label > div:last-child { margin-top: 0.1rem !important; }
 
 [data-testid="metric-container"] { background: var(--bg-card) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; padding: 1rem 1.2rem !important; }
 [data-testid="metric-container"] label { font-family: var(--font-mono) !important; font-size: 0.72rem !important; letter-spacing: 0.1em !important; text-transform: uppercase !important; color: var(--text-secondary) !important; }
@@ -283,10 +269,16 @@ header[data-testid="stHeader"] { background: transparent !important; box-shadow:
     color: var(--text-primary);
 }
 .narrative-block em, .narrative-block i    { font-style: normal !important; }
-.narrative-block strong, .narrative-block b    { font-weight: 400 !important; color: var(--text-primary) !important; }
+.narrative-block strong, .narrative-block b    { font-weight: 600 !important; color: var(--text-primary) !important; }
 .narrative-block h1, .narrative-block h2, .narrative-block h3   { font-size: 0.9rem !important; font-weight: 400 !important; font-family: var(--font-body) !important; margin: 0.25rem 0 !important; }
 .narrative-block ul, .narrative-block ol   { margin: 0 !important; padding: 0 !important; list-style: none !important; }
 .narrative-block li   { font-size: 0.9rem !important; line-height: 1.7 !important; }
+.narrative-block table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.85rem; }
+.narrative-block th, .narrative-block td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; color: var(--text-primary); }
+.narrative-block th { background: var(--bg-card); font-family: var(--font-mono) !important; font-size: 0.72rem !important; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted) !important; font-weight: 500 !important; }
+.narrative-block tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+.narrative-block code { background: var(--bg-card); border: 1px solid var(--border); border-radius: 3px; padding: 0.1rem 0.35rem; font-family: var(--font-mono) !important; font-size: 0.82rem; color: var(--accent-cyan); }
+.narrative-block p { margin: 0.4rem 0 !important; }
 
 .agent-heading { display: block; font-family: var(--font-mono) !important; font-size: 0.7rem !important; font-weight: 500 !important; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted) !important; margin-top: 0.9rem; margin-bottom: 0.2rem; font-style: normal !important; }
 .agent-bold { font-family: var(--font-body) !important; font-size: 0.9rem !important; font-weight: 600 !important; color: var(--text-primary) !important; font-style: normal !important; }
@@ -442,9 +434,13 @@ for key, default in [
     ("last_prediction", None),
     ("market_summary", None),
     ("session_id", str(uuid.uuid4())),
+    ("custom_tickers", None),  # lazily loaded from disk below
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+if st.session_state.custom_tickers is None:
+    st.session_state.custom_tickers = _load_custom_tickers()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -491,14 +487,24 @@ with st.sidebar:
     st.markdown(
         '<div class="sidebar-section-title">Instrument</div>', unsafe_allow_html=True
     )
+    ticker_options = TICKERS + [
+        t for t in st.session_state.custom_tickers if t not in TICKERS
+    ]
     selected_ticker = st.selectbox(
-        "Ticker", TICKERS, index=0, label_visibility="collapsed"
+        "Ticker", ticker_options, index=0, label_visibility="collapsed"
     )
     custom_ticker = (
         st.text_input("Custom ticker", placeholder="e.g. NFLX").upper().strip()
     )
     if custom_ticker:
         selected_ticker = custom_ticker
+        if custom_ticker not in ticker_options:
+            if _is_valid_ticker(custom_ticker):
+                st.session_state.custom_tickers.append(custom_ticker)
+                _save_custom_tickers(st.session_state.custom_tickers)
+                st.rerun()
+            else:
+                st.warning(f"'{custom_ticker}' isn't a recognized ticker.")
 
     st.markdown(
         '<div class="sidebar-section-title">Prediction Horizon</div>',
@@ -1197,6 +1203,15 @@ with tab_market:
 # TAB 3 — AI CHAT
 # ═════════════════════════════════════════════════════════════════════════════
 
+
+def render_chat_markdown(text: str) -> str:
+    """Convert LLM-generated markdown (bold, lists, tables, etc.) to HTML
+    so it renders correctly inside the custom chat-bubble div, which is
+    injected via unsafe_allow_html and therefore bypasses Streamlit's
+    native markdown parser."""
+    return md.markdown(text, extensions=["extra", "sane_lists"])
+
+
 with tab_chat:
     top_row, rag_toggle_col = st.columns([5, 1])
     with top_row:
@@ -1219,7 +1234,8 @@ with tab_chat:
             if msg["role"] == "user":
                 history_html += f'<div class="chat-bubble-user"><div class="chat-role">You</div>{msg["content"]}</div>'
             else:
-                history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{msg["content"]}</div>'
+                rendered_content = render_chat_markdown(msg["content"])
+                history_html += f'<div class="chat-bubble-ai"><div class="chat-role">FinSight AI</div>{rendered_content}</div>'
 
     st.markdown(
         f'<div class="chat-scroll-area">{history_html}</div>', unsafe_allow_html=True
@@ -1334,7 +1350,7 @@ with tab_agent:
                     unsafe_allow_html=True,
                 )
                 st.markdown(
-                    f'<div class="narrative-block">{result["response"]}</div>',
+                    f'<div class="narrative-block">{render_chat_markdown(result["response"])}</div>',
                     unsafe_allow_html=True,
                 )
 

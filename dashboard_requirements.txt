@@ -13,6 +13,7 @@ sseclient-py>=1.8.0
 # ── Frontend ───────────────────────────────────────────────────────────────
 streamlit>=1.36.0
 plotly==5.22.0
+markdown>=3.6
 
 # ── Market data (for the price sparkline chart in the Market Data tab) ─────
 yfinance==0.2.40
