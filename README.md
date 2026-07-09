@@ -9,16 +9,17 @@ A production-grade AI system combining financial machine learning, explainable A
 ```
 finsight-ai/
 ├── app/
-│   ├── core/           # Exceptions, logging, security middleware, formatting contracts
-│   ├── api/            # FastAPI schemas, versioned routers
-│   ├── ml/             # Data ingestion, feature engineering, models, training, evaluation, explainability
+│   ├── core/           # Exceptions, logging, security middleware, formatting contracts, cache cleanup
+│   ├── api/            # FastAPI schemas (prediction, portfolio, versioning), versioned routers
+│   ├── ml/             # Data ingestion, feature engineering, model factory, training, versioning, evaluation, explainability
 │   ├── rag/            # RAG pipeline (FAISS + sentence-transformers), LLM chat
 │   ├── agents/         # Agentic AI orchestrator + tools
-│   ├── services/       # PredictionService, ModelSelector, SignalFusionService, NewsIntelligenceService
-│   └── frontend/       # Streamlit dashboard
+│   ├── services/       # PredictionService, ModelSelector, SignalFusionService, NewsIntelligenceService,
+│   │                    #   PortfolioAnalysisService, TickerResolver
+│   └── frontend/       # Streamlit dashboard + portfolio tab
 ├── configs/            # Pydantic settings (env-driven)
-├── scripts/            # Offline training and ingestion CLIs
-├── tests/              # pytest unit tests
+├── scripts/            # Offline training/ingestion CLIs, Redis rate-limit verification, options cache warmer
+├── tests/              # pytest unit tests (400+ tests across ingestion, features, training, services, routes)
 ├── requirements/       # Layered pip requirements (base / ml / dev)
 ├── docker/             # Production Dockerfile (multi-stage)
 ├── Dockerfile.hf       # HuggingFace Spaces Dockerfile
@@ -32,8 +33,8 @@ finsight-ai/
 ### 1. Clone and set up environment
 
 ```bash
-git clone https://github.com/yourname/finsight-ai.git
-cd finsight-ai
+git clone https://github.com/Wenfoongcodes/Finsight-AI.git
+cd Finsight-AI
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements/ml.txt
 ```
@@ -60,9 +61,15 @@ python scripts/ingest_data.py --ticker AAPL --years 3
 python scripts/ingest_data.py --tickers AAPL MSFT GOOGL --no-cache
 ```
 
+Optionally pre-warm the options/implied-volatility cache:
+
+```bash
+python scripts/warm_options_cache.py --tickers AAPL MSFT GOOGL
+```
+
 ### 4. Train a model
 
-Trains with walk-forward validation and persists model artifacts to `data/models/`. Artifacts are named `{TICKER}_{model}_{horizon}.pkl`.
+Trains with walk-forward validation, automated feature selection, and persists versioned model artifacts to `data/models/`.
 
 ```bash
 # Basic training
@@ -121,11 +128,17 @@ See `docker-compose.yml` for the full service configuration. Place TLS certs at 
 | POST | `/api/v1/predict/` | Next-day (or multi-horizon) price direction prediction |
 | POST | `/api/v1/predict/batch` | Batch predictions for multiple tickers |
 | GET | `/api/v1/predict/leaderboard/{ticker}` | Model performance leaderboard for a ticker |
+| POST | `/api/v1/predict/stream` | Server-Sent Events stream of prediction pipeline progress |
 | POST | `/api/v1/train/` | Train a model for a ticker/horizon |
 | POST | `/api/v1/market/summary` | OHLCV summary statistics |
 | POST | `/api/v1/rag/ingest` | Add documents or article URLs to knowledge base |
 | POST | `/api/v1/rag/chat` | Conversational AI assistant (RAG-grounded) |
 | POST | `/api/v1/agent/run` | Agentic AI query execution |
+| POST | `/api/v1/agent/stream` | SSE stream of agent plan → tool-execution → synthesis progress |
+| GET | `/api/v1/versions/{ticker}/{model_name}/{horizon}` | Full version history for a model slot, with metrics per version |
+| POST | `/api/v1/versions/promote` | Promote a specific model version to active (upgrade or rollback) |
+| POST | `/api/v1/versions/rollback` | Roll back to the previously active version |
+| POST | `/api/v1/portfolio/analyze` | Portfolio-level analysis: correlation, mean-variance optimization, efficient frontier, risk attribution, VaR |
 
 Full interactive docs at [http://localhost:8000/docs](http://localhost:8000/docs)
 
@@ -134,14 +147,25 @@ Full interactive docs at [http://localhost:8000/docs](http://localhost:8000/docs
 ## ML Pipeline
 
 ```
-yfinance → OHLCV validation → Feature engineering (RSI, MACD, Bollinger Bands, ATR, OBV, ...)
-→ Walk-forward training (XGBoost / LightGBM / RF / LogReg)
-→ Platt scaling (probability calibration)
-→ Leaderboard-based auto-selection
-→ SHAP explanation → Signal fusion (ML + news) → PredictionResponse
+yfinance → OHLCV validation
+  → Feature engineering (technical indicators, sector/market correlation, options & IV, fundamental/macro)
+  → Automated feature selection (StabilityBasedFeatureSelector)
+  → Walk-forward training (XGBoost / LightGBM / RF / LogReg) with Optuna HPO
+  → Platt scaling (probability calibration)
+  → Versioned artifact persistence (promote / rollback / prune)
+  → Leaderboard-based auto-selection
+  → SHAP explanation → Signal fusion (ML + news) → PredictionResponse
 ```
 
 **Walk-forward validation** is used throughout — no future leakage. Models are evaluated across 5 expanding-window folds. The system automatically trains all candidate models on first prediction request if no artifacts exist, then selects the best by AUC.
+
+**Feature engineering** spans technical indicators (RSI, MACD, Bollinger Bands, ATR, OBV, ...), sector/market correlation against SPDR ETFs, options market data (ATM implied volatility, IV rank, put/call ratios, VIX term structure), and fundamental/macroeconomic features (valuation ratios, profitability, growth, financial health, earnings surprises, macro context).
+
+**Automated feature selection** runs stability-based selection as a pipeline stage integrated into walk-forward training, with results persisted in versioned artifacts and surfaced in the dashboard as a plain-English transparency panel.
+
+**Model versioning** keeps an immutable artifact store per ticker/model/horizon with an `active.json` pointer, exposed via `/api/v1/versions/*` for promotion, rollback, and history inspection.
+
+**Portfolio analysis** layers mean-variance optimization, an efficient frontier, correlation/risk attribution, sector exposure, and Value-at-Risk on top of per-ticker predictions, dispatched concurrently via a `ThreadPoolExecutor` to bound latency.
 
 **Signal fusion** combines the ML prediction with source-weighted, recency-filtered financial news via an LLM synthesis step. Falls back to a deterministic rule-based fusion if the LLM is unavailable.
 
@@ -172,6 +196,21 @@ News recency filtering is horizon-aware: a `1d` prediction only considers articl
 
 ---
 
+## Rate Limiting
+
+Per-IP rate limiting protects the API and can run on two backends, controlled by `RATE_LIMIT_BACKEND`:
+
+- `memory` (default) — in-process sliding window, suitable for single-instance deployments.
+- `redis` — distributed sliding-window limiter implemented in Lua, for multi-instance/production deployments. Requires `REDIS_URL` (or host/port) to be configured.
+
+Verify a Redis-backed limiter with:
+
+```bash
+python scripts/verify_redis_ratelimit.py
+```
+
+---
+
 ## Running Tests
 
 ```bash
@@ -182,7 +221,7 @@ pytest tests/ -v --cov=app --cov-report=term-missing
 pytest tests/test_feature_engineering.py tests/test_data_ingestion.py -v
 ```
 
-Tests cover data ingestion, feature engineering, walk-forward training, model loading, and all FastAPI route handlers.
+Tests cover data ingestion, feature engineering (technical, sector/correlation, options, fundamental), walk-forward training and versioning, model loading, portfolio analysis, signal fusion, the RAG pipeline, the agentic orchestrator, rate limiting, and all FastAPI route handlers.
 
 ---
 
@@ -199,13 +238,14 @@ See `.env.example` for all configurable values.
 | `DEBUG` | Enable debug logging | `false` |
 | `API_KEY_ENABLED` | Gate API behind `X-API-Key` header | `false` |
 | `API_SECRET_KEY` | Shared API secret (generate with `secrets.token_urlsafe(32)`) | — |
-| `RATE_LIMIT_ENABLED` | Per-IP in-memory rate limiting | `true` |
+| `RATE_LIMIT_ENABLED` | Enable per-IP rate limiting | `true` |
 | `RATE_LIMIT_MAX_REQUESTS` | Max requests per window | `120` |
 | `RATE_LIMIT_WINDOW_S` | Rate limit window in seconds | `60` |
+| `RATE_LIMIT_BACKEND` | `memory` or `redis` | `memory` |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, or `*` | `localhost:3000,localhost:8501` |
 | `FRONTEND_API_BASE` | API URL used by Streamlit dashboard | `http://localhost:8000/api/v1` |
 | `FINSIGHT_API_KEY` | API key injected into dashboard requests | — |
-| `MODELS_DIR` | Path for model artifacts | `data/models` |
+| `MODELS_DIR` | Path for versioned model artifacts | `data/models` |
 | `RAW_DATA_DIR` | Path for cached parquet files | `data/raw` |
 | `EMBEDDINGS_DIR` | Path for FAISS index and docs | `data/embeddings` |
 | `CACHE_MAX_AGE_DAYS` | Max age (days) before data cache is refreshed | `1` |
